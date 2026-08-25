@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5. 構造体編集 - StirHex ヘルプ</title>
+<style>
+:root { color-scheme: light; }
+body { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #182433;
+       background: #fff; font-family: "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+h1, h2, h3, h4 { color: #073e69; line-height: 1.4; }
+h1 { border-bottom: 2px solid #19bad2; padding-bottom: .3rem; }
+h2 { margin-top: 2.4rem; border-bottom: 1px solid #cfe2ee; padding-bottom: .2rem; }
+h3 { margin-top: 1.8rem; }
+code { background: #edf4f8; padding: .1rem .3rem; font-family: "Consolas", monospace; }
+pre { background: #edf4f8; padding: .8rem 1rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #cfe2ee; padding: .35rem .7rem; text-align: left; vertical-align: top; }
+th { background: #f0fbfd; }
+blockquote { border-left: .3rem solid #19bad2; margin: 1rem 0; padding: .5rem 1rem;
+             background: #f0fbfd; }
+hr { border: none; border-top: 1px solid #cfe2ee; margin: 2rem 0; }
+a { color: #0b6ba8; }
+nav.toc { background: #f7fafc; border: 1px solid #e0eaf1; padding: .8rem 1.2rem; margin: 1.5rem 0; }
+nav.toc ul { margin: .3rem 0; padding-left: 1.2rem; }
+nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe2ee;
+               display: flex; justify-content: space-between; gap: 1rem; font-size: .95rem; }
+.home { font-size: .95rem; margin-bottom: 1rem; }
+.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#構造体編集バーの使い方">構造体編集バーの使い方</a></li><li><a href="#struct-def-の書式">Struct.def の書式</a></li><li><a href="#使用できるデータ型と既定の基数">使用できるデータ型と既定の基数</a></li><li><a href="#制限事項">制限事項</a></li></ul></nav><h1>5. 構造体編集</h1>
+<h2 id="構造体編集バーの使い方">構造体編集バーの使い方</h2>
+<h3 id="表示と各部の役割">表示と各部の役割</h3>
+<p>[編集]→[構造体編集]または[設定]→[構造体編集]で、構造体編集バーの表示と非表示を切り替えます。起動直後は非表示です。</p>
+<p>バーを表示すると、設定に従って、アクティブな文書のキャレット位置または保存済みの先頭アドレスを基準に構造体を表示します。バーを非表示にすると、データ表示領域に付いていた構造体範囲の青い強調表示も解除されます。</p>
+<p>構造体編集バーには、次の部品があります。</p>
+<div class="wrap"><table><thead><tr><th>部品</th><th>役割</th></tr></thead><tbody><tr><td>[再読込]</td><td>StirHex.exe と同じフォルダーにある Struct.def を読み直します。</td></tr><tr><td>構造体名の選択欄</td><td>読み込んだ構造体の一覧から、表示する構造体を選びます。</td></tr><tr><td>先頭アドレス</td><td>現在の構造体を解釈するデータ位置を、8桁の16進数で表示します。</td></tr><tr><td>[&lt;&lt;] / [&lt;] / [移動] / [&gt;] / [&gt;&gt;]</td><td>構造体の先頭アドレスを移動します。</td></tr><tr><td>メンバー一覧</td><td>[型]、[シンボル名]、[値]の3列で、構造体の内容を表示します。</td></tr><tr><td>[閉じる]</td><td>バーを非表示にします。</td></tr></tbody></table></div>
+<p>構造体を選ぶと、先頭アドレスから構造体のサイズ分を読み込み、メンバー一覧を作成します。構造体の範囲は、データ表示の16進領域でも青く強調されます。</p>
+<p>構造体を選んでいない場合や、アクティブな文書がない場合は、メンバー一覧は空になります。</p>
+<h3 id="メンバー一覧の見方">メンバー一覧の見方</h3>
+<p>[型]には型名、[シンボル名]にはメンバー名、[値]には現在のデータから解釈した値が表示されます。配列や構造体型のメンバーには階層があり、[+]と[-]で展開・折りたたみができます。</p>
+<p>配列は、メンバー名の後ろに要素数が表示され、展開すると各要素が表示されます。2次元配列は、行と要素の2段階で展開されます。</p>
+<p>ネストした構造体も展開できます。構造体型や配列の親行は容器であり、値を直接編集する行ではありません。編集できるのは、実データが存在するスカラー型の葉です。</p>
+<p><code>char</code> または <code>byte</code> の配列は、親行の[値]に文字列として表示されます。親行を編集するのではなく、展開した各要素を編集します。文字列化には現在のキャラクターセットが使われます。</p>
+<p>構造体全体またはメンバーの一部が文書の範囲外になる場合、値は <code>----</code> と表示され、その行は編集できません。移植版では、不足しているデータを保存時に自動追加する処理はありません。</p>
+<p>スカラー行を右クリックすると、[編集]と基数の指定項目が表示されます。配列やネストした構造体の行では、先頭項目が[開く]または[閉じる]に変わります。</p>
+<p>[一括基数指定]では、すべてのスカラー値を[符号付き10進表示]、[符号なし10進表示]、[16進表示]のいずれかで表示できます。[デフォルトに戻す]で型ごとの既定値に戻ります。</p>
+<p>[個別基数指定]では、選択したスカラー行だけの表示基数を変更できます。基数指定は表示だけを変え、文書のバイト列は変更しません。<code>float</code> と <code>double</code> は常に浮動小数表示です。</p>
+<h3 id="値を編集して書き戻す">値を編集して書き戻す</h3>
+<p>編集可能なスカラー行をダブルクリックするか、行を選んで <code>F2</code> または <code>Enter</code> を押すと、[値]の位置に入力欄が表示されます。</p>
+<p>入力欄で <code>Enter</code> を押すと確定し、<code>Esc</code> を押すと取り消します。入力欄からフォーカスを外した場合も、入力内容を確定します。</p>
+<p>確定した値は、選択中の型、バイトサイズ、バイトオーダーに従ってバイト列へ変換されます。変換に成功し、値が現在の値と異なる場合だけ、同じサイズのデータとして文書へ書き戻します。</p>
+<p>構造体バーからの書き戻しは、1回の元に戻す操作の対象です。書き戻し後はデータ表示と構造体バーが更新されます。</p>
+<p>編集禁止中の文書では、値を編集できません。入力が空、不正な数値、範囲外の数値、または構造体の範囲外の場合は、書き戻さずにビープ音を鳴らします。</p>
+<p>整数値は通常10進数で入力します。先頭に <code>0x</code> または <code>0X</code> を付けると16進数になり、10進数の負数には先頭の <code>-</code> を使います。整数入力に前後の空白や、16進数の負号は使えません。</p>
+<p><code>float</code> と <code>double</code> は小数点と符号を使えます。指数表記の <code>e</code>、<code>E</code>、<code>d</code>、<code>D</code> の直後には、<code>+</code> または <code>-</code> が必要です。入力全体が値として解釈できない場合は書き戻されません。</p>
+<h3 id="先頭アドレスを移動する">先頭アドレスを移動する</h3>
+<p>[&lt;&lt;]と[&gt;&gt;]は、現在選んでいる構造体のサイズ単位で先頭アドレスを前後へ移動します。[&lt;]と[&gt;]は1バイト単位で移動します。</p>
+<p>文書の先頭より前、または構造体全体が文書に収まらない位置へは移動できません。境界で移動できない場合はビープ音が鳴ります。</p>
+<p>[移動]を押すと、[先頭アドレスの指定]ダイアログが表示されます。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>内容</th></tr></thead><tbody><tr><td>[アドレス指定]</td><td>数値を入力して先頭アドレスを指定します。</td></tr><tr><td>[マーク登録位置]</td><td>登録済みマークの一覧から先頭アドレスを選びます。</td></tr><tr><td>[アドレス]</td><td>絶対アドレスまたはキャレット位置からの相対値を入力します。</td></tr><tr><td>[アドレスベース]</td><td>[10進]または[16進]を選びます。</td></tr><tr><td>[OK]</td><td>指定を確定します。</td></tr><tr><td>[キャンセル]</td><td>移動を取り消します。</td></tr></tbody></table></div>
+<p>[アドレス指定]では、符号なしの入力は絶対アドレスです。<code>+N</code> は現在のキャレット位置から <code>N</code> バイト後ろ、<code>-N</code> は現在のキャレット位置から <code>N</code> バイト前を指定します。</p>
+<p>アドレス欄は空欄、前後の空白、基数にない文字を受け付けません。16進数では <code>0</code>～<code>9</code> と <code>A</code>～<code>F</code>（大文字・小文字）を使えます。<code>0x</code> の接頭辞は使いません。</p>
+<p>[マーク登録位置]を選ぶと、アドレス入力欄と[アドレスベース]が無効になり、一覧からマークを選べます。マーク行をダブルクリックして確定することもできます。</p>
+<p>アドレスの指定結果が文書の範囲内でも、選択中の構造体全体が収まらない場合は、構造体バー側で移動を拒否します。</p>
+<p>環境設定の[現在位置を構造体編集アドレスに自動設定]を有効にすると、バーを表示したときやアクティブな文書を切り替えたときに、先頭アドレスがその文書のキャレット位置へ同期します。バーを表示している間、キャレット移動へ常時追従する設定ではありません。</p>
+<p>この設定を無効にすると、ドキュメントウィンドウごとに最後に操作した構造体の先頭アドレスを保持します。別のドキュメントウィンドウを初めて表示した場合の基準アドレスは0です。</p>
+<p>「キャレット位置を構造体編集」に割り当てられた操作を実行すると、選択中の構造体の先頭アドレスを現在のキャレット位置へ設定できます。構造体全体が収まらない場合は設定されません。</p>
+<h2 id="struct-def-の書式">Struct.def の書式</h2>
+<h3 id="ファイルの場所と文字コード">ファイルの場所と文字コード</h3>
+<p>Struct.def は StirHex.exe と同じフォルダーに置きます。構造体編集バーの生成時と[再読込]の実行時に、その場所から読み込まれます。</p>
+<p>定義ファイルはCP932（Shift-JIS）のバイト列として扱われます。構造体名とメンバー名に使える文字はASCII範囲に限られるため、構文部分はASCII文字で記述してください。</p>
+<h3 id="最小の定義例">最小の定義例</h3>
+<p>次の例は、この章のために作成した定義です。</p>
+<pre><code class="language-c">/* Header is defined before Record. */
+struct Header {
+    BYTE magic;       // one byte
+    WORD version;
+    char name[8];
+};
+
+struct Record {
+    Header header;
+    dword length;
+};</code></pre>
+<p>構造体は <code>struct</code>、名前、<code>{</code>、メンバー列、<code>}</code> の順に書きます。各メンバーは、型名、メンバー名、必要なら配列指定、<code>;</code> の順に書きます。</p>
+<p>組み込み型では、型名の大文字・小文字が既定の表示基数を決めます。<code>BYTE</code> と <code>WORD</code> のように大文字で書く型は、既定で16進表示になります。</p>
+<p>最後の <code>;</code> まで含めて、C形式の構造体定義として記述してください。1つのメンバー宣言に複数の名前をカンマで並べる書式は使わず、1メンバーずつ宣言します。</p>
+<h3 id="複数の構造体とコメント">複数の構造体とコメント</h3>
+<p>1つのStruct.defに、構造体定義を複数続けて書けます。後で定義した構造体のメンバー型として、先に定義した構造体名を使えます。</p>
+<p>例の <code>Record</code> では、先に定義した <code>Header</code> をメンバー型にしています。<code>struct Header header;</code> のように <code>struct</code> を付けた書き方も受け付けます。</p>
+<p>前方参照は使えません。<code>Record</code> の後に <code>Header</code> を定義する順序では、<code>Header</code> を型として解決できません。</p>
+<p>コメントは、行末までの <code>//</code> コメントと、<code>/*</code> から <code>*/</code> までのブロックコメントに対応しています。<code>#include</code>、<code>typedef</code>、マクロ、文字列リテラルは定義ファイルの書式として扱われません。</p>
+<h2 id="使用できるデータ型と既定の基数">使用できるデータ型と既定の基数</h2>
+<h3 id="組み込み型">組み込み型</h3>
+<div class="wrap"><table><thead><tr><th>型名</th><th>サイズ</th><th>既定の表示</th><th>符号・値の解釈</th></tr></thead><tbody><tr><td><code>char</code> / <code>CHAR</code></td><td>1バイト</td><td>符号付き10進</td><td>符号付き8ビット</td></tr><tr><td><code>byte</code></td><td>1バイト</td><td>符号なし10進</td><td>符号なし8ビット</td></tr><tr><td><code>BYTE</code></td><td>1バイト</td><td>16進</td><td>符号なし8ビット</td></tr><tr><td><code>short</code> / <code>SHORT</code></td><td>2バイト</td><td>10進</td><td>現在の実装では符号なし16ビットとして読み取ります</td></tr><tr><td><code>word</code></td><td>2バイト</td><td>符号なし10進</td><td>符号なし16ビット</td></tr><tr><td><code>WORD</code></td><td>2バイト</td><td>16進</td><td>符号なし16ビット</td></tr><tr><td><code>long</code> / <code>LONG</code></td><td>4バイト</td><td>符号付き10進</td><td>符号付き32ビット</td></tr><tr><td><code>dword</code></td><td>4バイト</td><td>符号なし10進</td><td>符号なし32ビット</td></tr><tr><td><code>DWORD</code></td><td>4バイト</td><td>16進</td><td>符号なし32ビット</td></tr><tr><td><code>float</code> / <code>FLOAT</code></td><td>4バイト</td><td>浮動小数</td><td>単精度浮動小数点</td></tr><tr><td><code>double</code> / <code>DOUBLE</code></td><td>8バイト</td><td>浮動小数</td><td>倍精度浮動小数点</td></tr></tbody></table></div>
+<p>16進表示は <code>0x</code> を付け、型のサイズに合わせて桁をそろえます。<code>float</code> と <code>double</code> は、基数指定を変更しても浮動小数表示のままです。</p>
+<p><code>short</code> と <code>word</code> はどちらも2バイトの値を符号拡張せずに読み取ります。型名と既定の表示基数は別に扱われるため、<code>short</code> という名前でも負の値として表示されるとは限りません。</p>
+<h3 id="配列と構造体型">配列と構造体型</h3>
+<p>配列は1次元または2次元に対応しています。要素数は正の10進整数で指定し、<code>[N]</code> または <code>[N][M]</code> の形式を使います。要素数0、16進表記、符号付き指定は使えません。</p>
+<p>1つの次元の要素数と、2次元配列の要素数の積には、実装上65536という上限があります。配列の各要素はメンバー一覧で展開できます。</p>
+<p>組み込み型ではない型名は、先に定義された構造体名として解決されます。構造体型のサイズは、メンバーのサイズを順に合計して決まります。C言語のアラインメントによる自動パディングは入りません。</p>
+<p>ポインタ、ビットフィールド、<code>unsigned</code> 前置、<code>typedef</code>、組み込み型以外の別名には対応していません。インラインで本体を書くネスト構造体も対応していないため、名前を付けて先に定義してください。</p>
+<p><code>char</code> または <code>byte</code> の1次元配列は、配列要素の展開に加えて、親行の値へ文字列を表示します。文字列表示に使うデータは先頭256バイトまでです。</p>
+<h3 id="バイトオーダー">バイトオーダー</h3>
+<p>構造体バーは、現在の文書で選ばれているバイトオーダーを値の読み取りに使います。2バイト、4バイト、8バイトの整数・浮動小数点値では、[設定]→[バイトオーダー]の選択によって値が変わります。</p>
+<p>値を編集して確定するときも、同じバイトオーダーで文書へ書き戻します。<code>char</code>、<code>byte</code>、文字列として表示する配列の1バイト要素には、バイトオーダーは影響しません。</p>
+<h2 id="制限事項">制限事項</h2>
+<h3 id="識別子に使える文字">識別子に使える文字</h3>
+<p>構造体名とメンバー名は、<code>A</code>～<code>Z</code>、<code>a</code>～<code>z</code>、<code>0</code>～<code>9</code>、<code>_</code> の文字だけで構成できます。字句解析では先頭文字だけを特別扱いしないため、数字や <code>_</code> から始まる名前もトークンとして受け付けます。</p>
+<p>日本語などの非ASCII文字は識別子として認識されません。非ASCIIの構造体名やメンバー名を使うと、定義名の読み込みに失敗するか、メンバー宣言として解釈されません。</p>
+<p>定義名とメンバー名は大文字・小文字を区別します。組み込み型も大文字・小文字を区別し、同じ語でも既定の表示基数が変わる型があります。</p>
+<h3 id="ネストと非対応の宣言">ネストと非対応の宣言</h3>
+<p>名前を付けたネスト構造体と、1次元・2次元配列は対応しています。ネスト構造体は、使用する前に定義を置く必要があります。</p>
+<p>ポインタ、ビットフィールド、<code>typedef</code>、<code>unsigned</code>、関数宣言、複数メンバーを1文にまとめるC形式は対応していません。これらを含む定義をそのまま読み込ませないでください。</p>
+<h3 id="定義ファイルの読み込みエラー">定義ファイルの読み込みエラー</h3>
+<p>構造体編集バーの初回生成時と[再読込]の実行時に、Struct.def は読み直されます。読み込み開始時に、以前の定義は一度クリアされます。</p>
+<p>Struct.def が存在しない場合は、エラーメッセージを表示しません。構造体名の一覧は空になり、構造体編集バーは使用できません。</p>
+<p>Struct.def が存在し、ファイルを開けない場合や、パーサが配列要素数の不正、未定義の型、構造体宣言の不正などをエラーとして返した場合は、エラーメッセージが表示されます。メッセージには読み込み理由が含まれます。</p>
+<p>エラーになる前に読み込まれた定義が保持されている場合は、エラーメッセージの後も、その定義が構造体名の一覧に表示されることがあります。</p>
+<p>空のファイルや、パーサが記号を読み飛ばしてエラーとして返さない書式では、エラーメッセージが表示されない場合があります。未対応の書式を使わず、ここで説明した文法で記述してください。</p><nav class="chapters"><span><a href="04_features.html">&laquo; 4. 機能別解説</a></span><span><a href="06_env.html">6. 環境設定 &raquo;</a></span></nav>
+</body>
+</html>

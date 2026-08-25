@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3. メニューリファレンス - StirHex ヘルプ</title>
+<style>
+:root { color-scheme: light; }
+body { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #182433;
+       background: #fff; font-family: "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+h1, h2, h3, h4 { color: #073e69; line-height: 1.4; }
+h1 { border-bottom: 2px solid #19bad2; padding-bottom: .3rem; }
+h2 { margin-top: 2.4rem; border-bottom: 1px solid #cfe2ee; padding-bottom: .2rem; }
+h3 { margin-top: 1.8rem; }
+code { background: #edf4f8; padding: .1rem .3rem; font-family: "Consolas", monospace; }
+pre { background: #edf4f8; padding: .8rem 1rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #cfe2ee; padding: .35rem .7rem; text-align: left; vertical-align: top; }
+th { background: #f0fbfd; }
+blockquote { border-left: .3rem solid #19bad2; margin: 1rem 0; padding: .5rem 1rem;
+             background: #f0fbfd; }
+hr { border: none; border-top: 1px solid #cfe2ee; margin: 2rem 0; }
+a { color: #0b6ba8; }
+nav.toc { background: #f7fafc; border: 1px solid #e0eaf1; padding: .8rem 1.2rem; margin: 1.5rem 0; }
+nav.toc ul { margin: .3rem 0; padding-left: 1.2rem; }
+nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe2ee;
+               display: flex; justify-content: space-between; gap: 1rem; font-size: .95rem; }
+.home { font-size: .95rem; margin-bottom: 1rem; }
+.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#ファイル">[ファイル]</a></li><li><a href="#編集">[編集]</a></li><li><a href="#検索・移動">[検索・移動]</a></li><li><a href="#設定">[設定]</a></li><li><a href="#ウィンドウ">[ウィンドウ]</a></li><li><a href="#ヘルプ">[ヘルプ]</a></li></ul></nav><h1>3. メニューリファレンス</h1>
+<p>この章では、文書を開いているときに表示されるメニューを説明します。メニュー名と項目名からは、キーボード操作のための記号を省略しています。</p>
+<p>文書を開いていないときは、編集や文書操作に関する項目が減ります。以下の表は、文書を開いているときのメニューの並びです。</p>
+<p>ショートカット欄は、初期状態のキー割り当てで確認できたものだけを記載しています。キーアサインを変更すると、ショートカットは変わることがあります。<code>-</code> は、このメニュー項目に対応する既定のショートカットを確認できなかったことを示します。</p>
+<p>メニュー項目が無効な場合は、必要な文書、選択範囲、検索条件などが満たされていません。無効な項目は、メニュー上で選択できない状態になります。</p>
+<h2 id="ファイル">[ファイル]</h2>
+<p>ファイルの作成、読み込み、保存、印刷を行います。各操作の詳細は <a href="04_features.html">4. 機能別解説</a> で説明します。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[新規作成]</td><td>空の新しい文書を作成します。新規文書は編集可能な状態で開きます。</td><td>-</td></tr><tr><td>[開く]</td><td>ファイルを読み込み、新しいドキュメントウィンドウに表示します。</td><td>-</td></tr><tr><td>[閉じる]</td><td>アクティブなドキュメントウィンドウを閉じます。</td><td><code>Ctrl+F4</code></td></tr><tr><td>[上書き保存]</td><td>現在のファイルへ文書の内容を保存します。</td><td>-</td></tr><tr><td>[名前を付けて保存]</td><td>指定した別のファイルへ文書の内容を保存します。</td><td>-</td></tr><tr><td>[ダンプイメージの保存]</td><td>アドレス、16進データ、文字データを整形したテキストをファイルへ保存します。</td><td>-</td></tr><tr><td>[印刷]</td><td>文書の内容を印刷します。</td><td>-</td></tr><tr><td>[印刷プレビュー]</td><td>印刷時のレイアウトを画面で確認します。</td><td>-</td></tr><tr><td>[範囲を指定して印刷]</td><td>印刷する範囲を指定してから、印刷または印刷プレビューを実行します。</td><td>-</td></tr><tr><td>[プリンタの設定]</td><td>印刷に使用するプリンタを設定します。</td><td>-</td></tr><tr><td>[最新のファイル]</td><td>最近開いたファイルの一覧を表示します。項目を選ぶと、そのファイルを開きます。</td><td>-</td></tr><tr><td>[終了]</td><td>StirHex を終了します。</td><td>-</td></tr></tbody></table></div>
+<p>保存前のバックアップを作成する設定が有効な場合は、保存処理の前にバックアップが作成されます。</p>
+<h2 id="編集">[編集]</h2>
+<p>文書データの編集、クリップボード操作、選択範囲の操作を行います。基本的な編集操作は <a href="04_features.html">4. 機能別解説</a> で説明します。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[元に戻す]</td><td>直前の編集を取り消します。取り消せる編集がない場合、または編集禁止中は無効です。</td><td><code>Ctrl+Z</code></td></tr><tr><td>[やり直し]</td><td>取り消した編集をもう一度適用します。やり直せる編集がない場合、または編集禁止中は無効です。</td><td><code>Ctrl+Shift+Z</code></td></tr><tr><td>[切り取り]</td><td>選択範囲を Windows のクリップボードへテキストとしてコピーすると同時に、内部のバイナリクリップボードにも保持し、その後で選択範囲を削除します。選択範囲がない場合、または編集禁止中は無効です。</td><td><code>Ctrl+X</code></td></tr><tr><td>[コピー]</td><td>選択範囲を Windows のクリップボードへテキストとしてコピーすると同時に、内部のバイナリクリップボードにも保持します。選択範囲がない場合は無効です。</td><td><code>Ctrl+C</code>／<code>Ctrl+Insert</code></td></tr><tr><td>[貼り付け]</td><td>内部のバイナリクリップボードの内容だけを貼り付けます。他のアプリでコピーした内容は貼り付けできません。選択範囲がある場合は選択範囲を置換し、選択範囲がない場合は設定に応じて挿入または上書きします。内部のバイナリクリップボードが空の場合、または編集禁止中は無効です。</td><td><code>Ctrl+V</code>／<code>Shift+Insert</code></td></tr><tr><td>[選択範囲の削除]</td><td>選択範囲のデータを削除します。選択範囲がない場合、または編集禁止中は無効です。</td><td>-</td></tr><tr><td>[選択範囲の初期化]</td><td>選択範囲を指定した1バイトの値で埋めます。選択範囲がない場合、または編集禁止中は無効です。</td><td>-</td></tr><tr><td>[編集前に戻す]</td><td>保存済みファイルを読み直し、保存後の編集内容を破棄します。変更済みでファイル名があり、編集可能な場合に使用できます。</td><td>-</td></tr><tr><td>[全て選択]</td><td>文書全体を選択します。データが空の場合は無効です。</td><td>-</td></tr><tr><td>[構造体編集]</td><td>構造体編集バーを表示または非表示にします。詳細は <a href="05_struct.html">5. 構造体編集</a> で説明します。</td><td>-</td></tr><tr><td>[編集禁止]</td><td>編集可能と編集禁止を切り替えます。ロック状態の文書では無効です。</td><td>-</td></tr></tbody></table></div>
+<p><code>[コピー]</code> は読み取り専用の文書でも、選択範囲があれば使用できます。</p>
+<h2 id="検索・移動">[検索・移動]</h2>
+<p>検索、置換、比較、キャレットの移動、マーク操作を行います。検索と比較の詳細は <a href="04_features.html">4. 機能別解説</a> で説明します。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[検索]</td><td>検索条件を指定するダイアログを開きます。</td><td><code>Ctrl+F</code></td></tr><tr><td>[不一致検索]</td><td>指定したバイト値と一致しないデータを検索します。</td><td>-</td></tr><tr><td>[前検索]</td><td>直前の検索条件を使い、現在位置より前を検索します。直前の検索条件がない場合は検索ダイアログが開きます。</td><td><code>Shift+F3</code></td></tr><tr><td>[次検索]</td><td>直前の検索条件を使い、現在位置より後ろを検索します。直前の検索条件がない場合は検索ダイアログが開きます。</td><td><code>F3</code></td></tr><tr><td>[置換]</td><td>検索したデータを別のデータへ置き換えるダイアログを開きます。編集禁止中は無効です。</td><td>-</td></tr><tr><td>[比較]</td><td>開いている2つの文書を比較し、相違箇所を表示します。文書が2つ未満の場合は無効です。</td><td>-</td></tr><tr><td>[シンクロスクロール]</td><td>複数の文書ウィンドウを登録し、スクロール位置を同期する設定を開きます。</td><td>-</td></tr><tr><td>[データ先頭に移動]</td><td>キャレットをデータの先頭へ移動します。</td><td><code>Ctrl+Home</code></td></tr><tr><td>[指定アドレスへ移動]</td><td>指定したアドレスへキャレットを移動するダイアログを開きます。</td><td>-</td></tr><tr><td>[最終変更箇所へ移動]</td><td>最後に変更した位置へキャレットを移動します。変更履歴がない場合は無効です。</td><td>-</td></tr><tr><td>[データ末尾に移動]</td><td>キャレットをデータの末尾へ移動します。</td><td><code>Ctrl+End</code></td></tr><tr><td>[マークの登録／解除]</td><td>キャレット位置のマークを登録または解除します。キャレットがデータ末尾の後ろにある場合は無効です。</td><td>-</td></tr><tr><td>[前のマーク位置]</td><td>現在位置より前にあるマークへ移動します。マークがない場合は無効です。</td><td>-</td></tr><tr><td>[次のマーク位置]</td><td>現在位置より後ろにあるマークへ移動します。マークがない場合は無効です。</td><td>-</td></tr><tr><td>[全てのマークの解除]</td><td>登録されているマークをすべて解除します。マークがない場合は無効です。</td><td>-</td></tr><tr><td>[マーク一覧]</td><td>登録されているマークを一覧表示します。</td><td>-</td></tr><tr><td>[BGREP]</td><td>指定したフォルダー内のファイルを横断検索し、結果をアウトプットペインへ表示します。</td><td>-</td></tr></tbody></table></div>
+<p>検索結果が見つからない場合の表示は、環境設定で変更できます。</p>
+<h2 id="設定">[設定]</h2>
+<p>表示、入力、各種バー、アプリケーションの動作を設定します。設定ダイアログの詳細は <a href="06_env.html">6. 環境設定</a> と <a href="07_ext.html">7. 拡張子別設定</a> で説明します。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[環境設定]</td><td>ツールバー、ステータスバー、キーアサイン、Undo の動作など、アプリケーション全体の設定を行います。詳細は <a href="06_env.html">6. 環境設定</a> で説明します。</td><td>-</td></tr><tr><td>[拡張子別設定]</td><td>拡張子ごとの表示、入力、編集の初期設定を行います。詳細は <a href="07_ext.html">7. 拡張子別設定</a> で説明します。</td><td>-</td></tr><tr><td>[キャラクターセット]</td><td>文字領域で使用する文字セットのサブメニューを開きます。</td><td>-</td></tr><tr><td>[ASCII]</td><td>文字領域を ASCII として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[SHIFT-JIS]</td><td>文字領域を SHIFT-JIS として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[EUC]</td><td>文字領域を EUC として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[Unicode]</td><td>文字領域を Unicode として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[EBCDIC]</td><td>文字領域を EBCDIC として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[EBCIDK]</td><td>文字領域を EBCIDK として表示し、入力を変換します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[バイトオーダー]</td><td>Unicode の2バイトデータを解釈するバイト順のサブメニューを開きます。</td><td>-</td></tr><tr><td>[リトルエンディアン]</td><td>Unicode の2バイトデータをリトルエンディアンとして解釈します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[ビッグエンディアン]</td><td>Unicode の2バイトデータをビッグエンディアンとして解釈します。文書を開いていない場合は無効です。</td><td>-</td></tr><tr><td>[アウトプット]</td><td>アウトプットペインを表示または非表示にします。表示中はチェック状態になります。</td><td>-</td></tr><tr><td>[ビットイメージ]</td><td>ビットイメージバーを表示または非表示にします。表示中はチェック状態になります。</td><td>-</td></tr><tr><td>[構造体編集]</td><td>構造体編集バーを表示または非表示にします。詳細は <a href="05_struct.html">5. 構造体編集</a> で説明します。</td><td>-</td></tr></tbody></table></div>
+<p>キャラクターセットとバイトオーダーの項目は、アクティブな文書がない場合に無効になります。</p>
+<p>設定項目を変更して確定すると、対応する表示や入力の状態が更新されます。設定の保存先については <a href="01_intro.html">1. はじめに</a> を参照してください。</p>
+<h2 id="ウィンドウ">[ウィンドウ]</h2>
+<p>複数のドキュメントウィンドウの配置を変更します。これらの項目に既定のショートカットは確認できませんでした。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[新しいウィンドウを開く]</td><td>アクティブな文書を新しいドキュメントウィンドウで表示します。</td><td>-</td></tr><tr><td>[重ねて表示]</td><td>開いているドキュメントウィンドウを重ねて配置します。</td><td>-</td></tr><tr><td>[上下に並べて表示]</td><td>開いているドキュメントウィンドウを上下に並べて配置します。</td><td>-</td></tr><tr><td>[左右に並べて表示]</td><td>開いているドキュメントウィンドウを左右に並べて配置します。</td><td>-</td></tr><tr><td>[アイコンの整列]</td><td>最小化されたドキュメントウィンドウのアイコンを整列します。</td><td>-</td></tr><tr><td>[ウィンドウサイズ補正]</td><td>アクティブなドキュメントウィンドウの幅を表示内容に合わせて補正します。</td><td>-</td></tr></tbody></table></div>
+<h2 id="ヘルプ">[ヘルプ]</h2>
+<p>ヘルプの表示とバージョン情報を確認します。</p>
+<div class="wrap"><table><thead><tr><th>項目</th><th>説明</th><th>既定のショートカット</th></tr></thead><tbody><tr><td>[ヘルプの表示]</td><td>実行ファイルと同じフォルダーにある <code>help\index.html</code> を開きます。ファイルがない場合はエラーメッセージを表示します。</td><td><code>F1</code></td></tr><tr><td>[バージョン情報]</td><td>StirHex のバージョン、著作権表示、非公式の移植版であることを表示します。</td><td>-</td></tr></tbody></table></div><nav class="chapters"><span><a href="02_basics.html">&laquo; 2. 基本操作</a></span><span><a href="04_features.html">4. 機能別解説 &raquo;</a></span></nav>
+</body>
+</html>

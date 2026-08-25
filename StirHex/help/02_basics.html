@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2. 基本操作 - StirHex ヘルプ</title>
+<style>
+:root { color-scheme: light; }
+body { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #182433;
+       background: #fff; font-family: "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+h1, h2, h3, h4 { color: #073e69; line-height: 1.4; }
+h1 { border-bottom: 2px solid #19bad2; padding-bottom: .3rem; }
+h2 { margin-top: 2.4rem; border-bottom: 1px solid #cfe2ee; padding-bottom: .2rem; }
+h3 { margin-top: 1.8rem; }
+code { background: #edf4f8; padding: .1rem .3rem; font-family: "Consolas", monospace; }
+pre { background: #edf4f8; padding: .8rem 1rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #cfe2ee; padding: .35rem .7rem; text-align: left; vertical-align: top; }
+th { background: #f0fbfd; }
+blockquote { border-left: .3rem solid #19bad2; margin: 1rem 0; padding: .5rem 1rem;
+             background: #f0fbfd; }
+hr { border: none; border-top: 1px solid #cfe2ee; margin: 2rem 0; }
+a { color: #0b6ba8; }
+nav.toc { background: #f7fafc; border: 1px solid #e0eaf1; padding: .8rem 1.2rem; margin: 1.5rem 0; }
+nav.toc ul { margin: .3rem 0; padding-left: 1.2rem; }
+nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe2ee;
+               display: flex; justify-content: space-between; gap: 1rem; font-size: .95rem; }
+.home { font-size: .95rem; margin-bottom: 1rem; }
+.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#画面構成">画面構成</a></li><li><a href="#表示領域とキャレット移動">表示領域とキャレット移動</a></li><li><a href="#データの入力">データの入力</a></li><li><a href="#上書きモードと挿入モード">上書きモードと挿入モード</a></li><li><a href="#元に戻すとやり直し-保存">元に戻すとやり直し、保存</a></li></ul></nav><h1>2. 基本操作</h1>
+<p>この章では、StirHex の画面の見方と、データを確認・編集する基本操作を説明します。</p>
+<h2 id="画面構成">画面構成</h2>
+<p>StirHex のメインウィンドウは、複数のドキュメントウィンドウを扱う MDI 構成です。主な部分と表示の切り替え方法は次のとおりです。</p>
+<div class="wrap"><table><thead><tr><th>部分</th><th>表示する内容</th><th>表示の切り替え</th></tr></thead><tbody><tr><td>タイトルバー</td><td>アプリケーション名とアクティブなファイル名を表示します。変更中は末尾に <code>*</code> が付きます。</td><td>ファイルを開くと表示されます。</td></tr><tr><td>メニューバー</td><td><code>ファイル</code>、<code>編集</code>、<code>検索・移動</code>、<code>設定</code>、<code>ウィンドウ</code>、<code>ヘルプ</code> を表示します。</td><td>常に表示されます。</td></tr><tr><td>ツールバー</td><td>ファイル操作、キャレット移動、編集、検索などのコマンドボタンを表示します。</td><td><code>[設定]→[環境設定]</code> の <code>ツールバーの表示</code> で切り替えます。</td></tr><tr><td>ステータスバー</td><td>メッセージ、キャレット位置、変更状態、編集モード、データサイズ、文字セットなどを表示します。</td><td><code>[設定]→[環境設定]</code> の <code>ステータスバーの表示</code> で切り替えます。</td></tr><tr><td>ドキュメントウィンドウ</td><td>アドレス、16進データ、文字データを表示・編集します。</td><td><code>[ファイル]→[新規作成]</code> または <code>[ファイル]→[開く]</code> で開き、<code>[ファイル]→[閉じる]</code> で閉じます。</td></tr><tr><td>アウトプットペイン</td><td><code>BGREP</code> の検索結果を一覧表示します。</td><td><code>[設定]→[アウトプット]</code> で表示／非表示を切り替えます。初期状態は非表示です。</td></tr><tr><td>ビットイメージバー</td><td>文書のバイト列を、1バイト1ピクセルの画像として表示します。</td><td><code>[設定]→[ビットイメージ]</code> で表示／非表示を切り替えます。初期状態は非表示です。</td></tr><tr><td>構造体編集バー</td><td>構造体名、先頭アドレス、移動ボタン、メンバー一覧、構造体編集ステータスを表示します。</td><td><code>[編集]→[構造体編集]</code> または <code>[設定]→[構造体編集]</code> で表示／非表示を切り替えます。初期状態は非表示です。</td></tr></tbody></table></div>
+<p>ツールバーとステータスバーは、初期設定では表示されます。表示項目の並びは、同じ <code>環境設定</code> の <code>ツールバー</code> ページと <code>ステータスバー</code> ページで変更できます。</p>
+<p>ドキュメントウィンドウのタイトルは通常ファイル名です。<code>ドキュメントのフルパス表示</code> を有効にすると、タイトルにフルパスが表示されます。変更後に保存すると、タイトル末尾の <code>*</code> が消えます。</p>
+<h2 id="表示領域とキャレット移動">表示領域とキャレット移動</h2>
+<p>ドキュメントウィンドウのデータ領域は、左からアドレス領域、16進領域、文字領域の3つに分かれます。</p>
+<ul><li>アドレス領域には、各行の先頭バイトのアドレスを表示します。見出しは <code>ADDRESS</code> です。</li><li>16進領域には、1バイトを2桁の16進数で表示します。上部には列番号のルーラーがあります。</li><li>文字領域には、現在の文字セットで解釈した文字を表示します。上部には文字列側のルーラーがあります。</li></ul>
+<p>アドレス領域は表示専用です。キャレットを置いて入力できる領域は、16進領域と文字領域です。アクティブな領域はキャレットの形と入力先に反映されます。</p>
+<h3 id="既定のキャレット操作">既定のキャレット操作</h3>
+<p>次の表は、初期状態のキー割り当てでの動作です。</p>
+<div class="wrap"><table><thead><tr><th>キー</th><th>動作</th></tr></thead><tbody><tr><td><code>←</code>／<code>→</code></td><td>1バイト左／右へ移動します。</td></tr><tr><td><code>↑</code>／<code>↓</code></td><td>同じ列の前／次の行へ移動します。</td></tr><tr><td><code>Home</code></td><td>現在行の先頭バイトへ移動します。</td></tr><tr><td><code>End</code></td><td>現在行の末尾バイトへ移動します。</td></tr><tr><td><code>PageUp</code></td><td>表示できる行数分、上へ移動します。</td></tr><tr><td><code>PageDown</code></td><td>表示できる行数分、下へ移動します。</td></tr><tr><td><code>Tab</code></td><td>アクティブな入力領域を16進領域と文字領域の間で切り替えます。</td></tr></tbody></table></div>
+<p><code>Home</code>、<code>End</code>、<code>Insert</code>、Shift 付きの移動キーはキーアサインを経由します。キーアサインを変更した場合、これらのキーの動作は変わります。この章の説明は既定のキー割り当てに基づきます。</p>
+<p>キー割り当ては <code>[設定]→[環境設定]</code> の <code>キーアサイン</code> ページで変更できます。 <code>初期設定</code> を使うと、既定のキー割り当てに戻せます。</p>
+<h3 id="範囲選択">範囲選択</h3>
+<p>既定のキー割り当てでは、次の操作で範囲を選択できます。</p>
+<ul><li><code>Shift+←</code>／<code>Shift+→</code> で、隣のバイトまで選択を広げます。</li><li><code>Shift+↑</code>／<code>Shift+↓</code> で、同じ列の前後の行まで選択を広げます。</li><li><code>Shift+Home</code>／<code>Shift+End</code> で、現在行の先頭／末尾まで選択を広げます。</li><li>16進領域または文字領域をクリックすると、そのバイトへキャレットが移動し、クリックした領域がアクティブになります。</li><li><code>Shift+クリック</code> では、現在の選択のアンカーからクリック位置まで選択を広げます。</li><li>左ボタンを押したままドラッグすると、通過した範囲を選択します。表示領域の端へドラッグすると、端方向へスクロールします。</li></ul>
+<p>選択を広げない通常の移動では、既存の選択は解除されます。選択中のデータは、設定により16進領域と文字領域の両方、またはアクティブな領域だけが反転表示されます。</p>
+<h2 id="データの入力">データの入力</h2>
+<p>入力は、アクティブな領域によって処理が変わります。編集禁止中は、どちらの領域でも入力できません。</p>
+<h3 id="16進領域への入力">16進領域への入力</h3>
+<p>16進領域では <code>0</code>～<code>9</code>、<code>A</code>～<code>F</code>、<code>a</code>～<code>f</code> を入力できます。それ以外の文字は入力されず、ビープ音が鳴ります。</p>
+<ol><li>最初の16進数字を入力すると、上位ニブルを書き込みます。下位ニブルは <code>0</code> になります。</li><li>キャレットはそのバイトにとどまり、下位ニブルの入力待ちになります。</li><li>次の16進数字を入力すると、下位ニブルを合成して1バイトを確定します。</li><li>バイトの確定後、キャレットは次のバイトへ進みます。</li></ol>
+<p>入力途中でキャレットを移動したり、別の領域をクリックしたりすると、下位ニブルの待機状態は解除されます。</p>
+<p>選択中に16進数字を入力すると、選択範囲は上位ニブルを入力した1バイトに置き換わり、下位ニブル待ちになります。</p>
+<h3 id="文字領域への入力">文字領域への入力</h3>
+<p>文字領域では、入力された文字を現在のキャラクターセットに合わせたバイト列へ変換してから、挿入または上書きします。文字が2バイトへ変換される場合は、2バイトのデータとして扱います。</p>
+<p>IME で確定した全角文字は、文字領域で受け付けます。Unicode の入力文字は入力境界で CP932 のコードへ変換し、その後に現在のキャラクターセットへ変換します。16進領域で全角文字を確定すると、入力は受け付けられずビープ音が鳴ります。</p>
+<p>キャラクターセットは、次のメニューから文書ごとに選択します。</p>
+<p><code>[設定]→[キャラクターセット]</code></p>
+<p>選択できる項目は <code>ASCII</code>、<code>SHIFT-JIS</code>、<code>EUC</code>、<code>Unicode</code>、 <code>EBCDIC</code>、<code>EBCIDK</code> です。キャラクターセットを変更すると、文字領域の表示と文字入力の変換方法が変わります。ファイルを開いた直後の入力領域は、拡張子別設定の <code>ファイルオープン時に文字入力モードとする</code> で決まります。</p>
+<h2 id="上書きモードと挿入モード">上書きモードと挿入モード</h2>
+<p>入力時の編集モードには、上書きモードと挿入モードがあります。</p>
+<div class="wrap"><table><thead><tr><th>モード</th><th>入力時の動作</th></tr></thead><tbody><tr><td>上書き</td><td>キャレット位置の既存データを、入力したデータで置き換えます。</td></tr><tr><td>挿入</td><td>キャレット位置に入力したデータを挿入し、既存データを後ろへ移動します。</td></tr></tbody></table></div>
+<p>ファイルを開くときの初期モードは、拡張子別設定の <code>ファイルオープン時に挿入モードとする</code> で決まります。初期値では上書きモードです。既定のキー割り当てでは <code>Insert</code> でモードを切り替えます。</p>
+<p>現在のモードはステータスバーに <code>上書</code> または <code>挿入</code> と表示されます。モードを切り替えると、キャレットの形も切り替わります。</p>
+<p>上書きモードでデータ末尾へ入力する場合は、<code>上書きモード時の末尾自動挿入</code> の設定が適用されます。有効な場合は末尾への入力が追加になります。無効な場合は、末尾では入力を拒否し、末尾をまたぐ多バイト入力は収まる分だけ上書きします。</p>
+<p><code>Backspace</code> と <code>Delete</code> の削除動作は、上書きモードと挿入モードで共通です。</p>
+<div class="wrap"><table><thead><tr><th>キー</th><th>動作</th></tr></thead><tbody><tr><td><code>Delete</code></td><td>キャレット位置の1バイトを削除します。キャレットは同じ位置に残ります。</td></tr><tr><td><code>Backspace</code></td><td>キャレット直前の1バイトを削除し、キャレットを1バイト前へ移動します。</td></tr></tbody></table></div>
+<p>選択中は、<code>Delete</code> と <code>Backspace</code> のどちらでも選択範囲を削除し、範囲の先頭へキャレットを移動します。データの先頭で <code>Backspace</code>、末尾で <code>Delete</code> を押した場合は削除されず、ビープ音が鳴ります。</p>
+<h2 id="元に戻すとやり直し-保存">元に戻すとやり直し、保存</h2>
+<h3 id="元に戻すとやり直し">元に戻すとやり直し</h3>
+<p><code>[編集]→[元に戻す]</code> は直前の編集を取り消します。 <code>[編集]→[やり直し]</code> は、取り消した編集をもう一度適用します。</p>
+<p>Undo/Redo の対象は、入力、1バイトの挿入・上書き・削除、範囲削除、範囲置換、範囲の初期化、貼り付けなど、データを変更する操作です。Undo と Redo は逆操作の履歴をそれぞれ保持します。</p>
+<p>Undo 中は逆操作を Redo 側へ、Redo 中は逆操作を Undo 側へ積みます。新しい編集を行うと、その時点より後の Redo 履歴は破棄されます。</p>
+<p>Undo/Redo が保持する退避データには上限があります。初期値は 256 MB です。現在の版では、この上限を環境設定画面から変更できません。上限を超えた場合は、古い Undo 履歴から、次に古い Redo 履歴から破棄します。各履歴の最後の1件は残します。この上限値は現在の環境設定画面には公開されていません。</p>
+<p>1回の操作だけで必要な退避量が上限を超える場合、移植版では確認メッセージを表示します。続行すると、その操作は元に戻せず、既存の Undo/Redo 履歴も破棄されます。キャンセルするとデータは変更されません。</p>
+<h3 id="編集前に戻す">編集前に戻す</h3>
+<p><code>[編集]→[編集前に戻す]</code> は、保存済みファイルを読み直して、保存後の編集内容を破棄します。変更済みで、ファイル名があり、編集可能な場合に実行できます。実行前に確認メッセージが表示されます。</p>
+<h3 id="保存">保存</h3>
+<p><code>[ファイル]→[上書き保存]</code> は現在のファイルへ保存します。 <code>[ファイル]→[名前を付けて保存]</code> は、指定した別のファイルへ保存します。</p>
+<p>保存に成功すると、現在の内容が保存点になり、変更状態が解除されます。タイトルバーの <code>*</code> も消えます。 <code>[設定]→[環境設定]</code> の <code>保存時にアンドゥバッファをクリアする</code> を有効にすると、保存成功時に Undo/Redo 履歴もクリアされます。</p>
+<h3 id="編集禁止モード">編集禁止モード</h3>
+<p><code>[編集]→[編集禁止]</code> で編集可能と編集禁止を切り替えます。編集禁止中はステータスバーに <code>編禁</code> と表示され、入力、削除、貼り付け、Undo、Redo などのデータ変更操作は実行できません。</p>
+<p>ファイルを開くときの初期状態は、拡張子別設定の <code>ファイルオープン時に編集禁止とする</code> で決まります。ロック状態の文書は、<code>編集禁止</code> で切り替えられません。</p><nav class="chapters"><span><a href="01_intro.html">&laquo; 1. はじめに</a></span><span><a href="03_menu.html">3. メニューリファレンス &raquo;</a></span></nav>
+</body>
+</html>

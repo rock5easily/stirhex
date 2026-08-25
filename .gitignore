@@ -1,0 +1,24 @@
+# Build artifacts
+tests/bin/
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# Visual C++ build output / IDE
+StirHex/Debug/
+StirHex/Release/
+StirHex/x64/
+.vs/
+*.user
+*.aps
+*.ipch
+*.tlog
+
+# Python / uv / pytest
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+reports/

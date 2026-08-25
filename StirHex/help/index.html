@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StirHex ヘルプ</title>
+<style>
+:root { color-scheme: light; }
+body { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #182433;
+       background: #fff; font-family: "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+h1, h2, h3, h4 { color: #073e69; line-height: 1.4; }
+h1 { border-bottom: 2px solid #19bad2; padding-bottom: .3rem; }
+h2 { margin-top: 2.4rem; border-bottom: 1px solid #cfe2ee; padding-bottom: .2rem; }
+h3 { margin-top: 1.8rem; }
+code { background: #edf4f8; padding: .1rem .3rem; font-family: "Consolas", monospace; }
+pre { background: #edf4f8; padding: .8rem 1rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #cfe2ee; padding: .35rem .7rem; text-align: left; vertical-align: top; }
+th { background: #f0fbfd; }
+blockquote { border-left: .3rem solid #19bad2; margin: 1rem 0; padding: .5rem 1rem;
+             background: #f0fbfd; }
+hr { border: none; border-top: 1px solid #cfe2ee; margin: 2rem 0; }
+a { color: #0b6ba8; }
+nav.toc { background: #f7fafc; border: 1px solid #e0eaf1; padding: .8rem 1.2rem; margin: 1.5rem 0; }
+nav.toc ul { margin: .3rem 0; padding-left: 1.2rem; }
+nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe2ee;
+               display: flex; justify-content: space-between; gap: 1rem; font-size: .95rem; }
+.home { font-size: .95rem; margin-bottom: 1rem; }
+.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>StirHex ヘルプ</h1><nav class="toc"><ul><li><a href="01_intro.html">1. はじめに</a><ul><li><a href="01_intro.html#stirhex-とは">StirHex とは</a></li><li><a href="01_intro.html#動作環境">動作環境</a></li><li><a href="01_intro.html#同梱ファイル">同梱ファイル</a></li><li><a href="01_intro.html#インストールとアンインストール">インストールとアンインストール</a></li></ul></li><li><a href="02_basics.html">2. 基本操作</a><ul><li><a href="02_basics.html#画面構成">画面構成</a></li><li><a href="02_basics.html#表示領域とキャレット移動">表示領域とキャレット移動</a></li><li><a href="02_basics.html#データの入力">データの入力</a></li><li><a href="02_basics.html#上書きモードと挿入モード">上書きモードと挿入モード</a></li><li><a href="02_basics.html#元に戻すとやり直し-保存">元に戻すとやり直し、保存</a></li></ul></li><li><a href="03_menu.html">3. メニューリファレンス</a><ul><li><a href="03_menu.html#ファイル">[ファイル]</a></li><li><a href="03_menu.html#編集">[編集]</a></li><li><a href="03_menu.html#検索・移動">[検索・移動]</a></li><li><a href="03_menu.html#設定">[設定]</a></li><li><a href="03_menu.html#ウィンドウ">[ウィンドウ]</a></li><li><a href="03_menu.html#ヘルプ">[ヘルプ]</a></li></ul></li><li><a href="04_features.html">4. 機能別解説</a><ul><li><a href="04_features.html#ファイルの操作">ファイルの操作</a></li><li><a href="04_features.html#カーソル移動と選択範囲">カーソル移動と選択範囲</a></li><li><a href="04_features.html#データの編集">データの編集</a></li><li><a href="04_features.html#検索と置換">検索と置換</a></li><li><a href="04_features.html#表示の切り替え">表示の切り替え</a></li><li><a href="04_features.html#印刷">印刷</a></li><li><a href="04_features.html#その他の機能">その他の機能</a></li></ul></li><li><a href="05_struct.html">5. 構造体編集</a><ul><li><a href="05_struct.html#構造体編集バーの使い方">構造体編集バーの使い方</a></li><li><a href="05_struct.html#struct-def-の書式">Struct.def の書式</a></li><li><a href="05_struct.html#使用できるデータ型と既定の基数">使用できるデータ型と既定の基数</a></li><li><a href="05_struct.html#制限事項">制限事項</a></li></ul></li><li><a href="06_env.html">6. 環境設定</a><ul><li><a href="06_env.html#編集1">編集1</a></li><li><a href="06_env.html#編集2">編集2</a></li><li><a href="06_env.html#ファイル">ファイル</a></li><li><a href="06_env.html#ウィンドウ">ウィンドウ</a></li><li><a href="06_env.html#キーアサイン">キーアサイン</a></li><li><a href="06_env.html#ユーザーメニュー">ユーザーメニュー</a></li><li><a href="06_env.html#ツールバー">ツールバー</a></li><li><a href="06_env.html#ステータスバー">ステータスバー</a></li></ul></li><li><a href="07_ext.html">7. 拡張子別設定</a><ul><li><a href="07_ext.html#拡張子別設定とは">拡張子別設定とは</a></li><li><a href="07_ext.html#一覧ダイアログの操作">一覧ダイアログの操作</a></li><li><a href="07_ext.html#拡張子の指定">拡張子の指定</a></li><li><a href="07_ext.html#表示状態">表示状態</a></li><li><a href="07_ext.html#オープン時のモード">オープン時のモード</a></li><li><a href="07_ext.html#キャラクターセットとバイトオーダー">キャラクターセットとバイトオーダー</a></li><li><a href="07_ext.html#色・フォント">色・フォント</a></li><li><a href="07_ext.html#設定が適用されるタイミング">設定が適用されるタイミング</a></li></ul></li><li><a href="08_differences.html">8. 原版との差異</a><ul><li><a href="08_differences.html#動作環境の違い">動作環境の違い</a></li><li><a href="08_differences.html#設定の保存先">設定の保存先</a></li><li><a href="08_differences.html#変更された挙動">変更された挙動</a></li><li><a href="08_differences.html#未実装の機能">未実装の機能</a></li></ul></li><li><a href="09_credits.html">9. クレジット・免責</a><ul><li><a href="09_credits.html#stirhexの位置づけ">StirHexの位置づけ</a></li><li><a href="09_credits.html#原版のクレジット">原版のクレジット</a></li><li><a href="09_credits.html#stirhex-projectの表示">StirHex Projectの表示</a></li><li><a href="09_credits.html#無保証・免責">無保証・免責</a></li><li><a href="09_credits.html#権利関係の確認先">権利関係の確認先</a></li></ul></li></ul></nav>
+</body>
+</html>

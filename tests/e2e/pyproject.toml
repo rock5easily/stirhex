@@ -1,0 +1,21 @@
+[project]
+name = "stirling-e2e"
+version = "0.1.0"
+description = "E2E and Golden Comparison Tests for Stirling (Original vs Porting)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0.0",
+    "pytest-html>=4.2.0",
+    "pywinauto>=0.6.9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-v --junitxml=reports/report.xml --html=reports/report.html --self-contained-html"
+markers = [
+    "original: Tests targeting Original Stirling (analysis_target/Stirling.exe)",
+    "ported: Tests targeting StirHex (porting/StirHex)",
+    "golden: Golden comparison tests verifying byte-identical output between Original and Ported",
+]
