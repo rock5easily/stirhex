@@ -257,8 +257,6 @@ CStirlingView::CStirlingView()
     m_clrAddrText   = s.addrText;    m_clrAddrBack   = s.addrBack;
     m_clrDataText   = s.dataText;    m_clrDataBack   = s.dataBack;
     s.BuildByteColorTable(m_byteColorTable);
-    // オープン時の入力ペイン既定（原 158「文字入力モードとする」）: ON なら文字ペイン。
-    m_activePane   = s.openCharMode ? 1 : 0;
 }
 
 CStirlingView::~CStirlingView() {}
@@ -299,6 +297,10 @@ void CStirlingView::ReloadSettings() {
         CClientDC dc(this);
         EnsureFont(&dc);
     }
+
+    // 拡張子別設定の変更で1行バイト数やフォントが変わった場合も、初回表示時と同じく
+    // 子フレーム幅を再計算する（一覧確定後の開いている文書へ反映）。
+    FitFrameWidth();
 
     // 1行バイト数が変わるとキャレットの行/列が変わる。絶対位置は不変だが範囲だけ丸める。
     const stirling::FileOffset total = Total();
@@ -815,8 +817,10 @@ void CStirlingView::DrawContent(CDC* pDC) {
 
 // 文書接続後に呼ばれる。この文書の拡張子で解決された設定をビューへ反映する。
 void CStirlingView::OnInitialUpdate() {
-    ReloadSettings();   // doc の Settings() を取り込み、メトリクス/色/スクロールを確定
-    FitFrameWidth();    // 既定と異なる設定（1行バイト数/フォント）でも幅を合わせる
+    // 新規ビューの初期ペインだけは、この文書に解決された拡張子別設定を適用する。
+    m_activePane = CurSettings().openCharMode ? 1 : 0;
+    // ReloadSettings() からは変更せず、既存ビューの入力ペインを維持する。
+    ReloadSettings();   // doc の Settings() と幅を取り込み、メトリクス/色/スクロールを確定
     CView::OnInitialUpdate();
     // キャレット位置の自動復元（原ヘルプ caretAutoRestore）。設定ONかつパスありの文書で、
     //   前回終了時に記録したキャレット位置があれば復元する（データ範囲へクランプ）。

@@ -590,6 +590,46 @@ static void TestSearchBasic() {
     CHECK(!c.SearchPattern(no, 2, &pos, BlockCursor::kForward, 0, 0), "no match");
 }
 
+// Issue #74: EOF は Seek では追記位置として有効だが、GetByteAt/SearchPattern の読取り範囲外。
+// 特に満杯ブロックの EOF を読むと確保領域外アクセスになるため、境界で失敗することを固定する。
+static void TestSearchEofBounds() {
+    std::printf("TestSearchEofBounds\n");
+    BlockList list;
+    unsigned char* data = new unsigned char[kBlockCapacity];
+    std::memset(data, 0x41, kBlockCapacity);
+    data[kBlockCapacity - 1] = 0x5A;
+    list.AppendBlock(data, kBlockCapacity, kBlockCapacity);
+
+    const FileOffset total = list.GetTotalLength();
+    FileOffset abs = -1;
+    BlockCursor eofCursor(&list);
+    CHECK(eofCursor.Seek(total, BlockCursor::kBegin, &abs), "Seek accepts EOF append position");
+    CHECK(abs == total, "Seek resolves EOF append position");
+
+    unsigned char value = 0xCC;
+    CHECK(!eofCursor.GetByteAt(total, &value), "GetByteAt rejects resolved EOF");
+    CHECK(value == 0xCC, "GetByteAt leaves output unchanged at EOF");
+
+    BlockCursor c(&list);
+    CHECK(c.Seek(total - 1, BlockCursor::kBegin, &abs), "Seek resolves last byte");
+    CHECK(c.GetByteAt(total - 1, &value) && value == 0x5A, "GetByteAt reads last byte");
+    CHECK(!c.GetByteAt(total, &value), "GetByteAt rejects EOF after a valid read");
+    CHECK(!c.GetByteAt(total + 1, &value), "GetByteAt rejects past EOF");
+    CHECK(c.GetByteAt(total - 1, &value) && value == 0x5A,
+          "GetByteAt remains usable after rejected EOF reads");
+
+    const unsigned char one[] = {0x5A};
+    FileOffset found = -1;
+    CHECK(!c.SearchPattern(one, 1, &found, BlockCursor::kForward, total, 0),
+          "forward search rejects EOF start");
+    CHECK(!c.SearchPattern(one, 1, &found, BlockCursor::kBackward, total, 0),
+          "backward single-byte search rejects EOF start");
+    CHECK(!c.SearchPattern(one, 1, &found, BlockCursor::kForward, total + 1, 0),
+          "forward search rejects start past EOF");
+    CHECK(!c.SearchPattern(one, 1, &found, BlockCursor::kBackward, total + 1, 0),
+          "backward search rejects start past EOF");
+}
+
 // 不一致検索（SearchMismatch）: 指定バイトに一致しない最初の位置を前方/後方で検出。
 static void TestSearchMismatch() {
     std::printf("TestSearchMismatch\n");
@@ -2306,6 +2346,7 @@ int main() {
     TestFileRoundTrip();
     TestLoadEditSave();
     TestSearchBasic();
+    TestSearchEofBounds();
     TestSearchMismatch();
     TestSearchAcrossBlocks();
     TestSearchFuzz();

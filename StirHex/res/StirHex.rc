@@ -239,7 +239,7 @@ FONT 9, "ＭＳ Ｐゴシック"
 BEGIN
   CONTROL 128, -1, "STATIC", 0x50000003, 8, 9, 24, 24
   CONTROL "BinaryEditor  StirHex", 1027, "STATIC", 0x50020001, 38, 8, 164, 10
-  CONTROL "Version 1.0.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
+  CONTROL "Version 1.0.1", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
   CONTROL "Copyright (C) 2026 StirHex Project", 1093, "STATIC", 0x50020000, 38, 34, 164, 8
   CONTROL "https://github.com/rock5easily/stirhex", 1100, "STATIC", 0x50020000, 38, 47, 164, 8
   CONTROL "", -1, "STATIC", 0x50000010, 8, 63, 194, 1

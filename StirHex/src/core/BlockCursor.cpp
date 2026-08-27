@@ -454,7 +454,6 @@ bool BlockCursor::GetByteAt(FileOffset pos, unsigned char* out) {
     if (curNode_ == nullptr) {
         return false;
     }
-    unsigned char* data = curNode_->data;
     int used = curNode_->usedLen;       // 原 local_c
     FileOffset delta = pos - curAbs_;   // 原 iVar1（符号付き。64bit 化で 2GB 超の差分も表現可）
     if (curAbs_ < pos) {
@@ -462,24 +461,23 @@ bool BlockCursor::GetByteAt(FileOffset pos, unsigned char* out) {
         if (delta < used - curOffset_) {
             // 0 < delta < used - curOffset_ <= capacity のため int に収まる。
             curOffset_ += static_cast<int>(delta);
-            *out = data[curOffset_];
         } else {
-            if (!Seek(pos, kBegin, nullptr)) return false;
-            *out = curNode_->data[curOffset_];
+            if (!Seek(pos, kBegin, &curAbs_)) return false;
         }
     } else if (pos < curAbs_) {
         // 後退
         if (curOffset_ + delta < 1) {
-            if (!Seek(pos, kBegin, nullptr)) return false;
-            *out = curNode_->data[curOffset_];
+            if (!Seek(pos, kBegin, &curAbs_)) return false;
         } else {
             // 1 <= curOffset_ + delta かつ delta < 0 のため int に収まる。
             curOffset_ += static_cast<int>(delta);
-            *out = data[curOffset_];
         }
-    } else {
-        *out = data[curOffset_];
     }
+
+    // Seek は追記位置として EOF (curOffset_ == usedLen) を許容するが、読取りは実データ内のみ。
+    // 検索の内側ループから呼ばれるため、総長の線形走査ではなくノード内境界で判定する。
+    if (curOffset_ < 0 || curOffset_ >= curNode_->usedLen) return false;
+    *out = curNode_->data[curOffset_];
     curAbs_ = pos;
     return true;
 }
@@ -499,12 +497,16 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
     if (patternLen <= 0) {
         return false;  // 無効入力（原は patternLen>=1 前提）
     }
+    const FileOffset total = list_->GetTotalLength();
+    if (start < 0 || start >= total) {
+        return false;  // GetByteAt が参照できる実データ位置のみを開始位置として受け付ける
+    }
     // 終端未指定(0)かつ前方は全長。
     if (direction == kForward && end == 0) {
-        end = list_->GetTotalLength();
+        end = total;
     }
     // 開始位置へシーク。絶対位置を curAbs_ へ格納（原は out へ this+0xc を渡す）。
-    Seek(start, kBegin, &curAbs_);
+    if (!Seek(start, kBegin, &curAbs_)) return false;
 
     // bad-character スキップ表（値域は 1..patternLen のため int）。
     int skip[256];

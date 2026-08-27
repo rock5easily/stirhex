@@ -49,6 +49,8 @@ ID_MARK_NEXT = 32843
 ID_MARK_PREV = 32844
 ID_MARK_CLEAR_ALL = 32845
 ID_MARK_LIST = 32846
+ID_MARK2_TOGGLE = 32866
+ID_MARK3_TOGGLE = 32867
 ID_CHARSET_ASCII = 32851
 ID_CHARSET_SJIS = 32852
 ID_CHARSET_EUC = 32853
@@ -58,6 +60,10 @@ ID_BYTEORDER_BIG = 32860
 ID_SAVE_DUMP = 32864
 ID_STRUCT_CARET = 32865
 ID_SELECT_RANGE = 32869
+ID_SYNC_SCROLL = 32863
+ID_PRINT_RANGE = 32868
+ID_FILE_PRINT_PREVIEW = 0xE109
+AFX_ID_PREVIEW_CLOSE = 0xE300
 
 # User Menu / Popups Command IDs
 ID_USERMENU_BASE = 32826  # 0x803A (User Menu 1)
@@ -66,6 +72,7 @@ ID_USERMENU_10 = 32835    # 0x8043
 ID_TWOSTROKE_1 = 32836    # 0x8044
 ID_TWOSTROKE_3 = 32838    # 0x8046
 ID_SETTINGS_ENV = 32848   # 0x8050
+ID_SETTINGS_EXT = 32849   # 0x8051
 ID_RUN_APP = 32847        # 0x804F
 
 # Struct Bar Command IDs
@@ -139,6 +146,72 @@ TCM_SETCURFOCUS = 0x1330
 IDC_ACCEL_EDIT = 1007
 ACCEL_DIALOG_TITLE = "アクセラレータの指定"
 
+# Environment Settings "Key Assign" page (IDD_KEYASSIGN 139)
+IDC_KA_RESET = 1000
+IDC_KA_LOAD = 1001
+IDC_KA_SAVE = 1002
+IDC_KA_KEYLIST = 1021
+IDC_KA_CTRL = 1022
+IDC_KA_SHIFT = 1023
+IDC_KA_FUNC_LIST = 1024
+IDC_KA_FUNC_CATEGORY = 1026
+
+# Environment Settings "Toolbar" page (IDD_SETTINGS_TOOLBAR 178)
+IDC_TBAR_CURRENT = 1021
+IDC_TBAR_CATEGORY = 1026
+IDC_TBAR_AVAILABLE = 1024
+IDC_TBAR_ADD = 1071
+IDC_TBAR_DELETE = 1072
+IDC_TBAR_UP = 1073
+IDC_TBAR_DOWN = 1074
+IDC_TBAR_SEPARATOR = 1075
+
+# Extension Settings dialogs (IDD_EXT_LIST 185 / IDD_EXT_RECORD 253)
+IDC_EXTLIST_LIST = 1021
+IDC_EXTLIST_SETTINGS = 1000
+IDC_EXTLIST_ADD = 1001
+IDC_EXTLIST_DELETE = 1002
+IDC_EXTREC_EXT = 1089
+IDC_EXTREC_COMMENT = 1090
+IDC_EXTREC_SHEET = 1500
+IDC_DISP_LINESIZE = 1007
+IDC_DISP_ADDR_HSCROLL = 1011
+IDC_DISP_OPEN_READONLY = 1015
+IDC_DISP_OPEN_INSERT = 1020
+IDC_DISP_OPEN_CHARMODE = 1025
+IDC_DISP_CS_ASCII = 1900
+IDC_DISP_CS_SJIS = 1901
+IDC_DISP_CS_EUC = 1902
+IDC_DISP_CS_UNICODE = 1903
+IDC_DISP_CS_EBCDIC = 1904
+IDC_DISP_CS_EBCIDK = 1906
+IDC_DISP_RADIX_DEC = 1910
+IDC_DISP_RADIX_HEX = 1911
+IDC_DISP_BO_LITTLE = 1920
+IDC_DISP_BO_BIG = 1921
+
+# Mark list (IDD_MARK_LIST 140)
+IDC_MARKLIST_LIST = 1021
+
+# Help-validation dialog controls
+IDC_MISMATCH_BYTE = 1007
+IDC_MISMATCH_RANGE_CURSOR = 1016
+IDC_MISMATCH_RANGE_ALL = 1017
+IDC_MISMATCH_RANGE_SEL = 1018
+IDC_MISMATCH_PREV = 1041
+IDC_MISMATCH_NEXT = 1042
+IDC_COMPARE_LIST = 1021
+IDC_DIFFLIST_HILITE = 1011
+IDC_DIFFLIST_SYNC = 1015
+IDC_DIFFLIST_LIST = 1058
+IDC_DIFFLIST_SWITCH = 1000
+IDC_SYNC_CANDIDATE = 1021
+IDC_SYNC_REGISTERED = 1024
+IDC_SYNC_ADD = 1071
+IDC_SYNC_REMOVE = 1115
+IDC_SYNC_RESET = 1116
+IDC_PRINTRANGE_PREVIEW = 1011
+
 
 USER32 = ctypes.WinDLL("user32", use_last_error=True)
 USER32.SendMessageW.argtypes = (
@@ -159,6 +232,15 @@ USER32.PostMessageW.argtypes = (
 USER32.PostMessageW.restype = wintypes.BOOL
 USER32.IsWindowUnicode.argtypes = (wintypes.HWND,)
 USER32.IsWindowUnicode.restype = wintypes.BOOL
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+KERNEL32.OpenProcess.restype = wintypes.HANDLE
+KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
+KERNEL32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+KERNEL32.TerminateProcess.restype = wintypes.BOOL
+KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 LVM_FIRST = 0x1000
 LVM_GETITEMCOUNT = LVM_FIRST + 4
@@ -263,6 +345,49 @@ def _listbox_texts(hwnd: int) -> list[str]:
             buf = ctypes.create_string_buffer(length + 1)
         if send_message(hwnd, win32con.LB_GETTEXT, index, ctypes.addressof(buf)) == win32con.LB_ERR:
             raise RuntimeError(f"Could not get list-box item text at index {index}")
+        text = buf.value if is_unicode else buf.value.decode("cp932", errors="replace")
+        texts.append(text.replace("\u200e", ""))
+    return texts
+
+
+def _listbox_item_data(hwnd: int) -> list[int]:
+    """Read item data from a list box, including owner-draw/no-string lists."""
+    count = int(win32gui.SendMessage(hwnd, win32con.LB_GETCOUNT, 0, 0))
+    if count == win32con.LB_ERR:
+        raise RuntimeError("Could not get list-box item count")
+    return [
+        int(win32gui.SendMessage(hwnd, win32con.LB_GETITEMDATA, index, 0))
+        for index in range(count)
+    ]
+
+
+def _safe_dlg_item(dialog_hwnd: int, control_id: int) -> int:
+    try:
+        return int(win32gui.GetDlgItem(dialog_hwnd, control_id))
+    except Exception:
+        return 0
+
+
+def _combobox_texts(hwnd: int) -> list[str]:
+    """Read every combo-box item through the control's native text format."""
+    is_unicode = _is_unicode_window(hwnd)
+    send_message = _send_message_w if is_unicode else _send_message_a
+    count = send_message(hwnd, win32con.CB_GETCOUNT)
+    if count == win32con.CB_ERR:
+        raise RuntimeError("Could not get combo-box item count")
+    texts = []
+    for index in range(count):
+        length = send_message(hwnd, win32con.CB_GETLBTEXTLEN, index)
+        if length == win32con.CB_ERR:
+            raise RuntimeError(f"Could not get combo-box item length at index {index}")
+        if is_unicode:
+            buf = ctypes.create_unicode_buffer(length + 1)
+        else:
+            buf = ctypes.create_string_buffer(length + 1)
+        if send_message(
+            hwnd, win32con.CB_GETLBTEXT, index, ctypes.addressof(buf)
+        ) == win32con.CB_ERR:
+            raise RuntimeError(f"Could not get combo-box item text at index {index}")
         text = buf.value if is_unicode else buf.value.decode("cp932", errors="replace")
         texts.append(text.replace("\u200e", ""))
     return texts
@@ -542,11 +667,18 @@ class StirlingDriver:
                 time.sleep(0.3)
             except Exception:
                 pass
-        if self.app:
-            try:
-                self.app.kill()
-            except Exception:
-                pass
+        if self.app and self.pid:
+            # A modal dialog can disappear just before the main frame is destroyed while
+            # the process remains in teardown. pywinauto.Application.kill() may then wait
+            # indefinitely. Bound the graceful wait and terminate only this test process.
+            process = KERNEL32.OpenProcess(0x00100001, False, self.pid)  # SYNCHRONIZE | TERMINATE
+            if process:
+                try:
+                    if KERNEL32.WaitForSingleObject(process, 1500) == 0x00000102:
+                        KERNEL32.TerminateProcess(process, 1)
+                        KERNEL32.WaitForSingleObject(process, 3000)
+                finally:
+                    KERNEL32.CloseHandle(process)
             self.app = None
             self.main_window = None
             self.hwnd = 0
@@ -575,18 +707,13 @@ class StirlingDriver:
         if not mdi_client:
             return self.hwnd
 
-        # 2. Find MDI Child window
-        mdi_children = []
-        def _enum_child(h, _):
-            if win32gui.GetParent(h) == mdi_client[0]:
-                mdi_children.append(h)
-            return True
-        win32gui.EnumChildWindows(mdi_client[0], _enum_child, None)
-        if not mdi_children:
+        # 2. Query the active MDI child. Enumeration order is not activation order
+        # once several documents are open.
+        child = int(win32gui.SendMessage(
+            mdi_client[0], 0x0229, 0, 0  # WM_MDIGETACTIVE
+        ))
+        if not child:
             return self.hwnd
-
-        # Active MDI Child is the top one
-        child = mdi_children[0]
 
         # 3. Find View window inside MDI Child (direct child of MDI child)
         views = []
@@ -1308,6 +1435,21 @@ class StirlingDriver:
             win32gui.SendMessage(bar, win32con.WM_COMMAND, (win32con.CBN_SELCHANGE << 16) | cid, combo)
         time.sleep(0.3)
 
+    def struct_type_names(self) -> list[str]:
+        """Return all structure names currently loaded in the struct bar."""
+        combo = self.find_struct_bar_controls().get("combo")
+        if not combo:
+            raise RuntimeError("Struct bar combo box not found")
+        return _combobox_texts(combo)
+
+    def reload_struct_def(self):
+        """Reload Struct.def without blocking when the parser opens a message box."""
+        button = self.find_struct_bar_controls().get("reload")
+        if not button:
+            raise RuntimeError("Struct bar reload button not found")
+        win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
+        time.sleep(0.3)
+
     def get_struct_address(self) -> str:
         """Get the current base address displayed in Struct Bar (e.g. '00000000')."""
         ctrls = self.find_struct_bar_controls()
@@ -1554,6 +1696,212 @@ class StirlingDriver:
             time.sleep(0.05)
         return None
 
+    # ------------------------------------------------------------------
+    # Help validation: mismatch / compare / sync / print preview
+    # ------------------------------------------------------------------
+    def find_process_dialog(self, title: str, timeout: float = 3.0) -> int:
+        """Find a visible process-owned #32770 dialog by exact title."""
+        def _find():
+            for hwnd, cls, caption in self._get_process_windows():
+                if cls == "#32770" and caption == title:
+                    return hwnd
+            raise RuntimeError(f"Dialog not found: {title}")
+
+        return timings.wait_until_passes(timeout, 0.1, _find)
+
+    @staticmethod
+    def click_dialog_button(dialog_hwnd: int, control_id: int):
+        button = win32gui.GetDlgItem(dialog_hwnd, control_id)
+        if not button:
+            raise RuntimeError(f"Dialog control not found: {control_id}")
+        win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
+        time.sleep(0.2)
+
+    def open_find_mismatch_dialog(self) -> int:
+        self.post_command(ID_FIND_MISMATCH)
+        return self.find_process_dialog("不一致検索")
+
+    def configure_find_mismatch(
+        self, dialog_hwnd: int, value: str, range_mode: str = "cursor"
+    ):
+        edit = win32gui.GetDlgItem(dialog_hwnd, IDC_MISMATCH_BYTE)
+        _set_control_text(edit, value)
+        ids = {
+            "cursor": IDC_MISMATCH_RANGE_CURSOR,
+            "all": IDC_MISMATCH_RANGE_ALL,
+            "selection": IDC_MISMATCH_RANGE_SEL,
+        }
+        control_id = ids[range_mode]
+        self.click_dialog_button(dialog_hwnd, control_id)
+
+    def execute_find_mismatch(self, dialog_hwnd: int, forward: bool = True):
+        self.click_dialog_button(
+            dialog_hwnd, IDC_MISMATCH_NEXT if forward else IDC_MISMATCH_PREV
+        )
+
+    def open_compare_dialog(self) -> int:
+        self.post_command(ID_COMPARE)
+        return self.find_process_dialog("比較")
+
+    def compare_candidates(self, dialog_hwnd: int) -> list[str]:
+        return _listbox_texts(win32gui.GetDlgItem(dialog_hwnd, IDC_COMPARE_LIST))
+
+    def accept_compare(self, dialog_hwnd: int, index: int = 0):
+        listbox = win32gui.GetDlgItem(dialog_hwnd, IDC_COMPARE_LIST)
+        win32gui.SendMessage(listbox, win32con.LB_SETCURSEL, index, 0)
+        self.click_dialog_button(dialog_hwnd, win32con.IDOK)
+
+    def find_diff_list_dialog(self, timeout: float = 3.0) -> int:
+        return self.find_process_dialog("相違箇所一覧", timeout=timeout)
+
+    def get_diff_list_rows(self, dialog_hwnd: int) -> list[tuple[str, str, str]]:
+        list_hwnd = win32gui.GetDlgItem(dialog_hwnd, IDC_DIFFLIST_LIST)
+        list_view = self.app.window(handle=list_hwnd).wrapper_object()
+        item_count = _send_message_w(list_hwnd, LVM_GETITEMCOUNT)
+        return [
+            tuple(
+                _listview_item_text(list_view, row, column)
+                for column in range(3)
+            )
+            for row in range(item_count)
+        ]
+
+    def diff_list_checks(self, dialog_hwnd: int) -> tuple[bool, bool]:
+        return tuple(
+            win32gui.SendMessage(win32gui.GetDlgItem(dialog_hwnd, control_id),
+                                 win32con.BM_GETCHECK, 0, 0)
+            == win32con.BST_CHECKED
+            for control_id in (IDC_DIFFLIST_HILITE, IDC_DIFFLIST_SYNC)
+        )
+
+    def get_mdi_views(self) -> list[tuple[str, int, int]]:
+        """Return visible MDI documents as (title, child hwnd, view hwnd)."""
+        mdi_clients: list[int] = []
+
+        def _find_mdi(hwnd, _):
+            if win32gui.GetClassName(hwnd) == "MDIClient":
+                mdi_clients.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _find_mdi, None)
+        if not mdi_clients:
+            return []
+        children: list[int] = []
+
+        def _find_child(hwnd, _):
+            if (win32gui.GetParent(hwnd) == mdi_clients[0]
+                    and win32gui.IsWindowVisible(hwnd)):
+                children.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(mdi_clients[0], _find_child, None)
+        result = []
+        for child in children:
+            views: list[int] = []
+
+            def _find_view(hwnd, _):
+                if win32gui.GetParent(hwnd) == child:
+                    views.append(hwnd)
+                return True
+
+            win32gui.EnumChildWindows(child, _find_view, None)
+            if views:
+                result.append((_control_text(child), child, views[0]))
+        return result
+
+    def active_mdi_title(self) -> str:
+        # EnumChildWindows does not return handles; query the MDI client explicitly.
+        mdi_clients: list[int] = []
+
+        def _find_mdi(hwnd, _):
+            if win32gui.GetClassName(hwnd) == "MDIClient":
+                mdi_clients.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _find_mdi, None)
+        if not mdi_clients:
+            return ""
+        active = win32gui.SendMessage(mdi_clients[0], 0x0229, 0, 0)  # WM_MDIGETACTIVE
+        return _control_text(active) if active else ""
+
+    def open_sync_scroll_dialog(self) -> int:
+        self.post_command(ID_SYNC_SCROLL)
+        return self.find_process_dialog("シンクロスクロール")
+
+    def sync_scroll_lists(self, dialog_hwnd: int) -> tuple[list[str], list[str]]:
+        candidates = _listbox_texts(
+            win32gui.GetDlgItem(dialog_hwnd, IDC_SYNC_CANDIDATE)
+        )
+        registered = _listbox_texts(
+            win32gui.GetDlgItem(dialog_hwnd, IDC_SYNC_REGISTERED)
+        )
+        return candidates, registered
+
+    def open_print_range_dialog(self) -> tuple[int, int]:
+        self.post_command(ID_PRINT_RANGE)
+        dialog = self.find_process_dialog("範囲を指定して印刷")
+        range_bars: list[int] = []
+
+        def _find_range_bar(hwnd, _):
+            if (win32gui.GetClassName(hwnd) == "#32770"
+                    and win32gui.GetDlgItem(hwnd, IDC_RANGEBAR_START)
+                    and win32gui.GetDlgItem(hwnd, IDC_RANGEBAR_END)):
+                range_bars.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(dialog, _find_range_bar, None)
+        if not range_bars:
+            raise RuntimeError("Print range bar not found")
+        return dialog, range_bars[0]
+
+    def set_print_range(
+        self,
+        dialog_hwnd: int,
+        range_bar_hwnd: int,
+        start: str,
+        end: str,
+        is_hex: bool = True,
+        preview: bool = True,
+    ):
+        self.click_dialog_button(
+            range_bar_hwnd,
+            IDC_RANGEBAR_BASE_HEX if is_hex else IDC_RANGEBAR_BASE_DEC,
+        )
+        _set_control_text(win32gui.GetDlgItem(range_bar_hwnd, IDC_RANGEBAR_START), start)
+        _set_control_text(win32gui.GetDlgItem(range_bar_hwnd, IDC_RANGEBAR_END), end)
+        check = win32gui.GetDlgItem(dialog_hwnd, IDC_PRINTRANGE_PREVIEW)
+        current = win32gui.SendMessage(check, win32con.BM_GETCHECK, 0, 0)
+        desired = win32con.BST_CHECKED if preview else win32con.BST_UNCHECKED
+        if current != desired:
+            self.click_dialog_button(dialog_hwnd, IDC_PRINTRANGE_PREVIEW)
+
+    def is_print_preview_active(self) -> bool:
+        close_buttons: list[int] = []
+
+        def _find(hwnd, _):
+            if (win32gui.GetDlgCtrlID(hwnd) == AFX_ID_PREVIEW_CLOSE
+                    and win32gui.IsWindowVisible(hwnd)):
+                close_buttons.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _find, None)
+        return bool(close_buttons)
+
+    def close_print_preview(self):
+        close_buttons: list[int] = []
+
+        def _find(hwnd, _):
+            if win32gui.GetDlgCtrlID(hwnd) == AFX_ID_PREVIEW_CLOSE:
+                close_buttons.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _find, None)
+        if close_buttons:
+            win32gui.PostMessage(close_buttons[0], win32con.BM_CLICK, 0, 0)
+        else:
+            self.post_command(AFX_ID_PREVIEW_CLOSE)
+        time.sleep(0.5)
+
     def dismiss_popup_menu(self):
         """Dismiss active popup menu by sending ESCAPE key."""
         popup = self.find_popup_menu(timeout=0.5)
@@ -1680,6 +2028,350 @@ class StirlingDriver:
             if page is not None:
                 return sheet_hwnd, page
         raise RuntimeError("User Menu page not found in Environment Settings")
+
+    def open_key_assign_page(self, timeout: float = 5.0) -> tuple[int, int]:
+        """Open Environment Settings and switch to the Key Assign page."""
+        sheet_hwnd = self.open_env_settings_dialog(timeout=timeout)
+        probe = [IDC_KA_KEYLIST, IDC_KA_CTRL, IDC_KA_SHIFT,
+                 IDC_KA_FUNC_LIST, IDC_KA_FUNC_CATEGORY]
+        page = self._find_settings_page(sheet_hwnd, probe)
+        if page is not None:
+            return sheet_hwnd, page
+
+        tab = self._find_tab_control(sheet_hwnd)
+        if tab is None:
+            raise RuntimeError("Property sheet tab control not found")
+        count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
+        for index in range(count):
+            win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
+            time.sleep(0.2)
+            page = self._find_settings_page(sheet_hwnd, probe)
+            if page is not None:
+                return sheet_hwnd, page
+        raise RuntimeError("Key Assign page not found in Environment Settings")
+
+    def open_toolbar_page(self, timeout: float = 5.0) -> tuple[int, int]:
+        """Open Environment Settings and switch to the Toolbar page."""
+        sheet_hwnd = self.open_env_settings_dialog(timeout=timeout)
+        probe = [IDC_TBAR_CURRENT, IDC_TBAR_CATEGORY, IDC_TBAR_AVAILABLE,
+                 IDC_TBAR_SEPARATOR]
+        page = self._find_settings_page(sheet_hwnd, probe)
+        if page is not None:
+            return sheet_hwnd, page
+
+        tab = self._find_tab_control(sheet_hwnd)
+        if tab is None:
+            raise RuntimeError("Property sheet tab control not found")
+        count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
+        for index in range(count):
+            win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
+            time.sleep(0.2)
+            page = self._find_settings_page(sheet_hwnd, probe)
+            if page is not None:
+                return sheet_hwnd, page
+        raise RuntimeError("Toolbar page not found in Environment Settings")
+
+    def toolbar_items(self, page_hwnd: int, *, current: bool) -> list[int]:
+        control_id = IDC_TBAR_CURRENT if current else IDC_TBAR_AVAILABLE
+        return _listbox_item_data(win32gui.GetDlgItem(page_hwnd, control_id))
+
+    def toolbar_categories(self, page_hwnd: int) -> list[str]:
+        return _combobox_texts(win32gui.GetDlgItem(page_hwnd, IDC_TBAR_CATEGORY))
+
+    def toolbar_select_category(self, page_hwnd: int, index: int):
+        combo = win32gui.GetDlgItem(page_hwnd, IDC_TBAR_CATEGORY)
+        win32gui.SendMessage(combo, win32con.CB_SETCURSEL, index, 0)
+        win32gui.SendMessage(
+            page_hwnd, win32con.WM_COMMAND,
+            (win32con.CBN_SELCHANGE << 16) | IDC_TBAR_CATEGORY, combo,
+        )
+        time.sleep(0.1)
+
+    def toolbar_select_item(self, page_hwnd: int, index: int, *, current: bool):
+        control_id = IDC_TBAR_CURRENT if current else IDC_TBAR_AVAILABLE
+        listbox = win32gui.GetDlgItem(page_hwnd, control_id)
+        win32gui.SendMessage(listbox, win32con.LB_SETCURSEL, index, 0)
+        win32gui.SendMessage(
+            page_hwnd, win32con.WM_COMMAND,
+            (win32con.LBN_SELCHANGE << 16) | control_id, listbox,
+        )
+        time.sleep(0.1)
+
+    def toolbar_click(self, page_hwnd: int, control_id: int):
+        button = win32gui.GetDlgItem(page_hwnd, control_id)
+        if not button:
+            raise RuntimeError(f"Toolbar page control not found: {control_id}")
+        win32gui.SendMessage(page_hwnd, win32con.WM_COMMAND, control_id, button)
+        time.sleep(0.1)
+
+    def toolbar_button_states(self, page_hwnd: int) -> dict[int, bool]:
+        return {
+            control_id: bool(win32gui.IsWindowEnabled(
+                win32gui.GetDlgItem(page_hwnd, control_id)
+            ))
+            for control_id in (
+                IDC_TBAR_ADD, IDC_TBAR_DELETE, IDC_TBAR_UP, IDC_TBAR_DOWN,
+                IDC_TBAR_SEPARATOR,
+            )
+        }
+
+    def toolbar_button_count(self) -> int:
+        toolbars: list[int] = []
+
+        def _find(hwnd, _):
+            if win32gui.GetClassName(hwnd) == "ToolbarWindow32":
+                toolbars.append(hwnd)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _find, None)
+        if not toolbars:
+            raise RuntimeError("Main toolbar not found")
+        return int(win32gui.SendMessage(toolbars[0], 0x0418, 0, 0))  # TB_BUTTONCOUNT
+
+    def open_extension_settings_dialog(self, timeout: float = 5.0) -> int:
+        self.post_command(ID_SETTINGS_EXT)
+
+        def _find():
+            for hwnd, cls, _title in self._get_process_windows():
+                if (cls == "#32770"
+                        and _safe_dlg_item(hwnd, IDC_EXTLIST_LIST)
+                        and _safe_dlg_item(hwnd, IDC_EXTLIST_SETTINGS)
+                        and _safe_dlg_item(hwnd, IDC_EXTLIST_ADD)):
+                    return hwnd
+            raise RuntimeError("Extension Settings list dialog not found")
+
+        return timings.wait_until_passes(timeout, 0.1, _find)
+
+    def extension_list_rows(self, dialog_hwnd: int) -> list[str]:
+        return _listbox_texts(win32gui.GetDlgItem(dialog_hwnd, IDC_EXTLIST_LIST))
+
+    def extension_select(self, dialog_hwnd: int, index: int):
+        listbox = win32gui.GetDlgItem(dialog_hwnd, IDC_EXTLIST_LIST)
+        win32gui.SendMessage(listbox, win32con.LB_SETCURSEL, index, 0)
+        win32gui.PostMessage(
+            dialog_hwnd, win32con.WM_COMMAND,
+            (win32con.LBN_SELCHANGE << 16) | IDC_EXTLIST_LIST, listbox,
+        )
+        time.sleep(0.1)
+
+    def extension_open_record(
+        self, dialog_hwnd: int, *, add: bool = False, double_click: bool = False
+    ) -> tuple[int, int]:
+        if double_click:
+            listbox = win32gui.GetDlgItem(dialog_hwnd, IDC_EXTLIST_LIST)
+            win32gui.PostMessage(
+                dialog_hwnd, win32con.WM_COMMAND,
+                (win32con.LBN_DBLCLK << 16) | IDC_EXTLIST_LIST, listbox,
+            )
+        else:
+            self.click_dialog_button(
+                dialog_hwnd, IDC_EXTLIST_ADD if add else IDC_EXTLIST_SETTINGS
+            )
+
+        def _find():
+            for hwnd, cls, _title in self._get_process_windows():
+                if (hwnd != dialog_hwnd and cls == "#32770"
+                        and _safe_dlg_item(hwnd, IDC_EXTREC_EXT)
+                        and _safe_dlg_item(hwnd, IDC_EXTREC_SHEET)):
+                    pages: list[int] = []
+
+                    def _find_page(child, _):
+                        if (win32gui.GetClassName(child) == "#32770"
+                                and _safe_dlg_item(child, IDC_DISP_LINESIZE)):
+                            pages.append(child)
+                        return True
+
+                    win32gui.EnumChildWindows(hwnd, _find_page, None)
+                    if pages:
+                        return hwnd, pages[0]
+            raise RuntimeError("Extension record dialog not found")
+
+        return timings.wait_until_passes(5, 0.1, _find)
+
+    def extension_set_header(self, record_hwnd: int, extension: str, comment: str):
+        _set_control_text(win32gui.GetDlgItem(record_hwnd, IDC_EXTREC_EXT), extension)
+        _set_control_text(win32gui.GetDlgItem(record_hwnd, IDC_EXTREC_COMMENT), comment)
+
+    def extension_configure_display(
+        self, page_hwnd: int, *, line_size: int | None = None,
+        address_hex: bool | None = None, address_scroll: bool | None = None,
+        read_only: bool | None = None, insert: bool | None = None,
+        char_mode: bool | None = None, charset: int | None = None,
+        byte_order_big: bool | None = None,
+    ):
+        if line_size is not None:
+            _set_control_text(win32gui.GetDlgItem(page_hwnd, IDC_DISP_LINESIZE), str(line_size))
+        radio_choices = []
+        if address_hex is not None:
+            radio_choices.append(IDC_DISP_RADIX_HEX if address_hex else IDC_DISP_RADIX_DEC)
+        if charset is not None:
+            radio_choices.append([
+                IDC_DISP_CS_ASCII, IDC_DISP_CS_SJIS, IDC_DISP_CS_EUC,
+                IDC_DISP_CS_UNICODE, IDC_DISP_CS_EBCDIC, IDC_DISP_CS_EBCIDK,
+            ][charset])
+        if byte_order_big is not None:
+            radio_choices.append(IDC_DISP_BO_BIG if byte_order_big else IDC_DISP_BO_LITTLE)
+        for control_id in radio_choices:
+            self.click_dialog_button(page_hwnd, control_id)
+        checks = (
+            (IDC_DISP_ADDR_HSCROLL, address_scroll),
+            (IDC_DISP_OPEN_READONLY, read_only),
+            (IDC_DISP_OPEN_INSERT, insert),
+            (IDC_DISP_OPEN_CHARMODE, char_mode),
+        )
+        for control_id, desired in checks:
+            if desired is None:
+                continue
+            button = win32gui.GetDlgItem(page_hwnd, control_id)
+            checked = win32gui.SendMessage(button, win32con.BM_GETCHECK, 0, 0)
+            if (checked == win32con.BST_CHECKED) != desired:
+                self.click_dialog_button(page_hwnd, control_id)
+
+    def close_dialog(self, dialog_hwnd: int, *, accept: bool, timeout: float = 5.0):
+        self.click_dialog_button(dialog_hwnd, win32con.IDOK if accept else win32con.IDCANCEL)
+
+        def _closed():
+            if win32gui.IsWindow(dialog_hwnd) and win32gui.IsWindowVisible(dialog_hwnd):
+                raise RuntimeError("Dialog still open")
+            return True
+
+        timings.wait_until_passes(timeout, 0.1, _closed)
+        time.sleep(0.2)
+
+    def key_assign_categories(self, page_hwnd: int) -> list[str]:
+        return _combobox_texts(win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_CATEGORY))
+
+    def key_assign_keys(self, page_hwnd: int) -> list[str]:
+        return _listbox_texts(win32gui.GetDlgItem(page_hwnd, IDC_KA_KEYLIST))
+
+    def key_assign_functions(self, page_hwnd: int) -> list[tuple[str, int]]:
+        listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_LIST)
+        texts = _listbox_texts(listbox)
+        return [
+            (text, int(win32gui.SendMessage(listbox, win32con.LB_GETITEMDATA, index, 0)))
+            for index, text in enumerate(texts)
+        ]
+
+    def key_assign_select_category(self, page_hwnd: int, index: int):
+        combo = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_CATEGORY)
+        win32gui.SendMessage(combo, win32con.CB_SETCURSEL, index, 0)
+        win32gui.SendMessage(
+            page_hwnd,
+            win32con.WM_COMMAND,
+            (win32con.CBN_SELCHANGE << 16) | IDC_KA_FUNC_CATEGORY,
+            combo,
+        )
+        time.sleep(0.1)
+
+    def key_assign_set_modifiers(
+        self, page_hwnd: int, *, ctrl: bool = False, shift: bool = False
+    ):
+        for control_id, desired in ((IDC_KA_CTRL, ctrl), (IDC_KA_SHIFT, shift)):
+            button = win32gui.GetDlgItem(page_hwnd, control_id)
+            checked = win32gui.SendMessage(button, win32con.BM_GETCHECK, 0, 0)
+            if bool(checked == win32con.BST_CHECKED) != desired:
+                win32gui.SendMessage(button, win32con.BM_CLICK, 0, 0)
+                time.sleep(0.1)
+
+    def key_assign_select_key(self, page_hwnd: int, index: int):
+        listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_KEYLIST)
+        win32gui.SendMessage(listbox, win32con.LB_SETCURSEL, index, 0)
+        win32gui.SendMessage(
+            page_hwnd,
+            win32con.WM_COMMAND,
+            (win32con.LBN_SELCHANGE << 16) | IDC_KA_KEYLIST,
+            listbox,
+        )
+        time.sleep(0.1)
+
+    def key_assign_select_function(self, page_hwnd: int, raw_id: int):
+        category = (raw_id >> 8) & 0xFF
+        combo = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_CATEGORY)
+        win32gui.SendMessage(combo, win32con.CB_SETCURSEL, category, 0)
+        win32gui.SendMessage(
+            page_hwnd,
+            win32con.WM_COMMAND,
+            (win32con.CBN_SELCHANGE << 16) | IDC_KA_FUNC_CATEGORY,
+            combo,
+        )
+        time.sleep(0.1)
+        listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_LIST)
+        count = win32gui.SendMessage(listbox, win32con.LB_GETCOUNT, 0, 0)
+        for index in range(count):
+            item = int(win32gui.SendMessage(
+                listbox, win32con.LB_GETITEMDATA, index, 0
+            ))
+            if item == raw_id:
+                win32gui.SendMessage(listbox, win32con.LB_SETCURSEL, index, 0)
+                win32gui.SendMessage(
+                    page_hwnd,
+                    win32con.WM_COMMAND,
+                    (win32con.LBN_SELCHANGE << 16) | IDC_KA_FUNC_LIST,
+                    listbox,
+                )
+                time.sleep(0.1)
+                return
+        raise ValueError(f"Key Assign function raw ID not found: 0x{raw_id:04X}")
+
+    def key_assign_current_function(self, page_hwnd: int) -> int:
+        listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_LIST)
+        index = win32gui.SendMessage(listbox, win32con.LB_GETCURSEL, 0, 0)
+        if index == win32con.LB_ERR:
+            return -1
+        return int(win32gui.SendMessage(
+            listbox, win32con.LB_GETITEMDATA, index, 0
+        ))
+
+    def key_assign_reset(self, page_hwnd: int):
+        button = win32gui.GetDlgItem(page_hwnd, IDC_KA_RESET)
+        win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
+        time.sleep(0.2)
+
+    def key_assign_transfer_file(
+        self, page_hwnd: int, path: str | Path, *, save: bool
+    ):
+        """Drive the Key Assign load/save common dialog using an explicit path."""
+        path = str(Path(path).resolve())
+        control_id = IDC_KA_SAVE if save else IDC_KA_LOAD
+        button = win32gui.GetDlgItem(page_hwnd, control_id)
+        sheet = win32gui.GetAncestor(page_hwnd, win32con.GA_ROOT)
+        win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
+
+        def _find_dialog():
+            for hwnd, cls, _title in self._get_process_windows():
+                if hwnd != sheet and cls == "#32770":
+                    edit = _file_dialog_edit(hwnd)
+                    if edit:
+                        return hwnd, edit
+            raise RuntimeError("Key Assign file dialog not found")
+
+        dialog, edit = timings.wait_until_passes(5, 0.1, _find_dialog)
+        _set_control_text(edit, path)
+        ok = win32gui.GetDlgItem(dialog, win32con.IDOK)
+        win32gui.PostMessage(ok, win32con.BM_CLICK, 0, 0)
+
+        def _closed():
+            if win32gui.IsWindow(dialog) and win32gui.IsWindowVisible(dialog):
+                raise RuntimeError("Key Assign file dialog still open")
+            return True
+
+        timings.wait_until_passes(5, 0.2, _closed)
+        time.sleep(0.3)
+
+    def open_mark_list_dialog(self) -> int:
+        self.post_command(ID_MARK_LIST)
+        return self.find_process_dialog("マーク一覧")
+
+    def mark_list_entries(self, dialog_hwnd: int) -> list[tuple[str, int]]:
+        listbox = win32gui.GetDlgItem(dialog_hwnd, IDC_MARKLIST_LIST)
+        rows = []
+        for index, text in enumerate(_listbox_texts(listbox)):
+            item_data = int(win32gui.SendMessage(
+                listbox, win32con.LB_GETITEMDATA, index, 0
+            ))
+            if item_data not in (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+                rows.append((text, item_data))
+        return rows
 
     def listbox_texts(self, page_hwnd: int, ctrl_id: int) -> list[str]:
         """Read all item texts of a listbox on a dialog/page."""
