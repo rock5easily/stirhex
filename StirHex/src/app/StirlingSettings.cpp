@@ -52,7 +52,7 @@ void CStirlingSettings::Load(LPCTSTR sec) {
     if (lineSize > 256) { lineSize = 256; }
     addressBase     = GetInt(sec, _T("AddressBase"),   addressBase) ? 1 : 0;
     defCharset      = GetInt(sec, _T("CharSet"),       defCharset);
-    if (defCharset < 0 || defCharset > 5) { defCharset = 1; }
+    if (defCharset < 0 || defCharset > 6) { defCharset = 1; }
     defByteOrderBig = GetInt(sec, _T("ByteOrder"),     defByteOrderBig) ? 1 : 0;
     addrHScroll     = GetInt(sec, _T("AddrHScroll"),   addrHScroll ? 1 : 0) != 0;
     openReadOnly    = GetInt(sec, _T("OpenReadOnly"),  openReadOnly ? 1 : 0) != 0;

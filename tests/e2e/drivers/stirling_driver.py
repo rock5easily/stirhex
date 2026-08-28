@@ -62,6 +62,7 @@ ID_STRUCT_CARET = 32865
 ID_SELECT_RANGE = 32869
 ID_SYNC_SCROLL = 32863
 ID_PRINT_RANGE = 32868
+ID_EDIT_PASTE_HEX = 33016  # 0x80F8 paste clipboard text as hex data (port only, issue #97)
 ID_FILE_PRINT_PREVIEW = 0xE109
 AFX_ID_PREVIEW_CLOSE = 0xE300
 
@@ -252,6 +253,7 @@ SB_GETTEXTW = win32con.WM_USER + 13
 WM_IME_CHAR = 0x0286
 TEXT_BUFFER_CHARS = 2048
 STATUS_TEXT_BUFFER_CHARS = 0x10000
+WS_EX_MDICHILD = getattr(win32con, "WS_EX_MDICHILD", 0x40)
 
 
 def _send_message_w(hwnd: int, message: int, wparam: int = 0, lparam: int = 0) -> int:
@@ -303,6 +305,15 @@ def _control_text(hwnd: int) -> str:
     buf = ctypes.create_unicode_buffer(length + 1)
     _send_message_w(hwnd, win32con.WM_GETTEXT, length + 1, ctypes.addressof(buf))
     return buf.value
+
+
+def _is_mdi_document_child(hwnd: int, mdi_hwnd: int) -> bool:
+    """Return whether hwnd is a visible native MDI document child."""
+    if (win32gui.GetParent(hwnd) != mdi_hwnd
+            or not win32gui.IsWindowVisible(hwnd)):
+        return False
+    exstyle = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & 0xFFFFFFFF
+    return bool(exstyle & WS_EX_MDICHILD)
 
 
 def _set_control_text(hwnd: int, text: str) -> None:
@@ -489,6 +500,7 @@ ID_CHARSET_EUC = 32853
 ID_CHARSET_UNICODE = 32854
 ID_CHARSET_EBCDIC = 32856
 ID_CHARSET_EBCIDK = 32857
+ID_CHARSET_UTF8 = 33017    # 0x80F9 UTF-8 charset (port only, issue #98)
 ID_BYTEORDER_LITTLE = 32859
 ID_BYTEORDER_BIG = 32860
 
@@ -556,22 +568,29 @@ class StirlingDriver:
         time.sleep(0.3)
         return self
 
-    def get_mdi_child_titles(self) -> list[str]:
-        """Get titles of all open MDI child windows."""
-        mdi_client = []
-        def _enum_mdi(h, _):
-            if win32gui.GetClassName(h) == "MDIClient":
-                mdi_client.append(h)
+    def get_mdi_client(self) -> int:
+        """Return the application's MDI client HWND."""
+        mdi_client: list[int] = []
+
+        def _enum_mdi(hwnd, _):
+            if win32gui.GetClassName(hwnd) == "MDIClient":
+                mdi_client.append(hwnd)
             return True
+
         win32gui.EnumChildWindows(self.hwnd, _enum_mdi, None)
-        if not mdi_client:
+        return mdi_client[0] if mdi_client else 0
+
+    def get_mdi_child_titles(self) -> list[str]:
+        """Get titles of all open MDI document windows."""
+        mdi = self.get_mdi_client()
+        if not mdi:
             return []
         children = []
         def _enum(h, _):
-            if win32gui.GetParent(h) == mdi_client[0]:
+            if _is_mdi_document_child(h, mdi):
                 children.append(_control_text(h))
             return True
-        win32gui.EnumChildWindows(mdi_client[0], _enum, None)
+        win32gui.EnumChildWindows(mdi, _enum, None)
         return children
 
     def find_message_box(self, timeout: float = 3.0) -> tuple[int, str, list[str]]:
@@ -1141,6 +1160,11 @@ class StirlingDriver:
     def paste(self):
         """Execute Edit -> Paste (ID_EDIT_PASTE = 57637)."""
         self.post_command(CMD_EDIT_PASTE)
+        time.sleep(0.1)
+
+    def paste_hex(self):
+        """Execute Edit -> Paste as hex text (ID_EDIT_PASTE_HEX = 33016, port only)."""
+        self.post_command(ID_EDIT_PASTE_HEX)
         time.sleep(0.1)
 
     def undo(self):
@@ -1752,7 +1776,127 @@ class StirlingDriver:
         self.click_dialog_button(dialog_hwnd, win32con.IDOK)
 
     def find_diff_list_dialog(self, timeout: float = 3.0) -> int:
-        return self.find_process_dialog("相違箇所一覧", timeout=timeout)
+        title = "相違箇所一覧"
+
+        def _find():
+            # The real diff list is an owner-owned top-level popup.  The
+            # minimized proxy has the same caption but is an MDI child, so
+            # enumerate process top-level windows here rather than descendants.
+            for hwnd, cls, caption in self._get_process_windows():
+                if cls == "#32770" and caption == title:
+                    return hwnd
+            raise RuntimeError(f"Diff list dialog not found: {title}")
+
+        return timings.wait_until_passes(timeout, 0.1, _find)
+
+    def find_diff_list_proxy(self, timeout: float = 3.0) -> int:
+        """Find the visible MDI-client child used while the diff list is hidden."""
+        title = "相違箇所一覧"
+
+        def _find():
+            mdi = self.get_mdi_client()
+            if not mdi:
+                raise RuntimeError("MDI client not found")
+            matches: list[int] = []
+
+            def _enum(hwnd, _):
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if (pid == self.pid and win32gui.GetParent(hwnd) == mdi
+                        and win32gui.IsWindowVisible(hwnd)
+                        and _control_text(hwnd) == title):
+                    matches.append(hwnd)
+                return True
+
+            win32gui.EnumChildWindows(mdi, _enum, None)
+            if matches:
+                return matches[0]
+            raise RuntimeError(f"Diff list proxy not found: {title}")
+
+        return timings.wait_until_passes(timeout, 0.1, _find)
+
+    def diff_list_window_info(self, dialog_hwnd: int) -> dict:
+        """Return geometry/style state for the real diff list popup."""
+        mdi = self.get_mdi_client()
+        if not mdi:
+            raise RuntimeError("MDI client not found")
+        style = win32gui.GetWindowLong(dialog_hwnd, win32con.GWL_STYLE) & 0xFFFFFFFF
+        exstyle = win32gui.GetWindowLong(dialog_hwnd, win32con.GWL_EXSTYLE) & 0xFFFFFFFF
+        return {
+            "parent": win32gui.GetParent(dialog_hwnd),
+            "owner": win32gui.GetWindow(dialog_hwnd, win32con.GW_OWNER),
+            "style": style,
+            "exstyle": exstyle,
+            "iconic": bool(win32gui.IsIconic(dialog_hwnd)),
+            "rect": win32gui.GetWindowRect(dialog_hwnd),
+            "mdi": mdi,
+            "mdi_rect": win32gui.GetWindowRect(mdi),
+            "mdi_client_rect": win32gui.GetClientRect(mdi),
+        }
+
+    @staticmethod
+    def diff_list_proxy_window_info(proxy_hwnd: int) -> dict:
+        """Return geometry/style state for the minimized MDI proxy."""
+        style = win32gui.GetWindowLong(proxy_hwnd, win32con.GWL_STYLE) & 0xFFFFFFFF
+        exstyle = win32gui.GetWindowLong(proxy_hwnd, win32con.GWL_EXSTYLE) & 0xFFFFFFFF
+        return {
+            "parent": win32gui.GetParent(proxy_hwnd),
+            "owner": win32gui.GetWindow(proxy_hwnd, win32con.GW_OWNER),
+            "style": style,
+            "exstyle": exstyle,
+            "iconic": bool(win32gui.IsIconic(proxy_hwnd)),
+            "rect": win32gui.GetWindowRect(proxy_hwnd),
+        }
+
+    @staticmethod
+    def diff_list_is_uncovered(dialog_hwnd: int) -> bool:
+        """Return whether the dialog's caption and client center are topmost."""
+        if not win32gui.IsWindow(dialog_hwnd) or not win32gui.IsWindowVisible(dialog_hwnd):
+            return False
+        left, top, right, bottom = win32gui.GetWindowRect(dialog_hwnd)
+        if right <= left or bottom <= top:
+            return False
+        points = [
+            ((left + right) // 2, top + 2),
+            ((left + right) // 2, (top + bottom) // 2),
+        ]
+        for point in points:
+            hit = win32gui.WindowFromPoint(point)
+            if hit != dialog_hwnd and not win32gui.IsChild(dialog_hwnd, hit):
+                return False
+        return True
+
+    def minimize_diff_list(self, dialog_hwnd: int) -> int:
+        # The real dialog deliberately consumes SC_MINIMIZE and hides itself;
+        # the proxy is then created under the MDI client.
+        win32gui.SendMessage(dialog_hwnd, win32con.WM_SYSCOMMAND,
+                             win32con.SC_MINIMIZE, 0)
+
+        def _check():
+            if not win32gui.IsWindowVisible(dialog_hwnd):
+                return self.find_diff_list_proxy(timeout=0.1)
+            raise RuntimeError("diff list did not hide")
+
+        return timings.wait_until_passes(3.0, 0.05, _check)
+
+    def restore_diff_list(self, dialog_hwnd: int) -> None:
+        proxy = self.find_diff_list_proxy()
+        win32gui.SendMessage(proxy, win32con.WM_SYSCOMMAND,
+                             win32con.SC_RESTORE, 0)
+
+        def _check():
+            if (win32gui.IsWindowVisible(dialog_hwnd)
+                    and not self._diff_list_proxy_exists()):
+                return True
+            raise RuntimeError("diff list did not restore from proxy")
+
+        timings.wait_until_passes(3.0, 0.05, _check)
+
+    def _diff_list_proxy_exists(self) -> bool:
+        try:
+            self.find_diff_list_proxy(timeout=0.05)
+            return True
+        except Exception:
+            return False
 
     def get_diff_list_rows(self, dialog_hwnd: int) -> list[tuple[str, str, str]]:
         list_hwnd = win32gui.GetDlgItem(dialog_hwnd, IDC_DIFFLIST_LIST)
@@ -1789,8 +1933,7 @@ class StirlingDriver:
         children: list[int] = []
 
         def _find_child(hwnd, _):
-            if (win32gui.GetParent(hwnd) == mdi_clients[0]
-                    and win32gui.IsWindowVisible(hwnd)):
+            if _is_mdi_document_child(hwnd, mdi_clients[0]):
                 children.append(hwnd)
             return True
 

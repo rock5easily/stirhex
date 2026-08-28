@@ -10,10 +10,11 @@
 #include <afxdlgs.h>
 #include <strsafe.h>   // StringCchCopyW
 
-// キャラクターセットのラジオID（0..5 の順。1905 は欠番）。
-static const UINT kCharsetIds[6] = {
+// キャラクターセットのラジオID（0..6 の順。1905 は欠番。UTF-8 は移植で追加）。
+static const UINT kCharsetIds[7] = {
     IDC_DISP_CS_ASCII, IDC_DISP_CS_SJIS, IDC_DISP_CS_EUC,
     IDC_DISP_CS_UNICODE, IDC_DISP_CS_EBCDIC, IDC_DISP_CS_EBCIDK,
+    IDC_DISP_CS_UTF8,
 };
 
 // ===========================================================================
@@ -32,7 +33,7 @@ void CDisplayPage::ChargeFromSettings() {
     m_openReadOnly  = m_s.openReadOnly ? TRUE : FALSE;
     m_openInsert    = m_s.openInsertMode ? TRUE : FALSE;
     m_openCharMode  = m_s.openCharMode ? TRUE : FALSE;
-    m_charset       = (m_s.defCharset >= 0 && m_s.defCharset <= 5) ? m_s.defCharset : 1;
+    m_charset       = (m_s.defCharset >= 0 && m_s.defCharset <= 6) ? m_s.defCharset : 1;
 }
 
 void CDisplayPage::HarvestToSettings() {
@@ -59,12 +60,12 @@ void CDisplayPage::DoDataExchange(CDataExchange* pDX) {
     // キャラクターセットは非連続IDのため手動で往復する。
     if (pDX->m_bSaveAndValidate) {
         m_charset = 1;
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < (int)_countof(kCharsetIds); ++i) {
             if (IsDlgButtonChecked(kCharsetIds[i])) { m_charset = i; break; }
         }
     } else {
-        CheckRadioButton(kCharsetIds[0], kCharsetIds[5],
-                         kCharsetIds[(m_charset >= 0 && m_charset <= 5) ? m_charset : 1]);
+        CheckRadioButton(kCharsetIds[0], kCharsetIds[_countof(kCharsetIds) - 1],
+                         kCharsetIds[(m_charset >= 0 && m_charset <= 6) ? m_charset : 1]);
     }
 }
 

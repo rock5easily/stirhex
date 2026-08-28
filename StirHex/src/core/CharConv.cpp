@@ -1,6 +1,8 @@
 // CharConv 実装。原 FUN_0045fecb（charset 別 char 配列文字列化）と、その EUC 分岐
 //   FUN_004603fa（原 FUN_0046903d = JIS→SJIS）を移植する。
 #include "core/CharConv.h"
+#include "core/Utf8Text.h"    // UTF-8 復号（Issue #98）
+#include "core/Cp932Text.h"   // CP932 → ワイド（Issue #107）
 
 #include <windows.h>
 
@@ -104,7 +106,10 @@ std::string FormatEuc(const unsigned char* p, int n) {
 
 }  // namespace
 
-std::string FormatStructCharArray(int charset, const unsigned char* p, int n) {
+// 文字セット 0..5 の CP932 バイト列表現（原 FUN_0045fecb 忠実移植）。
+//   charset 6(UTF-8) はここへ来ない。CP932 へ写すと CP932 に無い文字が落ちるため、
+//   FormatStructCharArrayW が復号結果からワイドを直接組み立てる。
+std::string FormatStructCharArrayCp932(int charset, const unsigned char* p, int n) {
     if (p == nullptr || n <= 0) return std::string();
     if (n > 0x100) n = 0x100;   // 原の 256 バイト上限
 
@@ -151,6 +156,38 @@ std::string FormatStructCharArray(int charset, const unsigned char* p, int n) {
         return s;
     }
     }
+}
+
+// UTF-8 の列をワイドへ直接組み立てる（Issue #107）。
+//   CP932 を経由しないので、CP932 に無い文字（ハングル・簡体字・絵文字など）も残る。
+//   不正・不完全な列は 1 バイト = 1 文字の '.'（文字欄と同じ規則）。
+//   文字欄と違ってセル整列の制約が無いため、バイト数ぶんの空白詰めはしない。
+std::wstring FormatUtf8Wide(const unsigned char* p, int n) {
+    std::wstring w;
+    int i = 0;
+    while (i < n) {
+        const Utf8Decoded d = DecodeUtf8(p + i, static_cast<size_t>(n - i));
+        if (!d.ok) { w.push_back(L'.'); ++i; continue; }
+        if (d.codePoint < 0x10000) {
+            w.push_back(static_cast<wchar_t>(d.codePoint));
+        } else {
+            const unsigned int v = d.codePoint - 0x10000;
+            w.push_back(static_cast<wchar_t>(0xD800 + (v >> 10)));
+            w.push_back(static_cast<wchar_t>(0xDC00 + (v & 0x3FF)));
+        }
+        i += d.length;
+    }
+    return w;
+}
+
+std::wstring FormatStructCharArrayW(int charset, const unsigned char* p, int n) {
+    if (p == nullptr || n <= 0) { return std::wstring(); }
+    if (n > 0x100) { n = 0x100; }   // 原の 256 バイト上限
+    if (charset == 6) { return FormatUtf8Wide(p, n); }
+    // 0..5 は従来どおり CP932 バイト列を作ってからワイドへ。表示直前に StructBar が
+    //   していた変換をここへ移しただけで、出力は変わらない。
+    const std::string mb = FormatStructCharArrayCp932(charset, p, n);
+    return WideFromCp932(mb.c_str(), static_cast<int>(mb.size()));
 }
 
 }  // namespace stirling

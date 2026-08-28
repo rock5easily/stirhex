@@ -12,7 +12,7 @@ namespace {
 
 struct Entry { UINT raw; UINT cmd; };   // 名称は文字列リソース（ui::CommandNameW）
 
-// rawID = (カテゴリ<<8)|項目。全112項目（原 DAT_004b51e6 由来。欠損なし）。
+// rawID = (カテゴリ<<8)|項目。原 DAT_004b51e6 由来の112項目に、移植で追加した機能を続ける。
 const Entry kEntries[] = {
     { 0x0001, 0xE100 },
     { 0x0002, 0xE101 },
@@ -126,6 +126,8 @@ const Entry kEntries[] = {
     { 0x070A, 0x805A },
     { 0x070B, 0x8062 },
     { 0x070C, 0x8063 },
+    // 移植で追加した機能（原の表には無い。Issue #97）
+    { 0x070D, 0x80F8 },   // 16進テキスト貼り付け
 };
 
 const Entry* Find(UINT raw) {

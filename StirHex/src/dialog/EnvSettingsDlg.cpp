@@ -439,6 +439,7 @@ const STbItem kTbCat7[] = {   // その他
     {0x0700},{0x070B},{0x070C},
     {0x0701},{0x0702},{0x0704},
     {0x0705},{0x0709},
+    {0x070D},   // 16進テキスト貼り付け（移植で追加。Issue #97）
 };
 const STbCat kTbCatalog[] = {
     { kTbCat0, _countof(kTbCat0) },
@@ -538,7 +539,7 @@ void CToolBarPage::InsertCurrent(int at, UINT raw, bool select) {
     if (idx >= 0 && select) { cur->SetCurSel(idx); }
 }
 
-// StirHex 独自生成リソース128（ツールバー用ビットマップ 16x15×54）を
+// StirHex 独自生成リソース128（ツールバー用ビットマップ 16x15×55）を
 // C0C0C0 透過のイメージリストに読み込む。
 CImageList& CToolBarPage::Icons() {
     if (m_icons.GetSafeHandle() == nullptr) {
@@ -940,6 +941,7 @@ const STbItem kUmCat7[] = {   // その他（表示順 DAT_004b5424 cat7: 0,11,1
     {0x0701},{0x0702},{0x0703},
     {0x0704},{0x0705},{0x0706},{0x0707},
     {0x0708},{0x070A},{0x0709},
+    {0x070D},   // 16進テキスト貼り付け（移植で追加。Issue #97）
 };
 const STbCat kUmCatalog[] = {
     { kUmCat0, _countof(kUmCat0) },

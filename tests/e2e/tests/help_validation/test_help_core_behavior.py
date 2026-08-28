@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import pywintypes
+import win32api
 import win32con
 import win32file
 import win32gui
@@ -32,6 +33,20 @@ def _window_texts(root_hwnd: int) -> list[str]:
 
     win32gui.EnumChildWindows(root_hwnd, _collect, None)
     return texts
+
+
+def _exe_file_version(exe_path) -> str:
+    """exe のバージョンリソース(VS_VERSION_INFO)の FILEVERSION を "x.y.z" で返す。
+
+    バージョン情報ダイアログの表記はリリースのたびに変わるため、期待値をテストへ
+    直書きしない。exe 自身のバージョンリソースを正として突き合わせることで、
+    バージョン更新時にテストが取り残されず、かつダイアログの文字列とリソースの
+    食い違いも検出できる（Issue #104）。
+    """
+    info = win32api.GetFileVersionInfo(str(exe_path), "\\")
+    ms = info["FileVersionMS"]
+    ls = info["FileVersionLS"]
+    return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}"
 
 
 def _visible_child_classes(root_hwnd: int) -> list[str]:
@@ -146,7 +161,7 @@ class TestHelpCoreBehavior:
 
             for expected in (
                 "BinaryEditor  StirHex",
-                "Version 1.0.0",
+                f"Version {_exe_file_version(ported_exe_path)}",
                 "Copyright (C) 2026 StirHex Project",
                 "BinaryEditor  Stirling  Version 1.31",
                 "Copyright (C) 1998-1999",

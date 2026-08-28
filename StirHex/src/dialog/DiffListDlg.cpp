@@ -4,7 +4,109 @@
 #include "dialog/DiffListDlg.h"
 #include "view/StirlingView.h"
 
+#include <algorithm>
+
+namespace {
+constexpr UINT kDiffListProxyId = 0x7F84;
+constexpr int kDiffListProxyWidth = 180;
+constexpr UINT kDiffListProxyRestoreMessage = WM_APP + 0x140;
+constexpr UINT kDiffListProxyCloseMessage = WM_APP + 0x141;
+}
+
+// 実ダイアログを隠している間だけMDICLIENT直下に置く復元用ウィンドウ。
+// モードレスの実ダイアログを親子関係ごと切り替えるのではなく、proxyだけを
+// WS_CHILDとして生成することで、通常時のpopupの移動範囲とZオーダーを維持する。
+class CDiffListMinimizedProxy final : public CWnd {
+public:
+    explicit CDiffListMinimizedProxy(CDiffListDlg* owner)
+        : m_owner(owner) {}
+
+    BOOL Create(CWnd* pParent, const CString& title, const CRect& rect) {
+        LPCTSTR cls = AfxRegisterWndClass(
+            CS_DBLCLKS,
+            ::LoadCursor(nullptr, IDC_ARROW),
+            reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1),
+            ::LoadIcon(AfxGetInstanceHandle(), MAKEINTRESOURCE(IDR_MAINFRAME)));
+        if (cls == nullptr) { return FALSE; }
+        return CWnd::CreateEx(
+            0, cls, title,
+            WS_CHILD | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPSIBLINGS,
+            rect, pParent, static_cast<UINT>(kDiffListProxyId));
+    }
+
+    void Detach() { m_owner = nullptr; }
+
+protected:
+    afx_msg void OnDestroy();
+    afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
+    afx_msg void OnNcLButtonDblClk(UINT nHitTest, CPoint point);
+    afx_msg void OnLButtonDblClk(UINT nFlags, CPoint point);
+    virtual void PostNcDestroy() override { delete this; }
+    DECLARE_MESSAGE_MAP()
+
+private:
+    void PostOwnerMessage(UINT message) {
+        CDiffListDlg* owner = m_owner;
+        if (owner == nullptr) { return; }
+        const HWND hDlg = owner->GetSafeHwnd();
+        if (hDlg != nullptr && ::IsWindow(hDlg)) {
+            ::PostMessage(hDlg, message, 0, 0);
+        }
+    }
+
+    CDiffListDlg* m_owner;
+};
+
+BEGIN_MESSAGE_MAP(CDiffListMinimizedProxy, CWnd)
+    ON_WM_DESTROY()
+    ON_WM_SYSCOMMAND()
+    ON_WM_NCLBUTTONDBLCLK()
+    ON_WM_LBUTTONDBLCLK()
+END_MESSAGE_MAP()
+
+void CDiffListMinimizedProxy::OnDestroy() {
+    CDiffListDlg* owner = m_owner;
+    m_owner = nullptr;
+    if (owner != nullptr) {
+        owner->OnMinimizedProxyDestroyed(this);
+    }
+    CWnd::OnDestroy();
+}
+
+void CDiffListMinimizedProxy::OnSysCommand(UINT nID, LPARAM lParam) {
+    const UINT command = nID & 0xFFF0U;
+    if (m_owner != nullptr && command == SC_RESTORE) {
+        PostOwnerMessage(kDiffListProxyRestoreMessage);
+        return;
+    }
+    if (m_owner != nullptr && command == SC_CLOSE) {
+        PostOwnerMessage(kDiffListProxyCloseMessage);
+        return;
+    }
+    CWnd::OnSysCommand(nID, lParam);
+}
+
+void CDiffListMinimizedProxy::OnNcLButtonDblClk(UINT nHitTest, CPoint point) {
+    if (m_owner != nullptr && nHitTest == HTCAPTION) {
+        PostOwnerMessage(kDiffListProxyRestoreMessage);
+        return;
+    }
+    CWnd::OnNcLButtonDblClk(nHitTest, point);
+}
+
+void CDiffListMinimizedProxy::OnLButtonDblClk(UINT nFlags, CPoint point) {
+    if (m_owner != nullptr) {
+        PostOwnerMessage(kDiffListProxyRestoreMessage);
+        return;
+    }
+    CWnd::OnLButtonDblClk(nFlags, point);
+}
+
 BEGIN_MESSAGE_MAP(CDiffListDlg, CDialog)
+    ON_WM_DESTROY()
+    ON_WM_SYSCOMMAND()
+    ON_MESSAGE(kDiffListProxyRestoreMessage, &CDiffListDlg::OnMinimizedProxyRestore)
+    ON_MESSAGE(kDiffListProxyCloseMessage, &CDiffListDlg::OnMinimizedProxyClose)
     ON_BN_CLICKED(IDC_DIFFLIST_SWITCH, &CDiffListDlg::OnSwitch)
     ON_BN_CLICKED(IDC_DIFFLIST_HILITE, &CDiffListDlg::OnHilite)
     ON_BN_CLICKED(IDC_DIFFLIST_SYNC, &CDiffListDlg::OnSync)
@@ -28,6 +130,210 @@ BOOL CDiffListDlg::CreateModeless(CStirlingView* view1, CStirlingView* view2,
     m_active = view1;    // 既定の活性ビューは比較元（原 this+0x2b0 = param_2 = view1）
     m_diffs  = diffs;
     return Create(IDD_DIFF_LIST, pParent);
+}
+
+bool CDiffListDlg::CreateMinimizedProxy() {
+    if (m_proxy != nullptr) {
+        if (::IsWindow(m_proxy->GetSafeHwnd())) { return true; }
+        m_proxy = nullptr;
+    }
+
+    CMDIFrameWnd* pMainFrame = DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd());
+    const HWND hMdiClient = (pMainFrame != nullptr) ? pMainFrame->m_hWndMDIClient : nullptr;
+    if (hMdiClient == nullptr || !::IsWindow(hMdiClient)) { return false; }
+
+    RECT clientRect = {};
+    if (!::GetClientRect(hMdiClient, &clientRect)) { return false; }
+    const int clientWidth = (std::max)(0, static_cast<int>(clientRect.right - clientRect.left));
+    const int width = (std::min)(kDiffListProxyWidth,
+                                 (std::max)(96, clientWidth - 8));
+    const int height = (std::max)(24, ::GetSystemMetrics(SM_CYMINIMIZED));
+    const CRect initialRect(0, 0, width, height);
+
+    CString title;
+    GetWindowText(title);
+    if (title.IsEmpty()) { return false; }
+
+    auto* proxy = new CDiffListMinimizedProxy(this);
+    if (!proxy->Create(CWnd::FromHandle(hMdiClient), title, initialRect)) {
+        delete proxy;
+        return false;
+    }
+    m_proxy = proxy;
+
+    // WS_CHILDでもMDIのアイコン化と同じ標準的なcaptionを使う。先に表示してから
+    // SW_MINIMIZEを適用し、ArrangeIconicWindowsで他のアイコン化子と並べる。
+    proxy->ShowWindow(SW_SHOWNOACTIVATE);
+    proxy->ShowWindow(SW_MINIMIZE);
+    ::ArrangeIconicWindows(hMdiClient);
+    KeepMinimizedProxyInsideMdi();
+    return true;
+}
+
+void CDiffListDlg::DestroyMinimizedProxy() {
+    CDiffListMinimizedProxy* proxy = m_proxy;
+    m_proxy = nullptr;
+    if (proxy == nullptr) { return; }
+
+    // DestroyWindow()からPostNcDestroy()へ同期的にdelete thisされるため、
+    // detachとHWND退避を済ませ、呼び出し後はproxyへアクセスしない。
+    proxy->Detach();
+    const HWND hProxy = proxy->GetSafeHwnd();
+    if (hProxy != nullptr && ::IsWindow(hProxy)) {
+        ::DestroyWindow(hProxy);
+    }
+}
+
+void CDiffListDlg::RestoreFromMinimizedProxy() {
+    if (m_destroying) { return; }
+
+    CDiffListMinimizedProxy* proxy = m_proxy;
+    m_proxy = nullptr;
+    if (proxy != nullptr) {
+        proxy->Detach();
+        const HWND hProxy = proxy->GetSafeHwnd();
+        if (hProxy != nullptr && ::IsWindow(hProxy)) {
+            ::DestroyWindow(hProxy);
+        }
+    }
+    m_minimized = false;
+
+    const HWND hDlg = GetSafeHwnd();
+    if (hDlg == nullptr || !::IsWindow(hDlg)) { return; }
+    CRect rect;
+    if (m_normalRectValid) {
+        rect = m_normalRect;
+    } else if (!::GetWindowRect(hDlg, &rect)) {
+        return;
+    }
+
+    SetWindowPos(&wndTop, rect.left, rect.top, rect.Width(), rect.Height(),
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    ShowWindow(SW_RESTORE);
+    SetForegroundWindow();
+    BringWindowToTop();
+}
+
+void CDiffListDlg::CloseFromMinimizedProxy() {
+    if (m_destroying) { return; }
+    Cleanup();
+    const HWND hDlg = GetSafeHwnd();
+    if (hDlg != nullptr && ::IsWindow(hDlg)) {
+        // OnDestroy()でproxyもdetachして破棄する。ここを最後の処理にして、
+        // PostNcDestroy()のdelete this後にメンバーへアクセスしない。
+        ::DestroyWindow(hDlg);
+    }
+}
+
+void CDiffListDlg::OnMinimizedProxyDestroyed(CDiffListMinimizedProxy* proxy) {
+    if (m_proxy != proxy) { return; }
+    m_proxy = nullptr;
+    if (m_destroying || !m_minimized) { return; }
+
+    // MDICLIENT側の破棄などでproxyだけが先に消えた場合も、実ダイアログを
+    // 操作不能な非表示状態に残さない。
+    m_minimized = false;
+    const HWND hDlg = GetSafeHwnd();
+    if (hDlg == nullptr || !::IsWindow(hDlg)) { return; }
+    if (m_normalRectValid) {
+        SetWindowPos(&wndTop, m_normalRect.left, m_normalRect.top,
+                     m_normalRect.Width(), m_normalRect.Height(),
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    } else {
+        ShowWindow(SW_SHOWNA);
+    }
+}
+
+void CDiffListDlg::KeepMinimizedProxyInsideMdi() {
+    if (m_proxy == nullptr) { return; }
+    CMDIFrameWnd* pMainFrame = DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd());
+    const HWND hMdiClient = (pMainFrame != nullptr) ? pMainFrame->m_hWndMDIClient : nullptr;
+    const HWND hProxy = m_proxy->GetSafeHwnd();
+    if (hMdiClient == nullptr || !::IsWindow(hMdiClient) ||
+        hProxy == nullptr || !::IsWindow(hProxy)) {
+        return;
+    }
+
+    RECT clientRect = {};
+    RECT proxyRect = {};
+    if (!::GetClientRect(hMdiClient, &clientRect) ||
+        !::GetWindowRect(hProxy, &proxyRect)) {
+        return;
+    }
+    POINT points[2] = {
+        {proxyRect.left, proxyRect.top},
+        {proxyRect.right, proxyRect.bottom},
+    };
+    ::MapWindowPoints(HWND_DESKTOP, hMdiClient, points, 2);
+    const int width = (std::max)(1, static_cast<int>(points[1].x - points[0].x));
+    const int height = (std::max)(1, static_cast<int>(points[1].y - points[0].y));
+    const int clientLeft = static_cast<int>(clientRect.left);
+    const int clientTop = static_cast<int>(clientRect.top);
+    const int clientRight = static_cast<int>(clientRect.right);
+    const int clientBottom = static_cast<int>(clientRect.bottom);
+    const int maxLeft = (std::max)(clientLeft, clientRight - width);
+    const int maxTop = (std::max)(clientTop, clientBottom - height);
+    const int pointLeft = static_cast<int>(points[0].x);
+    const int pointTop = static_cast<int>(points[0].y);
+    const int left = (std::min)(maxLeft, (std::max)(clientLeft, pointLeft));
+    const int top = (std::min)(maxTop, (std::max)(clientTop, pointTop));
+    if (left != points[0].x || top != points[0].y) {
+        m_proxy->SetWindowPos(nullptr, left, top, width, height,
+                              SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
+void CDiffListDlg::OnSysCommand(UINT nID, LPARAM lParam) {
+    if ((nID & 0xFFF0U) == SC_MINIMIZE && !m_minimized && !m_destroying) {
+        CRect normalRect;
+        if (::GetWindowRect(GetSafeHwnd(), &normalRect)) {
+            // proxy生成に失敗した場合は既定の最小化に委ね、ダイアログを
+            // 操作不能な非表示状態にしない。
+            if (CreateMinimizedProxy()) {
+                m_normalRect = normalRect;
+                m_normalRectValid = true;
+                m_minimized = true;
+                ShowWindow(SW_HIDE);
+                return;
+            }
+        }
+    }
+    CDialog::OnSysCommand(nID, lParam);
+}
+
+LRESULT CDiffListDlg::OnMinimizedProxyRestore(WPARAM /*wParam*/, LPARAM /*lParam*/) {
+    RestoreFromMinimizedProxy();
+    return 0;
+}
+
+LRESULT CDiffListDlg::OnMinimizedProxyClose(WPARAM /*wParam*/, LPARAM /*lParam*/) {
+    CloseFromMinimizedProxy();
+    return 0;
+}
+
+void CDiffListDlg::OnViewDestroyed(CStirlingView* view) {
+    if (view != m_view1 && view != m_view2) { return; }
+    CStirlingView* survivor = (view == m_view1) ? m_view2 : m_view1;
+    const HWND hDlg = GetSafeHwnd();
+    if (hDlg == nullptr || !::IsWindow(hDlg)) { return; }
+    Cleanup();
+    // DestroyWindow() は PostNcDestroy() で delete this まで同期実行するため、
+    // 自己破棄後に this のメンバーへアクセスしない。残存ビューの活性化を先に行う。
+    if (ViewAlive(survivor)) {
+        if (CFrameWnd* pFrame = survivor->GetParentFrame()) {
+            pFrame->ActivateFrame();
+            pFrame->SetActiveView(survivor);
+            if (CMDIFrameWnd* pMainFrame =
+                    DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd())) {
+                if (CMDIChildWnd* pChild = DYNAMIC_DOWNCAST(CMDIChildWnd, pFrame)) {
+                    pMainFrame->MDIActivate(pChild);
+                }
+            }
+        }
+    }
+    // HWND を退避済みなので、PostNcDestroy() で this が解放された後に
+    // CWnd メンバーへ戻る必要がない。これを関数内の最後の処理にする。
+    ::DestroyWindow(hDlg);
 }
 
 void CDiffListDlg::DoDataExchange(CDataExchange* pDX) {
@@ -106,7 +412,19 @@ void CDiffListDlg::OnSwitch() {
         if (CFrameWnd* pFrame = m_active->GetParentFrame()) {
             pFrame->ActivateFrame();
             pFrame->SetActiveView(m_active);
+            if (CMDIFrameWnd* pMainFrame =
+                    DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd())) {
+                if (CMDIChildWnd* pChild = DYNAMIC_DOWNCAST(CMDIChildWnd, pFrame)) {
+                    pMainFrame->MDIActivate(pChild);
+                }
+            }
         }
+    }
+    if (::IsWindow(GetSafeHwnd())) {
+        // MDIActivate() may raise the document child above this utility window.
+        // Restore only z-order; do not steal focus from the selected document.
+        SetWindowPos(&wndTop, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 }
 
@@ -139,7 +457,18 @@ void CDiffListDlg::OnCancel() {
     DestroyWindow();
 }
 
+void CDiffListDlg::OnDestroy() {
+    // ビュー終了・再比較・MDICLIENT破棄など、OnCancel を経由しない破棄でも比較状態を解除する。
+    m_destroying = true;
+    DestroyMinimizedProxy();
+    m_minimized = false;
+    Cleanup();
+    CDialog::OnDestroy();
+}
+
 void CDiffListDlg::Cleanup() {
+    if (m_cleaned) { return; }
+    m_cleaned = true;
     if (ViewAlive(m_view1)) {
         m_view1->SetSyncPartner(nullptr, false);
         m_view1->ClearCompareResult();

@@ -29,8 +29,8 @@ IDR_STIRLINGTYPE ICON    "res\\ico_129.ico"
 // top-level file so regenerating res\StirHex.rc from the original executable
 // cannot remove it.
 VS_VERSION_INFO VERSIONINFO
-  FILEVERSION     1,0,1,0
-  PRODUCTVERSION  1,0,1,0
+  FILEVERSION     1,1,0,0
+  PRODUCTVERSION  1,1,0,0
   FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
   FILEFLAGS       VS_FF_DEBUG
@@ -47,11 +47,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "StirHex Project"
       VALUE "FileDescription",  "StirHex バイナリエディタ"
-      VALUE "FileVersion",      "1.0.1.0"
+      VALUE "FileVersion",      "1.1.0.0"
       VALUE "InternalName",     "StirHex"
       VALUE "OriginalFilename", "StirHex.exe"
       VALUE "ProductName",      "StirHex"
-      VALUE "ProductVersion",   "1.0.1.0"
+      VALUE "ProductVersion",   "1.1.0.0"
       VALUE "LegalCopyright",   "Copyright (C) 2026 StirHex Project"
       VALUE "Comments",         "Based on BinaryEditor Stirling Version 1.31 (Copyright (C) 1998-1999 ＤＤＳ２). 非公式の再実装版であり、原作者とは無関係です。"
     END

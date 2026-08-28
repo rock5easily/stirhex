@@ -18,6 +18,7 @@ from drivers.stirling_driver import (
 PORT_ENV = r"Software\StirHex\StirHex\Env"
 RAW_MARK2 = 0x070B
 RAW_MARK3 = 0x070C
+RAW_PASTE_HEX = 0x070D   # 16進テキスト貼り付け（移植で追加。Issue #97）
 VK_F10 = 0x79
 VK_F11 = 0x7A
 
@@ -314,9 +315,11 @@ class TestHelpKeymapStructBehavior:
                     raw_ids.extend(
                         raw for _name, raw in drv.key_assign_functions(page) if raw != 0
                     )
-                assert len(raw_ids) == 112
-                assert len(set(raw_ids)) == 112
+                # 原の112項目に、移植で追加した「16進テキスト貼り付け」(Issue #97) を加えた数。
+                assert len(raw_ids) == 113
+                assert len(set(raw_ids)) == 113
                 assert RAW_MARK2 in raw_ids and RAW_MARK3 in raw_ids
+                assert RAW_PASTE_HEX in raw_ids
 
                 drv.key_assign_set_modifiers(page)
                 drv.key_assign_select_key(page, 9)

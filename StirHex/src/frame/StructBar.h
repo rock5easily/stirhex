@@ -81,9 +81,10 @@ protected:
 
     // ツリーを可視行へ平坦化した 1 表示行。
     struct DispRow {
-        std::string type;
-        std::string name;
-        std::string value;
+        std::string type;    // [byte層] struct.def 由来の CP932 バイト列
+        std::string name;    // [byte層] 同上
+        // [wide層] 値はそのまま描画する（UTF-8 の char 配列は CP932 に無い文字を含む）。
+        std::wstring value;
         std::string path;       // 展開状態キー（安定・一意）
         int  depth = 0;
         bool hasChildren = false;

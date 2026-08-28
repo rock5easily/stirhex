@@ -5,7 +5,7 @@
 namespace {
 struct Entry { UINT rawId; UINT cmdId; int image; };
 
-// 原カタログ表示順（DAT_004b6c90）に沿った全54項目。image は StirHex 独自生成
+// 原カタログ表示順（DAT_004b6c90）に沿った54項目＋移植で追加した機能。image は StirHex 独自生成
 // ビットマップ128（porting/tools/generate_toolbar.py）の画像索引。
 const Entry kEntries[] = {
     // ファイル系
@@ -69,6 +69,8 @@ const Entry kEntries[] = {
     {0x0704, 0x804E, 46},  // マーク一覧...
     {0x0705, 0x804F, 47},  // 名前を指定して実行...
     {0x0709, 0x8057, 48},  // ヘルプ
+    // 移植で追加した機能（画像索引 54 は generate_toolbar.py で追加した1コマ。Issue #97）
+    {0x070D, 0x80F8, 54},  // 16進テキスト貼り付け
 };
 
 const Entry* Find(UINT rawId) {

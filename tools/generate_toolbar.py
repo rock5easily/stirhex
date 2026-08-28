@@ -1,6 +1,6 @@
-"""Generate the clean-room StirHex 54-image toolbar bitmap.
+"""Generate the clean-room StirHex 55-image toolbar bitmap.
 
-The output is a 4-bpp Windows BMP containing 54 cells of 16x15 pixels. Palette
+The output is a 4-bpp Windows BMP containing 55 cells of 16x15 pixels. Palette
 index 0 is RGB(192, 192, 192), which MFC remaps to COLOR_3DFACE and treats as
 transparent in the toolbar settings image list.
 """
@@ -86,6 +86,8 @@ ICON_NAMES = (
     "tile_horizontal", "tile_vertical", "arrange_icons", "next_window", "window_list",
     "correct_window_size", "mark1", "mark_next", "mark_previous", "mark_list", "run",
     "help", "print_preview", "mark2", "mark3", "save_dump", "print_range",
+    # Added by the port (no counterpart in the original catalog); see issue #97.
+    "paste_hex",
 )
 
 
@@ -477,6 +479,13 @@ def draw_icon(index: int) -> Icon:
         printer(icon)
         selection(icon, 8, 7, 15, 14)
         icon.fill_rect(10, 9, 13, 11, AMBER)
+    elif index == 54:  # paste as hex text (added by the port; issue #97)
+        icon.rect(3, 3, 12, 13, NAVY, WHITE)
+        icon.rect(5, 1, 10, 4, NAVY, CYAN)
+        icon.fill_rect(5, 6, 6, 7, DARK_CYAN)
+        icon.fill_rect(8, 6, 9, 7, DARK_CYAN)
+        icon.fill_rect(5, 9, 6, 10, DARK_CYAN)
+        icon.fill_rect(8, 9, 9, 10, DARK_CYAN)
     else:
         raise ValueError(f"invalid toolbar index: {index}")
 
@@ -516,8 +525,8 @@ def generate_icons(theme: str) -> list[Icon]:
     icons = [draw_icon(index) for index in range(len(ICON_NAMES))]
     if theme == "c-semantic":
         apply_c_semantic_theme(icons)
-    if len(icons) != 54:
-        raise RuntimeError(f"expected 54 icons, got {len(icons)}")
+    if len(icons) != 55:
+        raise RuntimeError(f"expected 55 icons, got {len(icons)}")
     signatures = {bytes(color for row in icon.pixels for color in row) for icon in icons}
     if len(signatures) != len(icons):
         raise RuntimeError("toolbar contains duplicate icon pixel data")

@@ -53,7 +53,10 @@ struct StructDef {
 struct StructNode {
     std::string type;    // 型名（型列。配列要素の合成ノード "[i]" は空）
     std::string name;    // シンボル名（配列は "field[N]"、要素は "[i]"）
-    std::string value;   // 値（葉/char配列コンテナ。展開のみのコンテナは空）
+    // 値（葉/char配列コンテナ。展開のみのコンテナは空）。
+    //   [wide層] 表示に直接使う。char 配列は UTF-8 で CP932 外の文字も持つため
+    //   ワイドで保持する（Issue #107）。数値は ASCII 数字なのでワイド化は無損失。
+    std::wstring value;
     bool hasChildren = false;
     std::vector<StructNode> children;
 
@@ -69,6 +72,11 @@ struct StructNode {
 //   純粋関数（原 StructValue_ReadScalar+FormatNumber, §6 実測表）。右クリック基数変更でも使用。
 std::string FormatScalarValue(FieldKind kind, int size, const unsigned char* bytes,
                               bool big, int radix);
+
+// FormatScalarValue のワイド版（StructNode::value へ入れる形）。数値表記は ASCII の
+//   ため、1 文字ずつ広げるだけで内容は変わらない。
+std::wstring FormatScalarValueW(FieldKind kind, int size, const unsigned char* bytes,
+                                bool big, int radix);
 
 // text を kind の型（size バイト）として解釈し、big エンディアンでバイト列へ符号化する
 //   純粋関数（原 StructValue_ParseString/ParseInt/ParseFloat, §6 に忠実）。

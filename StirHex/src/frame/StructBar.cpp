@@ -841,19 +841,17 @@ void CStructBar::OnGetDispInfo(NMHDR* pNMHDR, LRESULT* pResult) {
     if (i < 0 || i >= static_cast<int>(m_rows.size())) return;
     if ((di->item.mask & LVIF_TEXT) == 0) return;
     const DispRow& r = m_rows[i];
-    const std::string* src = nullptr;
+    if (di->item.pszText == nullptr || di->item.cchTextMax <= 0) { return; }
+    // [byte層境界] 型/名前は struct.def 由来の CP932 バイト列なので、ここでワイドへ変換する。
+    //   値はワイドで持っている（UTF-8 の char 配列が CP932 に無い文字を含むため。Issue #107）。
+    //   詳細: analysis_artifacts/docs/20_unicode_layering.md §6.2
+    std::wstring w;
     switch (di->item.iSubItem) {
-    case 0: src = &r.type; break;   // 型
-    case 1: src = &r.name; break;   // シンボル名（描画は OnCustomDraw が担当）
-    case 2: src = &r.value; break;  // 値
+    case 0: w = stirling::WideFromCp932(r.type.c_str(), static_cast<int>(r.type.size())); break;
+    case 1: w = stirling::WideFromCp932(r.name.c_str(), static_cast<int>(r.name.size())); break;
+    case 2: w = r.value; break;   // 値（描画は OnCustomDraw が担当）
     default: return;
     }
-    // [byte層境界] 型/名前/値は StructDef 由来の CP932 バイト列。
-    //   char 配列の値（FormatStructCharArray）は SJIS 文字セット時に非 ASCII を含むため、
-    //   表示用にワイドへ変換してから LVITEMW::pszText へ書き込む。
-    //   詳細: analysis_artifacts/docs/20_unicode_layering.md §6.2
-    if (di->item.pszText == nullptr || di->item.cchTextMax <= 0) { return; }
-    const std::wstring w = stirling::WideFromCp932(src->c_str(), static_cast<int>(src->size()));
     ::StringCchCopyW(di->item.pszText, static_cast<size_t>(di->item.cchTextMax), w.c_str());
 }
 
@@ -904,7 +902,7 @@ void CStructBar::OnCustomDraw(NMHDR* pNMHDR, LRESULT* pResult) {
     CRect textRc = rc;
     textRc.left += 4;
     textRc.right -= 3;
-    const std::string* text = &r.type;
+    const std::string* text = &r.type;   // [byte層] 型/名前は CP932
     if (subItem == 1) {
         text = &r.name;
         const int indent = r.depth * kIndentPx;
@@ -932,14 +930,15 @@ void CStructBar::OnCustomDraw(NMHDR* pNMHDR, LRESULT* pResult) {
             }
         }
         textRc.left = rc.left + indent + kIndentPx;
-    } else if (subItem == 2) {
-        text = &r.value;
     }
 
     ::SetBkMode(hdc, TRANSPARENT);
     ::SetTextColor(hdc, fg);
-    // [byte層境界] OnGetDispInfo と同じく CP932 バイト列を表示用ワイドへ変換して描く。
-    const std::wstring drawW = stirling::WideFromCp932(text->c_str(), static_cast<int>(text->size()));
+    // [byte層境界] 型/名前は CP932 バイト列なのでワイドへ変換して描く。値は既にワイド
+    //   （UTF-8 の char 配列が CP932 に無い文字を含むため。Issue #107）。
+    const std::wstring drawW =
+        (subItem == 2) ? r.value
+                       : stirling::WideFromCp932(text->c_str(), static_cast<int>(text->size()));
     ::DrawTextW(hdc, drawW.c_str(), -1, &textRc,
                 DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
 
@@ -1000,7 +999,7 @@ void CStructBar::ApplyRadixOverrides(const std::vector<unsigned char>& bytes, bo
             radix = m_radixOverride;                   // 一括指定
         }
         if (radix == n.radix) continue;
-        n.value = stirling::FormatScalarValue(n.kind, n.size, &bytes[n.offset], big, radix);
+        n.value = stirling::FormatScalarValueW(n.kind, n.size, &bytes[n.offset], big, radix);
         n.radix = radix;
     }
 }
@@ -1172,9 +1171,8 @@ void CStructBar::BeginEdit(int row) {
     ScreenToClient(&rc);                             // 編集ボックスはダイアログの子
 
     m_editRow = row;
-    // [byte層境界] 値は CP932 バイト列。CString の暗黙変換（システム ACP）を通さない。
-    m_editCtrl.SetWindowText(
-        stirling::WideFromCp932(r.value.c_str(), static_cast<int>(r.value.size())).c_str());
+    // 値はワイドで保持しているのでそのまま渡す（編集できるのはスカラ葉＝数値表記のみ）。
+    m_editCtrl.SetWindowText(r.value.c_str());
     m_editCtrl.MoveWindow(&rc);
     m_editCtrl.ShowWindow(SW_SHOW);
     m_editCtrl.SetFocus();

@@ -320,6 +320,14 @@ std::string IndexName(int i) {
 
 }  // namespace
 
+// FormatScalarValue のワイド版（StructNode::value 用）。
+//   数値表記は ASCII なので 1 文字ずつ広げるだけ。書式そのものは narrow 版が唯一の実装。
+std::wstring FormatScalarValueW(FieldKind kind, int size, const unsigned char* bytes,
+                                bool big, int radix) {
+    const std::string s = FormatScalarValue(kind, size, bytes, big, radix);
+    return std::wstring(s.begin(), s.end());
+}
+
 // スカラ型 1 要素の値文字列（公開純粋関数。型 kind・幅 size・表示基数 radix に従う。§6 実測表）。
 std::string FormatScalarValue(FieldKind kind, int size, const unsigned char* bytes,
                               bool big, int radix) {
@@ -380,7 +388,7 @@ void StructDefSet::EmitElement(const StructField& f, const std::vector<unsigned 
     StructNode n;
     n.type = type; n.name = name; n.hasChildren = false;
     const bool inRange = (off + esize <= dataLen);
-    n.value = inRange ? FormatScalarValue(f.kind, esize, &data[off], big, useRadix) : "----";
+    n.value = inRange ? FormatScalarValueW(f.kind, esize, &data[off], big, useRadix) : L"----";
     n.editable = inRange; n.offset = off; n.size = esize; n.kind = f.kind; n.radix = useRadix;
     out.push_back(std::move(n));
 }
@@ -395,7 +403,7 @@ void StructDefSet::EmitRow(const StructField& f, const std::vector<unsigned char
     if ((f.kind == FieldKind::Char || f.kind == FieldKind::Byte)) {
         // charset 別に文字列化（原 FUN_0045fecb。先頭 256 バイト上限は内部で処理）。
         container.value = (off + count <= dataLen)
-            ? FormatStructCharArray(charset, &data[off], count) : "----";
+            ? FormatStructCharArrayW(charset, &data[off], count) : L"----";
     }
     for (int i = 0; i < count; ++i) {
         EmitElement(f, data, off + i * esize, big, charset, radixOverride, "", IndexName(i),
@@ -417,7 +425,7 @@ void StructDefSet::EmitNodes(int defIndex, const std::vector<unsigned char>& dat
         if (f.kind == FieldKind::Unknown || esize == 0) {
             StructNode n;
             n.type = displayType + ((c1 > 1 || c2 > 1) ? "[]" : "");
-            n.name = f.name; n.value = "?"; n.hasChildren = false;
+            n.name = f.name; n.value = L"?"; n.hasChildren = false;
             out.push_back(std::move(n));
             off += esize * c1 * c2;
             continue;

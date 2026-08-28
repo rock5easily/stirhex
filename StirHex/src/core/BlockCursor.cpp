@@ -242,8 +242,12 @@ void BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data
                                FileOffset insertCount, const unsigned char* src) {
     if (capacity < curUsedLen + insertCount) {
         // 現ブロックに収まらない。
-        if (curOffset_ < curUsedLen - 1) {
+        if (curOffset_ < curUsedLen) {
             // カーソルがブロック途中: 後半を新ブロックへ退避(分割)。
+            // 原 BlockCursor_InsertWorker(0x0041cd40) はここが `curOffset_ < curUsedLen - 1` で、
+            // 「ブロック最終データバイト上(curOffset_ == curUsedLen-1)」がどの分岐にも入らず
+            // 末尾バイトを右へずらさないまま後続ブロックへ追記していた（Issue #93）。
+            // 挿入バイトと既存の最終バイトが入れ替わるデータ破壊のため、原版から意図的に逸脱する。
             int tailLen = curUsedLen - curOffset_;
             unsigned char* nb = new unsigned char[kBlockCapacity];
             std::memmove(nb, data + curOffset_, static_cast<size_t>(tailLen));
@@ -315,17 +319,15 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
             curOffset_ = curOffset_ + 1;
         } else {
             // 後半側へ挿入 → 新ブロックを後ろ(After)へ。
-            int newOff = 0;  // 原 local_1c。末尾ちょうどの分岐では未代入(UB)。0 初期化で回避。
-            if (curOffset_ == used - 1) {
-                std::memmove(nb, data + half, static_cast<size_t>(half));
-                nb[half] = b;
-            } else {
-                newOff = curOffset_ - half;
-                std::memmove(nb, data + half, static_cast<size_t>(newOff));
-                nb[newOff] = b;
-                std::memmove(nb + newOff + 1, data + curOffset_,
-                             static_cast<size_t>(used - curOffset_));
-            }
+            // 原 BlockCursor_InsertByte(0x0041c238) は curOffset_ == used-1 のとき
+            // 「後半全部 + b」と組み立てる特殊分岐を持ち、挿入バイトが既存の最終バイトの
+            // 後ろへ回り込んでいた（さらに caret local_1c を未初期化のまま格納していた）。
+            // 通常式に同じ入力を通せば正しく並ぶため、特殊分岐ごと廃した（Issue #93）。
+            const int newOff = curOffset_ - half;
+            std::memmove(nb, data + half, static_cast<size_t>(newOff));
+            nb[newOff] = b;
+            std::memmove(nb + newOff + 1, data + curOffset_,
+                         static_cast<size_t>(used - curOffset_));
             curNode_->usedLen = half;
             BlockNode* newNode = list_->InsertNodeAfter(curNode_, nb, kBlockCapacity, half + 1);
             curNode_ = newNode;

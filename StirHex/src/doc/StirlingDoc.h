@@ -63,7 +63,7 @@ public:
     // --- 文字セット（原 doc+0x744。0=ASCII/1=SJIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK） ---
     //   原の既定は 1(SJIS)（ctor で doc+0x744=1）。表示（文字欄）に用いる。
     int  GetCharset() const { return m_charset; }
-    void SetCharset(int cs) { if (cs >= 0 && cs <= 5) { m_charset = cs; } }
+    void SetCharset(int cs) { if (cs >= 0 && cs <= 6) { m_charset = cs; } }
     // --- バイトオーダ（Unicode 表示の 2バイト解釈。false=リトル/true=ビッグ） ---
     bool IsByteOrderBig() const { return m_byteOrderBig; }
     void SetByteOrderBig(bool big) { m_byteOrderBig = big; }

@@ -12,6 +12,8 @@
 #include "app/StirlingApp.h"
 #include "app/ShellUtil.h"   // ui::DragQueryPath（MAX_PATH 非依存のドロップパス取得）
 #include "app/ClipboardUtil.h"   // クリップボード転送の RAII（#47）
+#include "core/HexText.h"   // 16進テキスト → バイト列（Issue #97）
+#include "core/Utf8Text.h"   // UTF-8 の復号・符号化（Issue #98）
 #include "util/ScopedGdi.h"   // GDI オブジェクトの RAII（Issue #48）
 #include "frame/MainFrame.h"
 #include "frame/UserMenuCatalog.h"   // ユーザーメニュー構築（rawID→cmdID/名称・BuildUserPopup）
@@ -117,13 +119,17 @@ BEGIN_MESSAGE_MAP(CStirlingView, CView)
     ON_COMMAND(ID_EDIT_COPY, &CStirlingView::OnEditCopy)
     ON_COMMAND(ID_EDIT_CUT, &CStirlingView::OnEditCut)
     ON_COMMAND(ID_EDIT_PASTE, &CStirlingView::OnEditPaste)
+    ON_COMMAND(ID_EDIT_PASTE_HEX, &CStirlingView::OnEditPasteHex)
     ON_UPDATE_COMMAND_UI(ID_EDIT_COPY, &CStirlingView::OnUpdateEditCopy)
     ON_UPDATE_COMMAND_UI(ID_EDIT_CUT, &CStirlingView::OnUpdateEditCut)
     ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE, &CStirlingView::OnUpdateEditPaste)
+    ON_UPDATE_COMMAND_UI(ID_EDIT_PASTE_HEX, &CStirlingView::OnUpdateEditPasteHex)
     ON_COMMAND_RANGE(ID_CHARSET_ASCII, ID_CHARSET_UNICODE, &CStirlingView::OnCharset)
     ON_COMMAND_RANGE(ID_CHARSET_EBCDIC, ID_CHARSET_EBCIDK, &CStirlingView::OnCharset)
+    ON_COMMAND(ID_CHARSET_UTF8, &CStirlingView::OnCharsetUtf8)   // 移植で追加（Issue #98）
     ON_UPDATE_COMMAND_UI_RANGE(ID_CHARSET_ASCII, ID_CHARSET_UNICODE, &CStirlingView::OnUpdateCharset)
     ON_UPDATE_COMMAND_UI_RANGE(ID_CHARSET_EBCDIC, ID_CHARSET_EBCIDK, &CStirlingView::OnUpdateCharset)
+    ON_UPDATE_COMMAND_UI(ID_CHARSET_UTF8, &CStirlingView::OnUpdateCharset)
     ON_COMMAND_RANGE(ID_BYTEORDER_LITTLE, ID_BYTEORDER_BIG, &CStirlingView::OnByteOrder)
     ON_UPDATE_COMMAND_UI_RANGE(ID_BYTEORDER_LITTLE, ID_BYTEORDER_BIG, &CStirlingView::OnUpdateByteOrder)
     ON_MESSAGE(WM_IME_CHAR, &CStirlingView::OnImeChar)
@@ -291,6 +297,8 @@ void CStirlingView::ReloadSettings() {
 
     // フォントを作り直してメトリクスを再確定（フォント高が変わる可能性に備える）。
     m_font.DeleteObject();
+    m_fontUtf8.DeleteObject();          // UTF-8 文字欄用（Issue #98）
+    m_utf8CellWidth.clear();            // セル幅はフォント依存なので測り直す
     m_charW = 0;
     m_rowH = 0;
     if (GetSafeHwnd() != nullptr) {
@@ -329,6 +337,14 @@ void CStirlingView::EnsureFont(CDC* pDC) {
         HFONT hFont = ::CreateFontIndirectW(&lf);
         if (hFont != nullptr) {
             m_font.Attach(hFont);   // 以後の破棄は CFont（m_font）が担う
+        }
+        // UTF-8 文字欄用（Issue #98）。face / 寸法は同じで charset だけ DEFAULT にし、
+        //   GDI のフォントリンクに CP932 外のグリフを補わせる。桁幅・行高は m_font から
+        //   採るため、このフォントの有無でレイアウトは変わらない。
+        lf.lfCharSet = DEFAULT_CHARSET;
+        HFONT hFontUtf8 = ::CreateFontIndirectW(&lf);
+        if (hFontUtf8 != nullptr) {
+            m_fontUtf8.Attach(hFontUtf8);
         }
     }
     TEXTMETRIC tm = {0};
@@ -1257,11 +1273,9 @@ void CStirlingView::OnChar(UINT nChar, UINT nRepCnt, UINT nFlags) {
     // ---- 文字ペイン: 文字セット別に変換して入力（選択/挿入/上書きは InputTextChar 内で処理）----
     if (m_activePane == 1) {
         // Unicode ウィンドウの WM_CHAR は UTF-16 コード単位を渡す。byte 層の
-        // InputTextChar は原版と同じ CP932 コード値を受け取るため、境界で変換する。
-        unsigned int cp932;
-        if (WideInputCharToCp932(nChar, cp932)) {
-            InputTextChar(cp932);
-        }
+        // InputTextChar は原版と同じ CP932 コード値を受け取るため、境界で変換する
+        // （UTF-8 のときだけ CP932 を経由せず直接符号化する。Issue #98）。
+        InputWideChar(nChar);
         return;
     }
 
@@ -1840,6 +1854,16 @@ void CStirlingView::OnEditPaste() {
         ::MessageBeep(0);
         return;
     }
+    PasteBytes(clip);
+}
+
+// 貼り付け本体（原 FUN_00449a02 の分岐をそのまま保つ）。
+//   呼び出し側で編集可否とデータの空判定を済ませておくこと。
+void CStirlingView::PasteBytes(const std::vector<unsigned char>& clip) {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr || clip.empty()) {
+        return;
+    }
     const int len = static_cast<int>(clip.size());
     if (m_selActive) {
         // 選択あり: 範囲を貼付データで置換（原 ReplaceRange）
@@ -1881,6 +1905,53 @@ void CStirlingView::OnUpdateEditCut(CCmdUI* pCmdUI) {
 void CStirlingView::OnUpdateEditPaste(CCmdUI* pCmdUI) {
     CStirlingDoc* pDoc = GetDocument();
     pCmdUI->Enable(pDoc != nullptr && pDoc->CanEdit() && !theApp.m_binClipboard.empty());
+}
+
+// 16進テキスト貼り付け（Issue #97。移植で追加した機能。原には対応する処理は無い）。
+//   Windows クリップボードのテキストを16進表記として解析し、バイト列として貼り付ける。
+//   内部バイナリクリップボード（theApp.m_binClipboard）はコピー元ではないため更新しない。
+//   解析に失敗した場合は理由を提示して何も貼り付けない（部分適用はしない）。
+void CStirlingView::OnEditPasteHex() {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr || !pDoc->CanEdit()) {   // 貼り付けは編集のため禁止中は不可
+        ::MessageBeep(0);
+        return;
+    }
+    std::wstring text;
+    DWORD error = ERROR_SUCCESS;
+    if (!ui::GetClipboardTextW(GetSafeHwnd(), text, error)) {
+        // 書式が無いだけの場合と、取得に失敗した場合を区別して提示する。
+        const UINT id = (error == ERROR_NOT_FOUND) ? IDS_ERR_PASTE_HEX_NO_TEXT
+                                                   : IDS_ERR_PASTE_HEX_READ;
+        ui::MsgBox(GetSafeHwnd(), ui::AppendErrorReason(ui::LoadW(id), error));
+        return;
+    }
+    std::vector<unsigned char> bytes;
+    const stirling::HexTextParseResult result = stirling::ParseHexText(text, bytes);
+    if (!result.Ok()) {
+        CStringW msg;
+        // 位置は利用者に見せるので 1 起点に直す。
+        const int pos = static_cast<int>(result.errorPos) + 1;
+        switch (result.error) {
+            case stirling::HexTextError::InvalidChar:
+                msg.Format(ui::LoadW(IDS_ERR_PASTE_HEX_INVALID), pos);
+                break;
+            case stirling::HexTextError::OddDigits:
+                msg.Format(ui::LoadW(IDS_ERR_PASTE_HEX_ODD), pos);
+                break;
+            default:
+                msg = ui::LoadW(IDS_ERR_PASTE_HEX_EMPTY);
+                break;
+        }
+        ui::MsgBox(GetSafeHwnd(), msg);
+        return;
+    }
+    PasteBytes(bytes);
+}
+
+void CStirlingView::OnUpdateEditPasteHex(CCmdUI* pCmdUI) {
+    CStirlingDoc* pDoc = GetDocument();
+    pCmdUI->Enable(pDoc != nullptr && pDoc->CanEdit() && ui::HasClipboardText());
 }
 
 // ===========================================================================
@@ -2117,6 +2188,144 @@ std::string CStirlingView::BuildCharCells(const std::vector<unsigned char>& buf,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// UTF-8 文字欄（charset 6。移植で追加。Issue #98）
+//   他の文字セットは CP932 バイト列を ExtTextOutA で描くが、UTF-8 は CP932 に無い
+//   文字（ハングル・簡体字・絵文字など）も表示するためワイド描画にする。
+//   不変条件は同じ: 1 ソースバイト = 1 表示セル。多バイト文字はバイト数ぶんのセルを
+//   占め、グリフが使い切らなかったセルは空白で埋める。
+//     例: "あ"(E3 81 82) = 3 セル → 二倍幅グリフ(2セル) + 空白1セル
+//         "e acute"(C3 A9) = 2 セル → 一倍幅グリフ(1セル) + 空白1セル
+//   不正・不完全な列は 1 バイトずつ '.' にして桁を保つ。
+// ---------------------------------------------------------------------------
+
+// コードポイントのグリフが 1 セル幅か 2 セル幅か。
+//   East Asian Width の表を持たず、実際に使うフォントで GDI に実測させる
+//   （フォント差で見え方がずれないようにするため）。BMP は cache（0=未測定/1/2）へ
+//   記録する。cache は空でもよい（その場合は毎回測る）。
+static int Utf8GlyphCells(HDC hdc, unsigned int cp, int charW, std::vector<unsigned char>* cache) {
+    if (charW <= 0) { return 1; }
+    if (cache != nullptr && cp < cache->size() && (*cache)[cp] != 0) {
+        return (*cache)[cp];
+    }
+    int width = 0;
+    if (cp < 0x10000) {
+        const wchar_t wc = static_cast<wchar_t>(cp);
+        int w = 0;
+        if (!::GetCharWidth32W(hdc, wc, wc, &w)) {
+            SIZE sz = {0, 0};
+            if (::GetTextExtentPoint32W(hdc, &wc, 1, &sz)) { w = sz.cx; }
+        }
+        width = w;
+    } else {
+        const unsigned int v = cp - 0x10000;
+        const wchar_t pair[2] = { static_cast<wchar_t>(0xD800 + (v >> 10)),
+                                  static_cast<wchar_t>(0xDC00 + (v & 0x3FF)) };
+        SIZE sz = {0, 0};
+        if (::GetTextExtentPoint32W(hdc, pair, 2, &sz)) { width = sz.cx; }
+    }
+    // 1.5 セルを超える送りは二倍幅とみなす（半角と全角の中間に落ちる字形を全角側へ寄せる）。
+    const int cells = (width * 2 > charW * 3) ? 2 : 1;
+    if (cache != nullptr && cp < cache->size()) {
+        (*cache)[cp] = static_cast<unsigned char>(cells);
+    }
+    return cells;
+}
+
+// 表示できない制御文字か（他の文字セットと同じく '.' にする）。
+//   C0（U+0000-U+001F）/ DEL / C1（U+0080-U+009F）。
+static bool Utf8IsControl(unsigned int cp) {
+    return cp < 0x20 || (cp >= 0x7F && cp <= 0x9F);
+}
+
+// buf[gi..] から cols セル分の UTF-8 文字欄を構築する。
+//   out: 描画するワイド文字列 / dx: out の各文字の送り幅（ExtTextOutW へ渡す）。
+//   carryCells: 直前の行からはみ出したセル数（行頭に空白で詰める）。更新する。
+//   グリフがセルを使い切らない分は空白で埋めるため、out.size() と消費セル数は一致しない。
+//   行末をまたぐ文字はそのまま描き切り、はみ出したセル数を carryCells へ残す
+//   （既存の文字セットが 2 セル文字で 1 セルはみ出すのと同じ扱い）。
+void CStirlingView::BuildCharCellsUtf8(const std::vector<unsigned char>& buf, int& gi, int cols,
+                                       int& carryCells, HDC hdc, int charW,
+                                       std::vector<unsigned char>* cache,
+                                       std::wstring& out, std::vector<INT>& dx,
+                                       int& cellsOut, bool& eof) const {
+    const int nbuf = static_cast<int>(buf.size());
+    out.clear();
+    dx.clear();
+    eof = false;
+    cellsOut = 0;
+    int col = 0;
+
+    // 直前の行からのはみ出しを空白で詰める。
+    for (; carryCells > 0 && col < cols; --carryCells, ++col) {
+        out.push_back(L' ');
+        dx.push_back(charW);
+    }
+    if (carryCells > 0) { cellsOut = col; return; }   // 1 行がはみ出しだけで埋まった
+
+    while (col < cols) {
+        if (gi >= nbuf) { eof = true; break; }
+        const stirling::Utf8Decoded d =
+            stirling::DecodeUtf8(&buf[gi], static_cast<size_t>(nbuf - gi));
+        if (!d.ok) {
+            // 不正な列も、バッファ端で途切れた列も 1 バイト = 1 セルの '.' にする。
+            //   途切れた列は次の窓で読み直されるため、ここで先読みはしない。
+            out.push_back(L'.');
+            dx.push_back(charW);
+            ++gi; ++col;
+            continue;
+        }
+        const int bytes = d.length;
+        int glyphCells = 1;
+        if (Utf8IsControl(d.codePoint)) {
+            // 制御文字はバイト数ぶんの '.' にする（1 バイト = 1 セルを保つ）。
+            for (int i = 0; i < bytes; ++i) { out.push_back(L'.'); dx.push_back(charW); }
+            gi += bytes; col += bytes;
+            continue;
+        }
+        glyphCells = Utf8GlyphCells(hdc, d.codePoint, charW, cache);
+        if (glyphCells > bytes) { glyphCells = bytes; }   // セル数はバイト数を超えない
+
+        if (d.codePoint < 0x10000) {
+            out.push_back(static_cast<wchar_t>(d.codePoint));
+            dx.push_back(glyphCells * charW);
+        } else {
+            const unsigned int v = d.codePoint - 0x10000;
+            out.push_back(static_cast<wchar_t>(0xD800 + (v >> 10)));
+            dx.push_back(glyphCells * charW);
+            out.push_back(static_cast<wchar_t>(0xDC00 + (v & 0x3FF)));
+            dx.push_back(0);   // サロゲートペアは 2 コード単位で 1 グリフ。送りは先頭に集約する
+        }
+        for (int i = glyphCells; i < bytes; ++i) {   // 余ったセルは空白で埋める
+            out.push_back(L' ');
+            dx.push_back(charW);
+        }
+        gi += bytes;
+        col += bytes;
+    }
+    cellsOut = col;
+    carryCells = (col > cols) ? (col - cols) : 0;
+}
+
+// 窓の先頭が UTF-8 の多バイト文字の途中なら、読み飛ばすバイト数（0..3）を返す。
+//   手前 3 バイトと、そこから 4 バイトを読んで core の判定へ渡す（列全体の妥当性を
+//   見るため。壊れた列なら 0 を返し、各バイトが独立した '.' セルになる）。
+int CStirlingView::InitialCarryUtf8(stirling::FileOffset startAbs) {
+    if (startAbs <= 0) { return 0; }
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr) { return 0; }
+    const stirling::FileOffset back = (startAbs >= 3) ? 3 : startAbs;
+    unsigned char win[7] = {0};
+    size_t n = 0;
+    for (stirling::FileOffset p = startAbs - back; p < startAbs + 4; ++p) {
+        unsigned char b = 0;
+        if (!pDoc->GetByteAt(p, &b)) { break; }   // データ末尾。読めた範囲で判定する
+        win[n++] = b;
+        if (n >= sizeof(win)) { break; }
+    }
+    return stirling::Utf8CarryBytesAt(win, n, static_cast<size_t>(back));
+}
+
 void CStirlingView::DrawCharColumn(CDC* pDC, stirling::FileOffset firstRow, int rows,
                                    stirling::FileOffset total) {
     CStirlingDoc* pDoc = GetDocument();
@@ -2127,7 +2336,12 @@ void CStirlingView::DrawCharColumn(CDC* pDC, stirling::FileOffset firstRow, int 
     if (start >= total) return;
     int winLen = rows * bpr;
     if (start + winLen > total) { winLen = static_cast<int>(total - start); }
-    std::vector<unsigned char> buf = pDoc->ReadRange(start, winLen);
+    // UTF-8 は行末で文字が途切れると次行のセル数が変わるため、窓の末尾を最大 3 バイト
+    //   だけ余分に読む（余分は復号のためだけで、セルとしては描かない）。
+    int readLen = winLen;
+    if (cs == 6 && start + readLen + 3 <= total) { readLen += 3; }
+    else if (cs == 6 && start + readLen < total) { readLen = static_cast<int>(total - start); }
+    std::vector<unsigned char> buf = pDoc->ReadRange(start, readLen);
     const int nbuf = static_cast<int>(buf.size());
     if (nbuf <= 0) return;
 
@@ -2138,6 +2352,11 @@ void CStirlingView::DrawCharColumn(CDC* pDC, stirling::FileOffset firstRow, int 
 
     pDC->SetTextColor(m_clrDataText);
     pDC->SetBkColor(m_clrDataBack);
+
+    if (cs == 6) {   // UTF-8（ワイド描画。Issue #98）
+        DrawCharColumnUtf8(pDC, start, rows, bpr, buf, x);
+        return;
+    }
 
     int gi = 0;
     int carry = InitialCarry(cs, start, total);
@@ -2160,6 +2379,33 @@ void CStirlingView::DrawCharColumn(CDC* pDC, stirling::FileOffset firstRow, int 
     }
 }
 
+// UTF-8 文字欄の描画（Issue #98）。桁幅・行高は既存フォントのまま、文字欄だけ
+//   DEFAULT_CHARSET のフォントでワイド描画する。dx で各グリフの送りを指定するため、
+//   16進欄との桁ずれは起きない。
+void CStirlingView::DrawCharColumnUtf8(CDC* pDC, stirling::FileOffset start, int rows, int bpr,
+                                       const std::vector<unsigned char>& buf, int x) {
+    if (m_utf8CellWidth.size() != 0x10000) { m_utf8CellWidth.assign(0x10000, 0); }
+    const stirling::ScopedSelectFont selFont(pDC, &m_fontUtf8);
+    HDC hdc = pDC->GetSafeHdc();
+
+    int gi = InitialCarryUtf8(start);       // 窓の先頭が文字の途中なら、そのバイトを飛ばす
+    int carryCells = gi;                    // 飛ばしたバイトも窓の中＝同じ数の空白セルを置く
+    std::wstring out;
+    std::vector<INT> dx;
+    for (int r = 0; r < rows; ++r) {
+        const int y = (r + 1) * m_rowH;     // +1: ヘッダ1行分
+        bool eof = false;
+        int cells = 0;
+        BuildCharCellsUtf8(buf, gi, bpr, carryCells, hdc, m_charW, &m_utf8CellWidth,
+                           out, dx, cells, eof);
+        if (!out.empty()) {
+            ::ExtTextOutW(hdc, x, y, 0, nullptr, out.c_str(),
+                          static_cast<UINT>(out.size()), dx.data());
+        }
+        if (eof) break;
+    }
+}
+
 // ---- 文字セット / バイトオーダ 切替コマンド ----
 
 void CStirlingView::OnCharset(UINT nID) {
@@ -2173,6 +2419,7 @@ void CStirlingView::OnCharset(UINT nID) {
     case ID_CHARSET_UNICODE: cs = 3; break;
     case ID_CHARSET_EBCDIC:  cs = 4; break;
     case ID_CHARSET_EBCIDK:  cs = 5; break;
+    case ID_CHARSET_UTF8:    cs = 6; break;   // 移植で追加（Issue #98）
     default: return;
     }
     if (cs != pDoc->GetCharset()) {
@@ -2181,6 +2428,9 @@ void CStirlingView::OnCharset(UINT nID) {
         pDoc->UpdateAllViews(nullptr);
     }
 }
+
+// UTF-8 は既存の ID 範囲（0x8053-0x8057）と連続しないため単独のハンドラで受ける。
+void CStirlingView::OnCharsetUtf8() { OnCharset(ID_CHARSET_UTF8); }
 
 void CStirlingView::OnUpdateCharset(CCmdUI* pCmdUI) {
     CStirlingDoc* pDoc = GetDocument();
@@ -2193,6 +2443,7 @@ void CStirlingView::OnUpdateCharset(CCmdUI* pCmdUI) {
     case ID_CHARSET_UNICODE: cs = 3; break;
     case ID_CHARSET_EBCDIC:  cs = 4; break;
     case ID_CHARSET_EBCIDK:  cs = 5; break;
+    case ID_CHARSET_UTF8:    cs = 6; break;   // 移植で追加（Issue #98）
     }
     pCmdUI->SetRadio(cs == pDoc->GetCharset() ? TRUE : FALSE);
 }
@@ -2281,8 +2532,41 @@ std::vector<unsigned char> CStirlingView::TranslateInputChar(int charset, unsign
 void CStirlingView::InputTextChar(unsigned int ch) {
     CStirlingDoc* pDoc = GetDocument();
     if (pDoc == nullptr) return;
-    std::vector<unsigned char> bytes = TranslateInputChar(pDoc->GetCharset(), ch);
-    if (bytes.empty()) return;
+    InputBytes(TranslateInputChar(pDoc->GetCharset(), ch));
+}
+
+// ワイド入力（WM_CHAR / WM_IME_CHAR の UTF-16 コード単位）を 1 文字ぶん処理する。
+//   UTF-8 のときは CP932 を経由せずワイドから直接符号化する（Issue #98）。
+//   CP932 に無い文字も入力できるようにするため。他の文字セットは従来どおり
+//   CP932 のコード値へ落としてから文字セット別の変換にかける。
+void CStirlingView::InputWideChar(UINT unit) {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr) return;
+    const wchar_t wc = static_cast<wchar_t>(unit);
+    if (pDoc->GetCharset() == 6) {
+        // サロゲートペアは 2 回に分けて届く。上位を保持して下位が来たときに合成する。
+        if (wc >= 0xD800 && wc <= 0xDBFF) { m_pendingHighSurrogate = wc; return; }
+        unsigned int cp = static_cast<unsigned int>(wc);
+        if (wc >= 0xDC00 && wc <= 0xDFFF) {
+            if (m_pendingHighSurrogate == 0) { return; }   // 対になっていない下位は捨てる
+            cp = 0x10000u + ((static_cast<unsigned int>(m_pendingHighSurrogate) - 0xD800u) << 10)
+                 + (static_cast<unsigned int>(wc) - 0xDC00u);
+        }
+        m_pendingHighSurrogate = 0;
+        std::vector<unsigned char> bytes;
+        if (!stirling::EncodeUtf8(cp, bytes)) { return; }
+        InputBytes(bytes);
+        return;
+    }
+    m_pendingHighSurrogate = 0;
+    unsigned int cp932 = 0;
+    if (WideInputCharToCp932(unit, cp932)) { InputTextChar(cp932); }
+}
+
+// 変換済みバイト列を現在のモードで挿入／上書きする（原 InputTextChar の後半）。
+void CStirlingView::InputBytes(std::vector<unsigned char> bytes) {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr || bytes.empty()) return;
     const int n = static_cast<int>(bytes.size());
 
     if (m_selActive) {
@@ -2329,10 +2613,7 @@ LRESULT CStirlingView::OnImeChar(WPARAM wParam, LPARAM /*lParam*/) {
         if (!pDoc->CanEdit()) {
             ::MessageBeep(0);   // 編集禁止中は IME 確定入力も拒否
         } else if (m_activePane == 1) {
-            unsigned int cp932;
-            if (WideInputCharToCp932(static_cast<UINT>(wParam), cp932)) {
-                InputTextChar(cp932);
-            }
+            InputWideChar(static_cast<UINT>(wParam));
         } else {
             ::MessageBeep(0);   // 16進ペインでは全角入力不可（原挙動）
         }
@@ -2586,6 +2867,18 @@ void CStirlingView::OnDestroy() {
         m_pDiffDlg->DestroyWindow();   // Cleanup→PostNcDestroy（自己破棄・参照クリア）
     }
     m_pDiffDlg = nullptr;
+
+    // 対象ビューとして参照されている一覧も閉じる。OnViewDestroyed() は対象外を
+    // 無視するため、全ビューを走査し、自己破棄後は各反復でポインターを再取得する。
+    std::vector<CStirlingView*> views;
+    EnumAllViews(views);
+    for (CStirlingView* view : views) {
+        if (view == nullptr || view == this) { continue; }
+        CDiffListDlg* pDlg = view->DiffDlg();
+        if (pDlg == nullptr || !::IsWindow(pDlg->GetSafeHwnd())) { continue; }
+        pDlg->OnViewDestroyed(this);
+    }
+
     // 同期グループから自分を除去（このビュー解放後のアクセスを防ぐ）。相手側の配列からも自分を外す。
     for (CStirlingView* p : m_syncGroup) {
         if (p != nullptr) {
@@ -2919,18 +3212,19 @@ void CStirlingView::RunCompareWith(CStirlingView* pTargetView) {
         ApplyCompareToDoc(pTargetDoc, nullptr);
         return;
     }
+
     // 既存の相違一覧ダイアログがあれば閉じる（比較をやり直す）。
     if (m_pDiffDlg != nullptr && ::IsWindow(m_pDiffDlg->GetSafeHwnd())) {
         m_pDiffDlg->DestroyWindow();   // Cleanup→PostNcDestroy で自己破棄・参照クリア
     }
 
-    // 両文書の全ビューへ差分を設定（比較色ハイライト）。
-    ApplyCompareToDoc(pDoc, &diffs);
-    ApplyCompareToDoc(pTargetDoc, &diffs);
-
     // 相違一覧ダイアログ（モードレス）を生成（原 FUN_00409930）。開始ビューが所有する。
     CDiffListDlg* pDlg = new CDiffListDlg();
     if (pDlg->CreateModeless(this, pTargetView, diffs, AfxGetMainWnd())) {
+        // 両文書の全ビューへ差分を設定（比較色ハイライト）。
+        // ダイアログ生成後に適用するため、生成失敗時に比較状態だけを残さない。
+        ApplyCompareToDoc(pDoc, &diffs);
+        ApplyCompareToDoc(pTargetDoc, &diffs);
         m_pDiffDlg = pDlg;
         pDlg->ShowWindow(SW_SHOW);
     } else {
@@ -3116,14 +3410,14 @@ void CStirlingView::OnUpdateIndicatorSize(CCmdUI* pCmdUI) {
 
 void CStirlingView::OnUpdateIndicatorCharset(CCmdUI* pCmdUI) {
     // 原 FUN_00424bd0: 文字セット名（0=ASCII/1=SHIFT-JIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK）。
-    //   ラベルは純 ASCII（RC 6040+cs と同値）。
+    //   ラベルは純 ASCII（RC 6040+cs と同値）。6=UTF-8 は移植で追加（Issue #98）。
     static const wchar_t* const kNames[] = {
-        L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK",
+        L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK", L"UTF-8",
     };
     CStirlingDoc* pDoc = GetDocument();
     pCmdUI->Enable(TRUE);
     const int cs = (pDoc != nullptr) ? pDoc->GetCharset() : 1;
-    pCmdUI->SetText((cs >= 0 && cs <= 5) ? kNames[cs] : L"");
+    pCmdUI->SetText((cs >= 0 && cs < (int)_countof(kNames)) ? kNames[cs] : L"");
 }
 
 void CStirlingView::OnUpdateIndicatorAddrDec(CCmdUI* pCmdUI) {
@@ -3436,6 +3730,10 @@ void CStirlingView::SelectPrintFont(CDC* pDC) {
     wcscpy_s(lf.lfFaceName, LF_FACESIZE, L"ＭＳ 明朝");   // 原 DAT_004b67ec="ＭＳ 明朝"
     HFONT hf = ::CreateFontIndirectW(&lf);
     if (hf != nullptr) { m_printFont.Attach(hf); }   // 以後の破棄は CFont（m_printFont）が担う
+    // UTF-8 文字欄用（Issue #98）。寸法は同じで charset だけ DEFAULT にする。
+    lf.lfCharSet = DEFAULT_CHARSET;
+    HFONT hfUtf8 = ::CreateFontIndirectW(&lf);
+    if (hfUtf8 != nullptr) { m_printFontUtf8.Attach(hfUtf8); }
 }
 
 // ページ描画矩形から、印刷フォントのメトリクスとダンプグリッド領域・1ページ行数を算出。
@@ -3545,6 +3843,7 @@ static const char* PrintCharsetName(int cs) {
     case 3:  return "Unicode";
     case 4:  return "EBCDIC";
     case 5:  return "EBCIDK";
+    case 6:  return "UTF-8";      // 移植で追加（Issue #98）
     default: return "ASCII";
     }
 }
@@ -3651,10 +3950,25 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
     }
     if (byteCount < 0) { byteCount = 0; }
 
-    const std::vector<unsigned char> buf = pDoc->ReadRange(dataStart, static_cast<int>(byteCount));
+    // UTF-8 は行末で文字が途切れるとセル数が変わるため、末尾を最大 3 バイト余分に読む。
+    long long readCount = byteCount;
+    if (cs == 6) {
+        const long long avail = static_cast<long long>(Total()) - dataStart;
+        readCount = (byteCount + 3 <= avail) ? (byteCount + 3) : avail;
+        if (readCount < 0) { readCount = 0; }
+    }
+    const std::vector<unsigned char> buf = pDoc->ReadRange(dataStart, static_cast<int>(readCount));
     const int nbuf = static_cast<int>(buf.size());
     int gi = 0;
     int carry = InitialCarry(cs, dataStart, Total());
+    // UTF-8 の持ち越し（セル数）と読み飛ばし。窓の先頭が文字の途中なら空白で詰める。
+    int carryCellsUtf8 = 0;
+    std::vector<unsigned char> utf8CellCache;
+    if (cs == 6) {
+        gi = InitialCarryUtf8(dataStart);
+        carryCellsUtf8 = gi;
+        utf8CellCache.assign(0x10000, 0);
+    }
 
     stirling::FileOffset rowsThisPage =
         totalRows - static_cast<stirling::FileOffset>(pageIndex) * rowsPerPage;
@@ -3707,6 +4021,26 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
 
         // 文字欄（先頭範囲外は空白詰め、BuildCharCells で文字セット別に構築）
         const int lead = (rowAddr < start) ? static_cast<int>(start - rowAddr) : 0;
+        if (cs == 6) {   // UTF-8 はワイド描画（Issue #98）
+            const stirling::ScopedSelectFont selUtf8(pDC, const_cast<CFont*>(&m_printFontUtf8));
+            std::wstring wout;
+            std::vector<INT> wdx;
+            bool weof = false;
+            int wcells = 0;
+            std::wstring line(static_cast<size_t>(lead), L' ');
+            std::vector<INT> ldx(static_cast<size_t>(lead), charW);
+            BuildCharCellsUtf8(buf, gi, bpr - lead, carryCellsUtf8, pDC->GetSafeHdc(), charW,
+                               &utf8CellCache, wout, wdx, wcells, weof);
+            line += wout;
+            ldx.insert(ldx.end(), wdx.begin(), wdx.end());
+            pDC->SetTextColor(RGB(0, 0, 0));
+            pDC->SetBkColor(RGB(255, 255, 255));
+            if (!line.empty()) {
+                ::ExtTextOutW(pDC->GetSafeHdc(), charX, y, 0, nullptr, line.c_str(),
+                              static_cast<UINT>(line.size()), ldx.data());
+            }
+            continue;
+        }
         std::string chars(static_cast<size_t>(lead), ' ');
         bool eof = false;
         chars += BuildCharCells(buf, gi, bpr - lead, cs, carry, beBig, ebc, eof);
@@ -3783,6 +4117,14 @@ void CStirlingView::OnSelectRange() {
     SetFocus();
 }
 
+namespace {
+// ワイド文字列を UTF-8 バイト列へ（ダンプ保存の文字欄用。Issue #98）。
+std::string Utf8BytesFromWide(const std::wstring& w) {
+    const std::vector<unsigned char> b = stirling::Utf8FromWide(w.c_str(), w.size());
+    return std::string(reinterpret_cast<const char*>(b.data()), b.size());
+}
+}  // namespace
+
 // 整形テキストダンプの書き出し（原 FUN_0045d3e2）。
 //   1行 = アドレス(11) + 16進(bpr×"XX ") + 2空白 + 文字欄(bpr) + 1空白 + CRLF。
 //   行頭が行境界に非整列の場合は先頭列を空白で詰める（原の部分先頭行処理）。
@@ -3808,12 +4150,34 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
     }
 
     const stirling::FileOffset count = endPos - startPos + 1;
-    const std::vector<unsigned char> buf = pDoc->ReadRange(startPos, count);
+    // UTF-8 は行末で文字が途切れるとセル数が変わるため、末尾を最大 3 バイト余分に読む。
+    stirling::FileOffset readCount = count;
+    if (cs == 6) {
+        const stirling::FileOffset avail = Total() - startPos;
+        readCount = (count + 3 <= avail) ? (count + 3) : avail;
+        if (readCount < 0) { readCount = 0; }
+    }
+    const std::vector<unsigned char> buf = pDoc->ReadRange(startPos, readCount);
     const int nbuf = static_cast<int>(buf.size());
 
     const stirling::FileOffset rowStart = startPos - (startPos % bpr);
     int gi = 0;
     int carry = InitialCarry(cs, startPos, Total());
+    // UTF-8（Issue #98）: 文字欄はセル整列を保ったままワイドで構築し、UTF-8 で書き出す。
+    //   グリフ幅の実測に DC が要るので、画面と同じフォントを載せたクライアント DC を使う
+    //   （表示とダンプで同じ見た目になるようにするため）。
+    int carryCellsUtf8 = 0;
+    std::vector<unsigned char> utf8CellCache;
+    CClientDC dumpDC(this);
+    CFont* pOldDumpFont = nullptr;
+    if (cs == 6) {
+        gi = InitialCarryUtf8(startPos);
+        carryCellsUtf8 = gi;
+        utf8CellCache.assign(0x10000, 0);
+        if (m_fontUtf8.GetSafeHandle() != nullptr) {
+            pOldDumpFont = dumpDC.SelectObject(&m_fontUtf8);
+        }
+    }
 
     std::string outAll;
     outAll.reserve(static_cast<size_t>((endPos - rowStart) / bpr + 2) *
@@ -3871,6 +4235,20 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
 
         // 文字欄（bpr セル + 末尾 1 空白 = bpr+1 幅。先頭の範囲外列は空白詰め）
         const int lead = (rowAddr < startPos) ? static_cast<int>(startPos - rowAddr) : 0;
+        if (cs == 6) {   // UTF-8（Issue #98）
+            std::wstring wout;
+            std::vector<INT> wdx;
+            bool weof = false;
+            int wcells = 0;
+            BuildCharCellsUtf8(buf, gi, bpr - lead, carryCellsUtf8, dumpDC.GetSafeHdc(),
+                               m_charW, &utf8CellCache, wout, wdx, wcells, weof);
+            std::wstring wline(static_cast<size_t>(lead), L' ');
+            wline += wout;
+            // セル数で右端を揃える（全角グリフは 1 文字で 2 セルぶんの幅を占める）。
+            const int used = lead + wcells;
+            if (used < bpr + 1) { wline.append(static_cast<size_t>(bpr + 1 - used), L' '); }
+            line += Utf8BytesFromWide(wline);
+        } else {
         std::string chars(static_cast<size_t>(lead), ' ');
         bool eof = false;
         chars += BuildCharCells(buf, gi, bpr - lead, cs, carry, beBig, ebc, eof);
@@ -3880,10 +4258,13 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
             chars.resize(static_cast<size_t>(bpr) + 1);   // DBCS 行末オーバーシュートを末尾空白位置に収める
         }
         line += chars;
+        }
         line += "\r\n";
 
         outAll += line;
     }
+
+    if (pOldDumpFont != nullptr) { dumpDC.SelectObject(pOldDumpFont); }
 
     file.Write(outAll.data(), static_cast<UINT>(outAll.size()));
     file.Close();
@@ -3903,6 +4284,7 @@ std::vector<unsigned char> CStirlingView::BuildTextBytes(LPCWSTR text) const {
     CStirlingDoc* pDoc = GetDocument();
     const int cs = (pDoc != nullptr) ? pDoc->GetCharset() : 1;
     if (text == nullptr) { return out; }
+    if (cs == 6) { return stirling::Utf8FromWide(text, ::wcslen(text)); }   // Issue #98
     for (LPCWSTR pw = text; *pw != L'\0'; ++pw) {
         const wchar_t wc = *pw;
         char mb[8] = {0};
@@ -3922,6 +4304,7 @@ std::vector<unsigned char> CStirlingView::BuildTextBytes(LPCWSTR text) const {
 std::vector<unsigned char> CStirlingView::EncodeText(int charset, LPCWSTR text) {
     std::vector<unsigned char> out;
     if (text == nullptr) { return out; }
+    if (charset == 6) { return stirling::Utf8FromWide(text, ::wcslen(text)); }   // Issue #98
     for (LPCWSTR pw = text; *pw != L'\0'; ++pw) {
         const wchar_t wc = *pw;
         char mb[8] = {0};

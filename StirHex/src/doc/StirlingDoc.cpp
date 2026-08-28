@@ -122,7 +122,7 @@ void CStirlingDoc::ResolveSettings() {
 //   挿入モード/編集禁止）。fileOpen=true のときのみ「編集禁止」既定を適用する。
 void CStirlingDoc::ApplyOpenDefaults(bool fileOpen) {
     const CStirlingSettings& s = m_settings;   // この文書の解決済み設定
-    if (s.defCharset >= 0 && s.defCharset <= 5) { m_charset = s.defCharset; }
+    if (s.defCharset >= 0 && s.defCharset <= 6) { m_charset = s.defCharset; }
     m_byteOrderBig  = (s.defByteOrderBig != 0);
     m_overwriteMode = !s.openInsertMode;    // 挿入モード既定ON → 上書きOFF
     if (fileOpen) {

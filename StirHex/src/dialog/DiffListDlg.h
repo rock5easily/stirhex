@@ -11,6 +11,7 @@
 #include <utility>
 
 class CStirlingView;
+class CDiffListMinimizedProxy;
 
 class CDiffListDlg : public CDialog {
 public:
@@ -19,10 +20,15 @@ public:
     // モードレス生成。view1=比較元, view2=比較先, diffs=相違範囲[start,end]（両端含む, 昇順）。
     BOOL CreateModeless(CStirlingView* view1, CStirlingView* view2,
                         const std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>>& diffs, CWnd* pParent);
+    void OnViewDestroyed(CStirlingView* view);
 
 protected:
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();
+    afx_msg void OnDestroy();
+    afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
+    afx_msg LRESULT OnMinimizedProxyRestore(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnMinimizedProxyClose(WPARAM wParam, LPARAM lParam);
     virtual void OnOK();          // ジャンプ（IDOK）: 選択相違へ移動（閉じない）
     virtual void OnCancel();      // 閉じる（IDCANCEL）: 比較状態を解除して破棄
     virtual void PostNcDestroy(); // モードレスのため delete this
@@ -37,6 +43,13 @@ protected:
     void ApplySync();             // シンクロチェックを両ビューへ反映
     void Cleanup();               // 両ビューの比較状態・同期を解除
     bool ViewAlive(CStirlingView* v) const;   // ビューがまだ有効か
+    bool CreateMinimizedProxy();
+    void DestroyMinimizedProxy();
+    void RestoreFromMinimizedProxy();
+    void CloseFromMinimizedProxy();
+    void OnMinimizedProxyDestroyed(CDiffListMinimizedProxy* proxy);
+    void KeepMinimizedProxyInsideMdi();
+    friend class CDiffListMinimizedProxy;
 
     CStirlingView* m_view1;
     CStirlingView* m_view2;
@@ -45,4 +58,10 @@ protected:
     CListCtrl m_list;
     BOOL m_hilite;                // 比較結果の強調表示（既定ON）
     BOOL m_sync;                  // シンクロスクロール（既定ON）
+    bool m_cleaned = false;       // Cleanup の二重実行を防ぐ（外部 DestroyWindow 対応）
+    bool m_minimized = false;
+    bool m_normalRectValid = false;
+    CRect m_normalRect;
+    bool m_destroying = false;
+    CDiffListMinimizedProxy* m_proxy = nullptr;
 };

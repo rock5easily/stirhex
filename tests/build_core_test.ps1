@@ -35,11 +35,15 @@ $srcCp932 = Join-Path $root "..\StirHex\src\core\Cp932Text.cpp"
 $srcCharConv = Join-Path $root "..\StirHex\src\core\CharConv.cpp"
 # struct.def parser (array element count validation, Issue #46)
 $srcStructDef = Join-Path $root "..\StirHex\src\core\StructDef.cpp"
+# Lenient hex-text parser for the paste-as-hex command (Issue #97)
+$srcHexText = Join-Path $root "..\StirHex\src\core\HexText.cpp"
+# UTF-8 decode/encode and byte-to-cell mapping for the UTF-8 charset (Issue #98)
+$srcUtf8Text = Join-Path $root "..\StirHex\src\core\Utf8Text.cpp"
 $srcInc  = Join-Path $root "..\StirHex\src"
 # ClipboardUtil.h (header only, Issue #47) needs the clipboard APIs from user32.lib
 
 Write-Host "== build ($Arch) =="
-& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcCodec" "$srcMigrate" "$srcCp932" "$srcCharConv" "$srcStructDef" /link user32.lib
+& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcCodec" "$srcMigrate" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" /link user32.lib
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
 Write-Host "== run =="

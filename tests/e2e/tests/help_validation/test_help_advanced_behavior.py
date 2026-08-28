@@ -5,8 +5,10 @@ import pytest
 import win32con
 import win32clipboard
 import win32gui
+import win32api
 
 from drivers.stirling_driver import (
+    CMD_FILE_CLOSE,
     IDC_DIFFLIST_HILITE,
     IDC_DIFFLIST_SYNC,
     IDC_MISMATCH_BYTE,
@@ -130,15 +132,91 @@ class TestHelpAdvancedBehavior:
             drv.accept_compare(compare)
 
             diff = drv.find_diff_list_dialog()
-            assert drv.get_diff_list_rows(diff) == [
+            expected_rows = [
                 ("00000001", "00000002", "00000002"),
                 ("00000004", "", "00000001"),
             ]
-            assert drv.diff_list_checks(diff) == (True, True)
+            assert drv.get_diff_list_rows(diff) == expected_rows
+            expected_checks = (True, True)
+            assert drv.diff_list_checks(diff) == expected_checks
+
+            # Issue #84: the real diff list remains a top-level popup owned by
+            # the main frame, so it can be moved outside the main window.
+            before = drv.diff_list_window_info(diff)
+            # GetParent returns the owner for a popup on some Win32 builds;
+            # either representation still proves that it is not an MDI child.
+            assert before["parent"] in (0, None, drv.hwnd)
+            assert before["owner"] == drv.hwnd
+            assert before["style"] & win32con.WS_POPUP
+            assert not before["style"] & win32con.WS_CHILD
+            assert before["style"] & win32con.WS_CAPTION
+            assert before["style"] & win32con.WS_SYSMENU
+            assert before["style"] & win32con.WS_MINIMIZEBOX
+
+            left, top, right, bottom = before["rect"]
+            width, height = right - left, bottom - top
+            main_left, main_top, main_right, main_bottom = win32gui.GetWindowRect(drv.hwnd)
+            virtual_left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+            virtual_top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+            virtual_right = virtual_left + win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+            virtual_bottom = virtual_top + win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+            candidates = [
+                (main_right + 20, main_top),
+                (main_left - width - 20, main_top),
+                (main_left, main_bottom + 20),
+                (main_left, main_top - height - 20),
+            ]
+            def _outside_main(x, y):
+                return (x + width <= main_left or x >= main_right
+                        or y + height <= main_top or y >= main_bottom)
+
+            target = next(
+                ((x, y) for x, y in candidates
+                 if _outside_main(x, y)
+                 and x + width > virtual_left and x < virtual_right
+                 and y + height > virtual_top and y < virtual_bottom),
+                None,
+            )
+            # A maximized main frame can fill the whole virtual desktop.  In
+            # that case retain a fully outside-main rect even if it is partly
+            # off-screen; SetWindowPos still proves popup ownership/mobility.
+            if target is None:
+                target = next((x, y) for x, y in candidates if _outside_main(x, y))
+            win32gui.SetWindowPos(
+                diff, 0, target[0], target[1], width, height,
+                win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
+            )
+            moved = drv.diff_list_window_info(diff)
+            assert moved["rect"] == (target[0], target[1],
+                                      target[0] + width, target[1] + height)
+            moved_left, moved_top, moved_right, moved_bottom = moved["rect"]
+            assert (moved_right <= main_left or moved_left >= main_right
+                    or moved_bottom <= main_top or moved_top >= main_bottom)
+
+            proxy = drv.minimize_diff_list(diff)
+            assert not win32gui.IsWindowVisible(diff)
+            assert not win32gui.IsIconic(diff)
+            minimized = drv.diff_list_proxy_window_info(proxy)
+            assert len(drv.get_mdi_views()) == 2
+            assert minimized["parent"] == before["mdi"]
+            assert minimized["iconic"]
+            proxy_left, proxy_top, proxy_right, proxy_bottom = minimized["rect"]
+            mdi_left, mdi_top, mdi_right, mdi_bottom = before["mdi_rect"]
+            assert mdi_left <= proxy_left <= proxy_right <= mdi_right
+            assert mdi_top <= proxy_top <= proxy_bottom <= mdi_bottom
+
+            drv.restore_diff_list(diff)
+            assert not win32gui.IsWindow(proxy)
+            restored = drv.diff_list_window_info(diff)
+            assert restored["rect"] == moved["rect"]
+            assert win32gui.IsWindowVisible(diff)
+            assert drv.get_diff_list_rows(diff) == expected_rows
+            assert drv.diff_list_checks(diff) == expected_checks
 
             active_before = drv.active_mdi_title()
             drv.click_dialog_button(diff, 1000)  # IDC_DIFFLIST_SWITCH
             assert drv.active_mdi_title() != active_before
+            assert drv.diff_list_is_uncovered(diff)
 
             drv.click_dialog_button(diff, IDC_DIFFLIST_HILITE)
             drv.click_dialog_button(diff, IDC_DIFFLIST_SYNC)
@@ -181,6 +259,31 @@ class TestHelpAdvancedBehavior:
                 ("00000001", "", "00000001")
             ]
             drv.click_dialog_button(diff, win32con.IDCANCEL)
+
+    @pytest.mark.ported
+    def test_hv027_compare_diff_list_closes_with_view(self, ported_exe_path, tmp_path):
+        first = tmp_path / "cleanup_first.dat"
+        second = tmp_path / "cleanup_second.dat"
+        first.write_bytes(b"abc123")
+        second.write_bytes(b"aXX123")
+
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start(first)
+            drv.open_file_via_dialog(second)
+            compare = drv.open_compare_dialog()
+            drv.accept_compare(compare)
+            diff = drv.find_diff_list_dialog()
+
+            # Close the non-owner comparison view; the list must clean up and die too.
+            drv.click_dialog_button(diff, 1000)  # IDC_DIFFLIST_SWITCH
+            closed_title = drv.active_mdi_title()
+            drv.post_command(CMD_FILE_CLOSE)
+            _wait_for(lambda: not win32gui.IsWindow(diff))
+
+            remaining = drv.get_mdi_views()
+            assert len(remaining) == 1
+            assert closed_title not in [remaining[0][0]]
+            assert drv.active_mdi_title() == remaining[0][0]
 
     @pytest.mark.ported
     def test_hv028_sync_scroll_dialog_and_propagation(

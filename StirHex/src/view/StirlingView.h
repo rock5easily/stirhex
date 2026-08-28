@@ -110,6 +110,11 @@ protected:
 
     // --- フォント/メトリクス（原 view+0xa8/0xac 相当） ---
     CFont m_font;
+    // UTF-8 文字欄用フォント（DEFAULT_CHARSET。GDI のフォントリンクで CP932 外の
+    //   グリフを補わせる。桁幅・行高は m_font のものを使うのでレイアウトは変わらない）。
+    CFont m_fontUtf8;
+    // コードポイント → 表示セル数（0=未測定 / 1 / 2）。フォント変更時に破棄する。
+    std::vector<unsigned char> m_utf8CellWidth;
     int   m_charW;       // 文字幅(px)
     int   m_rowH;        // 行高(px)
 
@@ -299,6 +304,23 @@ protected:
                                const unsigned char* ebc, bool& eof) const;
     // 行頭 abs が多バイト文字の途中（＝先頭に空白を出す繰越し）か判定（行跨ぎDBCS用）。
     int  InitialCarry(int charset, stirling::FileOffset startAbs, stirling::FileOffset total);
+    // --- UTF-8 文字欄（charset 6。移植で追加。Issue #98） ---
+    //   CP932 に無い文字も表示するためワイド描画にする。不変条件は他と同じで
+    //   1 ソースバイト = 1 表示セル。多バイト文字はバイト数ぶんのセルを占め、
+    //   グリフが使い切らなかったセルは空白で埋める。
+    //   out へ描画するワイド文字列、dx へその各文字の送り幅を積む（ExtTextOutW 用）。
+    //   cellsOut は消費した表示セル数（out の文字数とは一致しない）。
+    void BuildCharCellsUtf8(const std::vector<unsigned char>& buf, int& gi, int cols,
+                            int& carryCells, HDC hdc, int charW,
+                            std::vector<unsigned char>* cache,
+                            std::wstring& out, std::vector<INT>& dx,
+                            int& cellsOut, bool& eof) const;
+    // 窓の先頭 startAbs が UTF-8 の多バイト文字の途中なら、読み飛ばすバイト数（0..3）。
+    //   そのバイトは窓の中にあるので、同じ数だけ行頭に空白セルを置く。
+    int  InitialCarryUtf8(stirling::FileOffset startAbs);
+    // UTF-8 文字欄の描画（DEFAULT_CHARSET フォントでワイド描画）。
+    void DrawCharColumnUtf8(CDC* pDC, stirling::FileOffset start, int rows, int bpr,
+                            const std::vector<unsigned char>& buf, int x);
     // 範囲[startPos,endPos]（両端含む）を整形テキストダンプでファイルへ（原 FUN_0045d3e2）。
     //   成功で true。開けなければ false（呼び元がメッセージ表示）。
     bool WriteDumpImage(const CString& path, stirling::FileOffset startPos,
@@ -306,6 +328,7 @@ protected:
 
     // --- 印刷の内部状態／補助（原 view+0x338=印刷範囲, view+0x44=印刷フォント） ---
     CFont m_printFont;              // 印刷用フォント（ＭＳ明朝 h100 SHIFTJIS。OnBeginPrinting で生成）
+    CFont m_printFontUtf8;          // 印刷用 UTF-8 フォント（同寸法・DEFAULT_CHARSET）
     // 全画面プレビュー中、ビューを一時的にメインフレームへ付け替える際の復帰用子フレーム。
     CFrameWnd* m_pPreviewChildFrame = nullptr;
     bool  m_printRangeActive = false;  // 印刷範囲を指定中か（原 view+0x338 != 0）
@@ -362,10 +385,24 @@ protected:
     afx_msg void OnEditCopy();
     afx_msg void OnEditCut();
     afx_msg void OnEditPaste();
+    afx_msg void OnEditPasteHex();                       // 16進テキスト貼り付け（0x80F8。Issue #97）
     afx_msg void OnUpdateEditCopy(CCmdUI* pCmdUI);
     afx_msg void OnUpdateEditCut(CCmdUI* pCmdUI);
     afx_msg void OnUpdateEditPaste(CCmdUI* pCmdUI);
+    afx_msg void OnUpdateEditPasteHex(CCmdUI* pCmdUI);
+    // 貼り付け本体（内部バイナリ／16進テキストの両経路で共有）。
+    //   選択あり=置換／選択なしは上書きモード＋pasteOverwrite なら上書き、それ以外は挿入。
+    void PasteBytes(const std::vector<unsigned char>& bytes);
     afx_msg void OnCharset(UINT nID);                    // ID_CHARSET_* 6種を一括受信
+    afx_msg void OnCharsetUtf8();                        // ID_CHARSET_UTF8（移植で追加）
+    // ワイド入力（UTF-16 コード単位）を 1 文字ぶん処理する。UTF-8 は CP932 を
+    //   経由せず直接符号化するため、CP932 に無い文字も入力できる（Issue #98）。
+    void InputWideChar(UINT unit);
+    // 変換済みバイト列を現在のモードで挿入／上書きする。
+    //   bytes は値渡し（上書きモードで末尾に合わせて縮めることがあるため）。
+    void InputBytes(std::vector<unsigned char> bytes);
+    // UTF-8 入力で保留中の上位サロゲート（0=無し）。WM_CHAR は 2 回に分けて届く。
+    wchar_t m_pendingHighSurrogate = 0;
     afx_msg void OnUpdateCharset(CCmdUI* pCmdUI);        // ラジオチェック
     afx_msg void OnByteOrder(UINT nID);                  // ID_BYTEORDER_LITTLE/BIG
     afx_msg void OnUpdateByteOrder(CCmdUI* pCmdUI);

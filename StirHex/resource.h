@@ -209,6 +209,8 @@
 #define ID_STRUCT_RADIX_ALL_DEF 33010   // 0x80f2
 #define ID_STRUCT_EDIT_TOGGLE   33014   // 0x80f6
 #define ID_SEARCH_RESULT_COPY   33015   // 0x80f7
+#define ID_EDIT_PASTE_HEX       33016   // 0x80f8 クリップボードの16進テキストを貼り付け
+#define ID_CHARSET_UTF8        33017   // 0x80f9 キャラクターセット: UTF-8（原には無い）
 
 // ---------------------------------------------------------------------------
 // Status-bar indicator panes (original custom IDs 0xE7xx). The sizing
@@ -384,6 +386,7 @@
 #define IDC_DISP_CS_UNICODE     1903    // キャラクターセット: Unicode
 #define IDC_DISP_CS_EBCDIC      1904    // キャラクターセット: EBCDIC
 #define IDC_DISP_CS_EBCIDK      1906    // キャラクターセット: EBCIDK（1905 は欠番）
+#define IDC_DISP_CS_UTF8        1907    // キャラクターセット: UTF-8（移植で追加。Issue #98）
 #define IDC_DISP_RADIX_DEC      1910    // アドレス表示: 10進
 #define IDC_DISP_RADIX_HEX      1911    // アドレス表示: 16進
 #define IDC_DISP_BO_LITTLE      1920    // バイトオーダー: リトルエンディアン
@@ -625,6 +628,11 @@
 #define IDS_ERR_HELP_NOT_FOUND  1175    // "ヘルプファイルが見つかりません。..."
 #define IDS_ERR_HELP_OPEN       1176    // "ヘルプファイルを開けませんでした。"
 #define IDS_ERR_APP_ID          1177    // "アプリケーション識別子を設定できませんでした。"
+#define IDS_ERR_PASTE_HEX_NO_TEXT   1178    // "クリップボードにテキストがありません。"
+#define IDS_ERR_PASTE_HEX_READ      1179    // "クリップボードのテキストを取得できませんでした。"
+#define IDS_ERR_PASTE_HEX_EMPTY     1180    // "16進数値が含まれていません。"
+#define IDS_ERR_PASTE_HEX_INVALID   1181    // "16進数として扱えない文字があります（%d文字目）"
+#define IDS_ERR_PASTE_HEX_ODD       1182    // "2桁単位になっていません（%d文字目）"
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 
 // 既存の文字列リソースを参照するための別名（文言は原の文字列表にあるもの）。

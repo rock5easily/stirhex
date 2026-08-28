@@ -10,12 +10,15 @@
 #include "../StirHex/src/core/CharConv.h"
 #include "../StirHex/src/core/StructDef.h"
 #include "../StirHex/src/core/UndoBudget.h"
+#include "../StirHex/src/core/HexText.h"
+#include "../StirHex/src/core/Utf8Text.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <random>
 #include <share.h>
@@ -261,8 +264,9 @@ static void FillFullBlock(BlockList& list, BlockCursor& c, std::vector<unsigned 
 // ---- InsertByte のブロック分割（満杯ブロックの各位置への挿入）----
 static void TestInsertByteSplit() {
     std::printf("TestInsertByteSplit\n");
-    // curOffset < used-1 の位置は素直な挿入と一致する（well-defined 経路）。
-    for (int pos : {0, 1, 4000, 8191, 8192, 12000, 16382}) {
+    // Issue #93 の修正で、最終バイト上(16383)と EOF 追記位置(16384)を含む
+    // 全位置が素直な挿入と一致する。
+    for (int pos : {0, 1, 4000, 8191, 8192, 12000, 16382, 16383, 16384}) {
         BlockList list;
         NewEmptyDoc(list);
         BlockCursor c(&list);
@@ -279,32 +283,61 @@ static void TestInsertByteSplit() {
     }
 }
 
-// ---- 原 Stirling の境界クセの忠実再現（回帰アンカー）----
-// 満杯ブロック(16384)の最終バイト直前 curOffset==used-1 への InsertByte は、
-// 原 BlockCursor_InsertByte(0x0041c238) の特殊分岐により挿入バイトが
-// ブロック末尾へ「後置」される（素直な挿入位置とずれる）。加えて原コードは
-// caret オフセット(local_1c)を未初期化のまま格納する。本移植はこの挙動を再現し、
-// 未初期化 caret は UB 回避のため 0 とする。※実行時ゴールデン突合はフェーズ後段で実施。
-static void TestInsertByteFullBlockLastPosQuirk() {
-    std::printf("TestInsertByteFullBlockLastPosQuirk\n");
+// ---- 満杯ブロックの最終バイト上への InsertByte（Issue #93 回帰）----
+// 原 BlockCursor_InsertByte(0x0041c238) は curOffset==used-1 に特殊分岐を持ち、
+// 「後半全部 + b」と組み立てて挿入バイトをブロック末尾へ後置していた。結果、挿入バイトと
+// 既存の最終バイトが入れ替わる（無警告のデータ破壊）。移植では特殊分岐を廃したため、
+// 通常の分割式どおり素直な挿入位置へ収まることを固定する。
+static void TestInsertByteFullBlockLastPos() {
+    std::printf("TestInsertByteFullBlockLastPos\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
     std::vector<unsigned char> ref;
     FillFullBlock(list, c, ref);
 
-    unsigned char lastByte = ref[kBlockCapacity - 1];  // 原ブロック最終バイト
+    const unsigned char lastByte = ref[kBlockCapacity - 1];  // 元ブロックの最終バイト
     CHECK(c.InsertByte(kBlockCapacity - 1, 0xEE), "insert byte at used-1");
 
-    // 期待（原クセ再現）: [data 0..16382][挿入0xEE は末尾へ後置]
-    //   → 位置16383 は元の最終バイト、位置16384 が 0xEE。
-    std::vector<unsigned char> expected = ref;         // 16384 バイト
-    expected[kBlockCapacity - 1] = lastByte;           // 16383 は不変
-    expected.push_back(0xEE);                           // 16384 に 0xEE を後置
-    CheckEqual(list, expected, "InsertByte used-1 quirk");
-    CheckInvariants(list, expected.size(), "InsertByte used-1 quirk");
-    CHECK(list.Count() == 2, "quirk still splits into 2 blocks");
-    // caret は未初期化由来（本移植では 0）。値そのものは検証対象外。
+    // 期待: 位置16383 が 0xEE、元の最終バイトは 16384 へ押し出される。
+    std::vector<unsigned char> expected = ref;
+    expected.insert(expected.begin() + (kBlockCapacity - 1), 0xEE);
+    CheckEqual(list, expected, "InsertByte at used-1");
+    CheckInvariants(list, expected.size(), "InsertByte at used-1");
+    CHECK(list.Count() == 2, "InsertByte at used-1 splits into 2 blocks");
+    CHECK(expected[kBlockCapacity] == lastByte, "original last byte pushed right");
+}
+
+// ---- 容量超過 Insert がブロック最終バイト上でも順序を保つ（Issue #93 回帰）----
+// 原 BlockCursor_InsertWorker(0x0041cd40) の分割条件 `curOffset < usedLen-1` では、
+// curOffset==usedLen-1 かつ現ブロックに収まらない挿入が分割にも空ブロック分岐にも入らず、
+// 最終バイトを右へずらさないまま後続ブロックへ追記していた（挿入内容が最終バイトの前に残る）。
+static void TestInsertOverflowAtLastByte() {
+    std::printf("TestInsertOverflowAtLastByte\n");
+    // 満杯ブロック / 半端な末尾ブロックの双方で、収まらない量を最終バイト上へ挿入する。
+    for (int used : {kBlockCapacity, kBlockCapacity - 1, 10000}) {
+        for (int count : {1, 10, kBlockCapacity, kBlockCapacity * 2 + 7}) {
+            if (used + count <= kBlockCapacity) continue;  // 収まる場合は別経路
+            BlockList list;
+            NewEmptyDoc(list);
+            BlockCursor c(&list);
+            std::vector<unsigned char> ref(used);
+            for (int i = 0; i < used; ++i) ref[i] = static_cast<unsigned char>(i * 7 + 3);
+            CHECK(c.Insert(0, ref.data(), used), "seed block");
+
+            std::vector<unsigned char> src(count);
+            for (int i = 0; i < count; ++i) src[i] = static_cast<unsigned char>(0xE0 + (i % 16));
+
+            const int pos = used - 1;  // ブロック最終データバイト上
+            CHECK(c.Insert(pos, src.data(), count), "overflow insert at last byte");
+            ref.insert(ref.begin() + pos, src.begin(), src.end());
+
+            char where[96];
+            std::snprintf(where, sizeof(where), "Insert overflow used=%d count=%d", used, count);
+            CheckEqual(list, ref, where);
+            CheckInvariants(list, ref.size(), where);
+        }
+    }
 }
 
 // ---- DeleteByte（末尾ブロック除去含む）----
@@ -1795,61 +1828,143 @@ static void TestCp932LeadByte() {
 }
 
 // 構造体編集バーの char 配列文字列化（byte 層）。Unicode 文字セットの写像は CP932 固定。
-static void TestFormatStructCharArray() {
-    std::printf("TestFormatStructCharArray\n");
-    using stirling::FormatStructCharArray;
+static void TestFormatStructCharArrayCp932() {
+    std::printf("[TestFormatStructCharArrayCp932]\n");
+    using stirling::FormatStructCharArrayCp932;   // 0..5 の CP932 表現（Issue #107 で改称）
 
     // charset 0 (ASCII): 非印字は '.'
     const unsigned char ascii[] = { 'A', 0x00, 'B', 0x7f, 'C' };
-    CHECK(FormatStructCharArray(0, ascii, 5) == "A.B.C", "ASCII maps non-printable to dot");
+    CHECK(FormatStructCharArrayCp932(0, ascii, 5) == "A.B.C", "ASCII maps non-printable to dot");
 
     // charset 1 (SJIS): 生バイトをそのまま連結（フォントが描画）
     const unsigned char sjis[] = { 0x82, 0xa0, 'A' };
-    CHECK(FormatStructCharArray(1, sjis, 3) == std::string("\x82\xa0" "A"),
+    CHECK(FormatStructCharArrayCp932(1, sjis, 3) == std::string("\x82\xa0" "A"),
           "SJIS keeps raw bytes");
 
     // charset 3 (UTF-16LE): CP932 バイト列を返す（システム ANSI コードページ非依存）
     const unsigned char utf16[] = { 0x42, 0x30, 'A', 0x00 };   // U+3042 'あ', U+0041 'A'
-    CHECK(FormatStructCharArray(3, utf16, 4) == std::string("\x82\xa0" "A"),
+    CHECK(FormatStructCharArrayCp932(3, utf16, 4) == std::string("\x82\xa0" "A"),
           "UTF-16LE maps to CP932 bytes");
 
     // CP932 に無い文字は既定文字 '.'（原の既定文字指定に一致）
     const unsigned char utf16Euro[] = { 0xac, 0x20 };          // U+20AC euro sign
-    CHECK(FormatStructCharArray(3, utf16Euro, 2) == ".", "unmappable maps to dot");
+    CHECK(FormatStructCharArrayCp932(3, utf16Euro, 2) == ".", "unmappable maps to dot");
 
     // 端数バイト（2 バイト未満）は空
     const unsigned char odd[] = { 0x42 };
-    CHECK(FormatStructCharArray(3, odd, 1).empty(), "odd tail yields empty");
+    CHECK(FormatStructCharArrayCp932(3, odd, 1).empty(), "odd tail yields empty");
 
     // 引数の防御
-    CHECK(FormatStructCharArray(0, nullptr, 4).empty(), "nullptr yields empty");
-    CHECK(FormatStructCharArray(0, ascii, 0).empty(), "n=0 yields empty");
+    CHECK(FormatStructCharArrayCp932(0, nullptr, 4).empty(), "nullptr yields empty");
+    CHECK(FormatStructCharArrayCp932(0, ascii, 0).empty(), "n=0 yields empty");
 
     // charset 2 (EUC-JP): 主プレーン対は SJIS へ、EUC 外は原と同じ写像（Issue #42）
     const unsigned char euc[] = { 0xa4, 0xa2 };                // EUC "あ" -> SJIS 0x82A0
-    CHECK(FormatStructCharArray(2, euc, 2) == std::string("\x82\xa0"),
+    CHECK(FormatStructCharArrayCp932(2, euc, 2) == std::string("\x82\xa0"),
           "EUC main plane pair maps to SJIS");
     const unsigned char eucKana[] = { 0x8e, 0xb1 };            // 単一シフト + 半角カナ
-    CHECK(FormatStructCharArray(2, eucKana, 2) == std::string("\xb1"),
+    CHECK(FormatStructCharArrayCp932(2, eucKana, 2) == std::string("\xb1"),
           "EUC single shift yields the kana byte");
     const unsigned char eucKanaBad[] = { 0x8e, 0x41 };         // シフト対象外は 0x8e を生で
-    CHECK(FormatStructCharArray(2, eucKanaBad, 2) == std::string("\x8e" "A"),
+    CHECK(FormatStructCharArrayCp932(2, eucKanaBad, 2) == std::string("\x8e" "A"),
           "EUC single shift with bad trail keeps 0x8e");
     const unsigned char eucKanaEof[] = { 0x41, 0x8e };         // 末尾の 0x8e は打ち切り
-    CHECK(FormatStructCharArray(2, eucKanaEof, 2) == "A",
+    CHECK(FormatStructCharArrayCp932(2, eucKanaEof, 2) == "A",
           "EUC single shift at end truncates");
     const unsigned char eucLoneLead[] = { 0xa4 };              // 対にならない主プレーン先頭
-    CHECK(FormatStructCharArray(2, eucLoneLead, 1) == ".", "EUC lone lead maps to dot");
+    CHECK(FormatStructCharArrayCp932(2, eucLoneLead, 1) == ".", "EUC lone lead maps to dot");
     const unsigned char eucBadPair[] = { 0xa4, 0x20 };         // 主プレーン先頭 + 非主プレーン
-    CHECK(FormatStructCharArray(2, eucBadPair, 2) == ". ", "EUC broken pair maps to dot");
+    CHECK(FormatStructCharArrayCp932(2, eucBadPair, 2) == ". ", "EUC broken pair maps to dot");
     // EUC 外のバイトは印字可能 ASCII のみ通し、それ以外は '.'（SJIS 生バイトは化けない）
     const unsigned char eucSjis[] = { 0x82, 0x6c, 0x82, 0x72, 0x0a };   // SJIS "ＭＳ" + LF
-    CHECK(FormatStructCharArray(2, eucSjis, 5) == ".l.r.", "EUC filters non-EUC bytes");
+    CHECK(FormatStructCharArrayCp932(2, eucSjis, 5) == ".l.r.", "EUC filters non-EUC bytes");
 
     // 256 バイト上限（原 StructRow_BuildColumns の 0x100 上限）
     const std::vector<unsigned char> big(0x180, 'A');
-    CHECK(FormatStructCharArray(0, big.data(), static_cast<int>(big.size())).size() == 0x100,
+    CHECK(FormatStructCharArrayCp932(0, big.data(), static_cast<int>(big.size())).size() == 0x100,
           "caps at 256 bytes");
+}
+
+// 構造体編集バーの値列（ワイド）。Issue #107: UTF-8 を CP932 へ落とさず表示する。
+//   0..5 は「CP932 版の結果をワイドへ変換したもの」と一致すること＝表示結果が
+//   従来（表示直前に WideFromCp932 していた頃）と変わらないことを担保する。
+static void TestFormatStructCharArrayW() {
+    std::printf("[TestFormatStructCharArrayW]\n");
+    using stirling::FormatStructCharArrayCp932;
+    using stirling::FormatStructCharArrayW;
+    using stirling::WideFromCp932;
+
+    // --- 0..5 は CP932 版をワイド化したものと同じ（非退行の担保） ---
+    struct Sample { int charset; std::vector<unsigned char> bytes; const char* what; };
+    const Sample samples[] = {
+        { 0, { 'A', 0x00, 'B', 0x7f, 'C' },        "ASCII" },
+        { 1, { 0x82, 0xa0, 'A' },                  "SJIS" },
+        { 2, { 0xa4, 0xa2 },                       "EUC main plane" },
+        { 2, { 0x8e, 0xb1 },                       "EUC single shift" },
+        { 3, { 0x42, 0x30, 'A', 0x00 },            "UTF-16LE" },
+        { 3, { 0xac, 0x20 },                       "UTF-16LE unmappable" },
+        { 4, { 0xc1, 0xc2, 0x40 },                 "EBCDIC" },
+        { 5, { 0xc1, 0xc2, 0x40 },                 "EBCIDK" },
+    };
+    for (const Sample& sm : samples) {
+        const int n = static_cast<int>(sm.bytes.size());
+        const std::string mb = FormatStructCharArrayCp932(sm.charset, sm.bytes.data(), n);
+        const std::wstring expect = WideFromCp932(mb.c_str(), static_cast<int>(mb.size()));
+        CHECK(FormatStructCharArrayW(sm.charset, sm.bytes.data(), n) == expect, sm.what);
+    }
+
+    // --- charset 6 (UTF-8) ---
+    {   // 日本語（CP932 にもある文字）
+        const unsigned char utf8[] = { 0xE3, 0x81, 0x82, 'A' };   // "あA"
+        CHECK(FormatStructCharArrayW(6, utf8, 4) == std::wstring(L"あA"),
+              "UTF-8 decodes Japanese");
+    }
+    {   // CP932 に無い文字がそのまま残る（この Issue の主眼）
+        const unsigned char hangul[] = { 0xED, 0x95, 0x9C };      // "한"
+        CHECK(FormatStructCharArrayW(6, hangul, 3) == std::wstring(L"한"),
+              "UTF-8 keeps characters outside CP932");
+        // 参考: CP932 経由だと '.' に潰れていた
+        const std::string mb = FormatStructCharArrayCp932(3, hangul, 3);
+        CHECK(WideFromCp932(mb.c_str(), (int)mb.size()) != std::wstring(L"한"),
+              "the CP932 route cannot represent it");
+    }
+    {   // 4 バイト文字はサロゲートペア 2 コード単位になる
+        const unsigned char emoji[] = { 0xF0, 0x9F, 0x98, 0x80 };  // U+1F600
+        const std::wstring w = FormatStructCharArrayW(6, emoji, 4);
+        CHECK(w.size() == 2, "four byte sequence becomes a surrogate pair");
+        CHECK(w[0] == 0xD83D && w[1] == 0xDE00, "surrogate pair values");
+    }
+    {   // 不正・不完全な列は 1 バイト = 1 文字の '.'
+        const unsigned char broken[] = { 0xE3, 0x81, 'A' };        // 途中で壊れた 3 バイト列
+        CHECK(FormatStructCharArrayW(6, broken, 3) == std::wstring(L"..A"),
+              "broken sequence becomes one dot per byte");
+        const unsigned char truncated[] = { 0xE3, 0x81 };          // 末尾で切れた列
+        CHECK(FormatStructCharArrayW(6, truncated, 2) == std::wstring(L".."),
+              "truncated sequence becomes dots");
+        const unsigned char lone[] = { 0x80, 'A' };                // 単独の後続バイト
+        CHECK(FormatStructCharArrayW(6, lone, 2) == std::wstring(L".A"),
+              "lone continuation byte becomes a dot");
+    }
+    {   // 文字欄と違い、セル整列のための空白詰めはしない
+        const unsigned char two[] = { 0xE3, 0x81, 0x82, 0xE3, 0x81, 0x84 };   // "あい"
+        CHECK(FormatStructCharArrayW(6, two, 6) == std::wstring(L"あい"),
+              "no padding for cell alignment");
+    }
+    {   // 256 バイト上限は UTF-8 でも同じ（3 バイト文字 85 個 + 1 バイト）
+        std::vector<unsigned char> big;
+        for (int i = 0; i < 100; ++i) { big.push_back(0xE3); big.push_back(0x81); big.push_back(0x82); }
+        const std::wstring w = FormatStructCharArrayW(6, big.data(), static_cast<int>(big.size()));
+        // 0x100 バイト = 85 文字(255 バイト) + 余り 1 バイトが不正扱いの '.'
+        CHECK(w.size() == 86, "caps at 256 bytes");
+        CHECK(w[85] == L'.', "the leftover byte becomes a dot");
+    }
+
+    // --- 引数の防御 ---
+    {
+        const unsigned char a[] = { 'A' };
+        CHECK(FormatStructCharArrayW(6, nullptr, 4).empty(), "nullptr yields empty");
+        CHECK(FormatStructCharArrayW(6, a, 0).empty(), "n=0 yields empty");
+    }
 }
 
 // ---- struct.def パース（Issue #46: 配列要素数の検証）------------------------
@@ -1922,6 +2037,231 @@ static bool OpenClipboardForRead() {
     ++g_failures;
     std::printf("  FAIL: could not open the clipboard for reading\n");
     return false;
+}
+
+// 16進テキストの寛容パーサ（Issue #97。クリップボードの16進テキスト貼り付け）。
+//   受理形式・拒否条件と、失敗時に部分結果を返さないことを検証する。
+static void TestHexTextParse() {
+    std::printf("[TestHexTextParse]\n");
+    using stirling::HexTextError;
+    using stirling::ParseHexText;
+
+    const std::vector<unsigned char> abc = {0x41, 0x42, 0x43};
+    struct Accept { const wchar_t* text; const std::vector<unsigned char>* expect; const char* what; };
+    const std::vector<unsigned char> ab = {0x41, 0x42};
+    const std::vector<unsigned char> abcd = {0x41, 0x42, 0x43, 0x44};
+    const Accept accepts[] = {
+        { L"41 42 43",        &abc,  "space separated" },
+        { L"414243",          &abc,  "no separator" },
+        { L"41,42,43",        &abc,  "comma separated" },
+        { L"41, 42, 43",      &abc,  "comma and space" },
+        { L"0x41 0x42",       &ab,   "0x prefix" },
+        { L"0X41 0X42",       &ab,   "0X prefix" },
+        { L"\\x41 \\x42", &ab,   "backslash-x prefix" },
+        { L"41 42\r\n43 44",  &abcd, "CRLF separated" },
+        { L"\t41\t42\t",       &ab,   "tab separated" },
+        { L"  41 42  ",       &ab,   "leading/trailing spaces" },
+        { L"\r\n41 42\r\n",   &ab,   "leading/trailing CRLF is ignored" },
+        { L" \t41 42\t ",   &ab,   "leading/trailing tabs are ignored" },
+        { L",41 42,",         &ab,   "leading/trailing commas are ignored" },
+        { L"4142 43",         &abc,  "mixed token widths" },
+        { L"4a 4B",           nullptr, "mixed case" },
+    };
+    for (const Accept& a : accepts) {
+        std::vector<unsigned char> out;
+        const stirling::HexTextParseResult r = ParseHexText(a.text, std::wcslen(a.text), out);
+        CHECK(r.Ok(), a.what);
+        if (a.expect != nullptr) {
+            CHECK(out == *a.expect, a.what);
+        }
+    }
+    {   // 大小混在の値そのものも確認する
+        std::vector<unsigned char> out;
+        ParseHexText(L"4a 4B", 5, out);
+        const std::vector<unsigned char> expect = {0x4A, 0x4B};
+        CHECK(out == expect, "lower/upper case digits give the same value");
+    }
+
+    struct Reject { const wchar_t* text; HexTextError error; size_t pos; const char* what; };
+    const Reject rejects[] = {
+        { L"",                HexTextError::Empty,       0, "empty string" },
+        { L"   ",             HexTextError::Empty,       0, "separators only" },
+        { L"41 4",            HexTextError::OddDigits,   3, "odd digit token" },
+        { L"41 4 43",         HexTextError::OddDigits,   3, "single digit token is not merged" },
+        { L"414",             HexTextError::OddDigits,   0, "odd digit run" },
+        { L"41 GG 43",        HexTextError::InvalidChar, 3, "non hex character" },
+        { L"0000: 41 42  AB", HexTextError::InvalidChar, 4, "dump form is rejected at the colon" },
+        { L"41 42\x3042", HexTextError::InvalidChar, 5, "non ASCII character" },
+        { L"0x",              HexTextError::InvalidChar, 1, "prefix without digits" },
+    };
+    for (const Reject& r : rejects) {
+        std::vector<unsigned char> out(4, 0xEE);   // 失敗時に空へ戻ることを見るため詰めておく
+        const stirling::HexTextParseResult res = ParseHexText(r.text, std::wcslen(r.text), out);
+        CHECK(!res.Ok(), r.what);
+        CHECK(res.error == r.error, r.what);
+        CHECK(res.errorPos == r.pos, r.what);
+        CHECK(out.empty(), "failed parse leaves no partial result");
+    }
+
+    {   // nullptr と長さ 0 は空扱い
+        std::vector<unsigned char> out;
+        CHECK(ParseHexText(nullptr, 0, out).error == HexTextError::Empty, "null input is empty");
+        CHECK(ParseHexText(L"41", 0, out).error == HexTextError::Empty, "zero length is empty");
+    }
+
+    {   // 長い入力（区切り無し）でも全バイトを取り出す
+        std::wstring text;
+        for (int i = 0; i < 4096; ++i) { text += L"7F"; }
+        std::vector<unsigned char> out;
+        CHECK(ParseHexText(text, out).Ok(), "long token parses");
+        CHECK(out.size() == 4096, "long token yields every byte");
+        CHECK(out.front() == 0x7F && out.back() == 0x7F, "long token values are correct");
+    }
+}
+
+// UTF-8 の復号・符号化と持ち越し判定（Issue #98。キャラクターセット UTF-8 対応）。
+//   文字欄の不変条件（1 ソースバイト = 1 表示セル）を保つための土台なので、
+//   「不正な列は 1 バイトずつ独立して扱う」ことを重点的に確認する。
+static void TestUtf8Text() {
+    std::printf("[TestUtf8Text]\n");
+    using stirling::DecodeUtf8;
+    using stirling::EncodeUtf8;
+    using stirling::Utf8CarryBytesAt;
+    using stirling::Utf8FromWide;
+    using stirling::Utf8SeqLen;
+
+    // --- 列長 ---
+    CHECK(Utf8SeqLen(0x41) == 1, "ASCII lead length");
+    CHECK(Utf8SeqLen(0x80) == 0, "continuation byte is not a lead");
+    CHECK(Utf8SeqLen(0xBF) == 0, "continuation byte is not a lead");
+    CHECK(Utf8SeqLen(0xC0) == 0, "0xC0 is always overlong");
+    CHECK(Utf8SeqLen(0xC1) == 0, "0xC1 is always overlong");
+    CHECK(Utf8SeqLen(0xC2) == 2, "two byte lead");
+    CHECK(Utf8SeqLen(0xE3) == 3, "three byte lead");
+    CHECK(Utf8SeqLen(0xF0) == 4, "four byte lead");
+    CHECK(Utf8SeqLen(0xF5) == 0, "0xF5 exceeds U+10FFFF");
+    CHECK(Utf8SeqLen(0xFF) == 0, "0xFF is never valid");
+
+    // --- 正常な復号 ---
+    struct Good { const char* bytes; int len; unsigned int cp; const char* what; };
+    const Good goods[] = {
+        { "\x41",                 1, 0x41,    "ASCII A" },
+        { "\xC3\xA9",             2, 0xE9,    "two byte e acute" },
+        { "\xE3\x81\x82",         3, 0x3042,  "three byte HIRAGANA A" },
+        { "\xED\x95\x9C",         3, 0xD55C,  "three byte HANGUL (outside CP932)" },
+        { "\xF0\x9F\x98\x80",     4, 0x1F600, "four byte emoji" },
+        { "\xC2\x80",             2, 0x80,    "smallest two byte" },
+        { "\xE0\xA0\x80",         3, 0x800,   "smallest three byte" },
+        { "\xF0\x90\x80\x80",     4, 0x10000, "smallest four byte" },
+        { "\xF4\x8F\xBF\xBF",     4, 0x10FFFF,"largest code point" },
+    };
+    for (const Good& g : goods) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(g.bytes);
+        const stirling::Utf8Decoded d = DecodeUtf8(p, static_cast<size_t>(g.len));
+        CHECK(d.ok, g.what);
+        CHECK(d.codePoint == g.cp, g.what);
+        CHECK(d.length == g.len, g.what);
+    }
+
+    // --- 不正な列は 1 バイトだけ消費する ---
+    struct Bad { const char* bytes; size_t n; const char* what; };
+    const Bad bads[] = {
+        { "\x80\x41",         2, "lone continuation byte" },
+        { "\xC0\xAF",         2, "overlong two byte" },
+        { "\xC2\x41",         2, "missing continuation" },
+        { "\xE0\x80\xAF",     3, "overlong three byte" },
+        { "\xE3\x81\x41",     3, "broken three byte" },
+        { "\xED\xA0\x80",     3, "UTF-16 surrogate is not valid UTF-8" },
+        { "\xF5\x80\x80\x80", 4, "beyond U+10FFFF" },
+        { "\xF0\x80\x80\x80", 4, "overlong four byte" },
+    };
+    for (const Bad& b : bads) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(b.bytes);
+        const stirling::Utf8Decoded d = DecodeUtf8(p, b.n);
+        CHECK(!d.ok, b.what);
+        CHECK(d.length == 1, b.what);
+        CHECK(!d.truncated, b.what);
+    }
+
+    {   // バッファ端で列が途切れた場合は truncated（呼び出し側が次の窓で読み直す）
+        const unsigned char p[] = {0xE3, 0x81};
+        const stirling::Utf8Decoded d = DecodeUtf8(p, sizeof(p));
+        CHECK(!d.ok && d.truncated, "truncated sequence is reported");
+        CHECK(d.length == 1, "truncated sequence consumes one byte");
+    }
+    {   // 空・null
+        CHECK(!DecodeUtf8(nullptr, 0).ok, "null input is not decodable");
+        const unsigned char p[] = {0x41};
+        CHECK(!DecodeUtf8(p, 0).ok, "zero length is not decodable");
+    }
+
+    // --- 符号化（復号との往復） ---
+    for (const Good& g : goods) {
+        std::vector<unsigned char> out;
+        CHECK(EncodeUtf8(g.cp, out), g.what);
+        CHECK(out.size() == static_cast<size_t>(g.len), g.what);
+        CHECK(std::memcmp(out.data(), g.bytes, out.size()) == 0, g.what);
+    }
+    {
+        std::vector<unsigned char> out;
+        CHECK(!EncodeUtf8(0xD800, out), "surrogate is not encodable");
+        CHECK(!EncodeUtf8(0x110000, out), "beyond U+10FFFF is not encodable");
+        CHECK(out.empty(), "rejected code points write nothing");
+    }
+
+    // --- ワイド文字列 -> UTF-8（サロゲートペアの結合） ---
+    {
+        const wchar_t w[] = {0x41, 0x3042, 0xD55C, 0};
+        const std::vector<unsigned char> b = Utf8FromWide(w, 3);
+        const unsigned char expect[] = {0x41, 0xE3, 0x81, 0x82, 0xED, 0x95, 0x9C};
+        CHECK(b.size() == sizeof(expect), "wide to utf8 length");
+        CHECK(std::memcmp(b.data(), expect, b.size()) == 0, "wide to utf8 bytes");
+    }
+    {   // U+1F600 のサロゲートペアは 1 コードポイントへ結合する
+        const wchar_t w[] = {0xD83D, 0xDE00, 0};
+        const std::vector<unsigned char> b = Utf8FromWide(w, 2);
+        const unsigned char expect[] = {0xF0, 0x9F, 0x98, 0x80};
+        CHECK(b.size() == 4, "surrogate pair becomes one code point");
+        CHECK(std::memcmp(b.data(), expect, b.size()) == 0, "surrogate pair bytes");
+    }
+    {   // 対になっていないサロゲートは捨てる（不正な列を作らない）
+        const wchar_t w[] = {0x41, 0xD83D, 0x42, 0};
+        const std::vector<unsigned char> b = Utf8FromWide(w, 3);
+        const unsigned char expect[] = {0x41, 0x42};
+        CHECK(b.size() == 2, "unpaired surrogate is dropped");
+        CHECK(std::memcmp(b.data(), expect, b.size()) == 0, "unpaired surrogate bytes");
+        CHECK(Utf8FromWide(nullptr, 0).empty(), "null wide input is empty");
+    }
+
+    // --- 窓の先頭が文字の途中のときの読み飛ばしバイト数 ---
+    {
+        // "A" + HIRAGANA A(3 bytes) + "B" = 41 E3 81 82 42
+        const unsigned char buf[] = {0x41, 0xE3, 0x81, 0x82, 0x42};
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 0) == 0, "start of data has no carry");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 1) == 0, "lead byte has no carry");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 2) == 2, "second byte carries two bytes");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 3) == 1, "third byte carries one byte");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 4) == 0, "next lead byte has no carry");
+    }
+    {
+        // 4 バイト列 F0 9F 98 80 の 2..4 バイト目
+        const unsigned char buf[] = {0xF0, 0x9F, 0x98, 0x80, 0x41};
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 1) == 3, "four byte sequence: second byte");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 2) == 2, "four byte sequence: third byte");
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 3) == 1, "four byte sequence: fourth byte");
+    }
+    {
+        // 不正な列の途中は持ち越さない（各バイトが独立した 1 セルになる）
+        const unsigned char buf[] = {0xE3, 0x41, 0x80, 0x42};
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 2) == 0, "broken sequence does not carry");
+        const unsigned char lone[] = {0x41, 0x80, 0x42};
+        CHECK(Utf8CarryBytesAt(lone, sizeof(lone), 1) == 0, "lone continuation does not carry");
+    }
+    {
+        // 後続バイトが 4 個以上続く場合、3 バイトより手前は探さない
+        const unsigned char buf[] = {0x80, 0x80, 0x80, 0x80, 0x80};
+        CHECK(Utf8CarryBytesAt(buf, sizeof(buf), 4) == 0, "no lead byte within three bytes");
+    }
 }
 
 // クリップボード転送の RAII（Issue #47）。
@@ -2339,7 +2679,8 @@ int main() {
     TestRead();
     TestSeek();
     TestInsertByteSplit();
-    TestInsertByteFullBlockLastPosQuirk();
+    TestInsertByteFullBlockLastPos();
+    TestInsertOverflowAtLastByte();
     TestDelete();
     TestDeleteLastByteSingleBlock();
     TestFuzz();
@@ -2362,8 +2703,11 @@ int main() {
     TestSettingsMigration();
     TestCp932Text();
     TestCp932LeadByte();
-    TestFormatStructCharArray();
+    TestFormatStructCharArrayCp932();
+    TestFormatStructCharArrayW();
     TestStructDefParse();
+    TestHexTextParse();
+    TestUtf8Text();
     TestClipboardUtil();
     TestUndoBudget();
     TestDeleteRange();

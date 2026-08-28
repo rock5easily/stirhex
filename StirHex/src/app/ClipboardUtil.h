@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 namespace ui {
 
@@ -227,6 +228,81 @@ inline bool PutClipboardTextA(HWND owner, const char* text, size_t length, DWORD
         return false;   // 失敗理由は MakeClipboardTextBuffer が設定済み
     }
     return PutClipboardOwned(owner, CF_TEXT, mem, outError);
+}
+
+// クリップボードにテキスト書式（CF_UNICODETEXT / CF_TEXT）があるか。
+//   メニューの有効・無効判定用。クリップボードを開かないので他プロセスを待たせない。
+inline bool HasClipboardText() {
+    return ::IsClipboardFormatAvailable(CF_UNICODETEXT) != FALSE ||
+           ::IsClipboardFormatAvailable(CF_TEXT) != FALSE;
+}
+
+// クリップボードのテキストをワイド文字列として取得する。
+//   CF_UNICODETEXT を優先し、無ければ CF_TEXT を codePage（既定 CP932）で変換する。
+//   ANSI 側をシステム ANSI コードページで読まないのは、非日本語環境でも編集対象と
+//   同じ解釈にするため（設計メモ §5 の byte 層／wide 層の分離）。
+//   終端 NUL の有無は書式提供側に依存するため、GlobalSize が示す上限内で最初の NUL
+//   までを長さとして採用する（NUL が無ければ上限まで）。
+//   outError : 失敗理由（成功時は ERROR_SUCCESS）。テキスト書式が無い場合は
+//              ERROR_NOT_FOUND を返す。
+inline bool GetClipboardTextW(HWND owner, std::wstring& out, DWORD& outError,
+                              UINT codePage = 932) {
+    out.clear();
+    outError = ERROR_SUCCESS;
+    if (!HasClipboardText()) {
+        outError = ERROR_NOT_FOUND;
+        return false;
+    }
+    ClipboardSession clipboard(owner);
+    if (!clipboard.IsOpen()) {
+        outError = (clipboard.Error() != ERROR_SUCCESS) ? clipboard.Error() : ERROR_ACCESS_DENIED;
+        return false;
+    }
+    // GetClipboardData が返すハンドルはクリップボードの所有物。解放してはならない。
+    const bool wide = ::IsClipboardFormatAvailable(CF_UNICODETEXT) != FALSE;
+    HANDLE handle = ::GetClipboardData(wide ? CF_UNICODETEXT : CF_TEXT);
+    if (handle == nullptr) {
+        outError = ERROR_NOT_FOUND;   // 提供側が遅延レンダリングに失敗した等
+        return false;
+    }
+    const SIZE_T bytes = ::GlobalSize(handle);
+    if (bytes == 0) {
+        outError = ERROR_NOT_FOUND;
+        return false;
+    }
+    GlobalLockGuard lock(handle);
+    if (!lock.IsLocked()) {
+        outError = ::GetLastError();
+        return false;
+    }
+    if (wide) {
+        const wchar_t* p = static_cast<const wchar_t*>(lock.Get());
+        const size_t cap = static_cast<size_t>(bytes) / sizeof(wchar_t);
+        size_t len = 0;
+        while (len < cap && p[len] != L'\0') { ++len; }
+        out.assign(p, len);
+        return true;
+    }
+    const char* p = static_cast<const char*>(lock.Get());
+    size_t len = 0;
+    while (len < static_cast<size_t>(bytes) && p[len] != '\0') { ++len; }
+    if (len == 0) { return true; }   // 空文字列。変換は不要
+    if (len > static_cast<size_t>(INT_MAX)) {
+        outError = ERROR_ARITHMETIC_OVERFLOW;
+        return false;
+    }
+    const int need = ::MultiByteToWideChar(codePage, 0, p, static_cast<int>(len), nullptr, 0);
+    if (need <= 0) {
+        outError = ::GetLastError();
+        return false;
+    }
+    out.resize(static_cast<size_t>(need));
+    if (::MultiByteToWideChar(codePage, 0, p, static_cast<int>(len), &out[0], need) != need) {
+        outError = ::GetLastError();
+        out.clear();
+        return false;
+    }
+    return true;
 }
 
 }  // namespace ui

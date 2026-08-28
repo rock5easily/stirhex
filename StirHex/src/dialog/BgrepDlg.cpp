@@ -17,18 +17,37 @@ CBgrepDlg::CBgrepDlg(BgrepSettings* settings, CWnd* pParent)
     , m_settings(settings) {
 }
 
+namespace {
+
+// 文字セット名（索引=文字セットID。0..6）。
+const wchar_t* const kCharsetNames[] = {
+    L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK", L"UTF-8",
+};
+
+// コンボの表示順（索引=コンボの位置、値=文字セットID）。
+//   UTF-8(6) は文字コード体系の近い Unicode(3) の直後に置く（メニューと同じ並び）。
+const int kCharsetOrder[] = {0, 1, 2, 3, 6, 4, 5};
+
+// 文字セットID → コンボの位置（見つからなければシフトJISの位置）。
+int CharsetToComboIndex(int charset) {
+    for (int i = 0; i < (int)_countof(kCharsetOrder); ++i) {
+        if (kCharsetOrder[i] == charset) { return i; }
+    }
+    return 1;
+}
+
+}  // namespace
+
 BOOL CBgrepDlg::OnInitDialog() {
     CDialog::OnInitDialog();
 
-    // キャラクタセット（ビューと同じ 0..5 の並び）。索引=文字セットID。
+    // キャラクタセット。並びは [設定]→[キャラクターセット] メニューと同じにするため、
+    //   コンボの位置と文字セットIDは一致しない（kCharsetOrder で対応付ける）。
     if (CComboBox* pcs = (CComboBox*)GetDlgItem(IDC_BGREP_CHARSET)) {
-        static const wchar_t* const kNames[] = {
-            L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK",
-        };
-        for (const wchar_t* n : kNames) { pcs->AddString(n); }
         int cs = m_settings->charset;
-        if (cs < 0 || cs > 5) { cs = 1; }
-        pcs->SetCurSel(cs);
+        if (cs < 0 || cs >= (int)_countof(kCharsetNames)) { cs = 1; }
+        for (int id : kCharsetOrder) { pcs->AddString(kCharsetNames[id]); }
+        pcs->SetCurSel(CharsetToComboIndex(cs));
     }
 
     // 種別ラジオ（16進/文字列）。
@@ -102,7 +121,7 @@ void CBgrepDlg::OnOK() {
     int charset = 1;
     if (CComboBox* pcs = (CComboBox*)GetDlgItem(IDC_BGREP_CHARSET)) {
         const int sel = pcs->GetCurSel();
-        if (sel >= 0 && sel <= 5) { charset = sel; }
+        if (sel >= 0 && sel < (int)_countof(kCharsetOrder)) { charset = kCharsetOrder[sel]; }
     }
 
     // 検索バイト列を構築（16進解析 or 文字セット変換）。
