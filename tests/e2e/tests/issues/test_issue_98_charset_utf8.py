@@ -12,13 +12,13 @@
 import contextlib
 import re
 import time
-import winreg
 
 import pytest
 import win32con
 import win32gui
 from pywinauto import timings
 
+from drivers.settings_context import settings_value
 from drivers.stirling_driver import (
     StirlingDriver,
     ID_CHARSET_SJIS,
@@ -28,6 +28,8 @@ from drivers.stirling_driver import (
 )
 
 # 既定文字セットは拡張子別設定のレコード側に入る（環境設定の Env ではない）。
+# 拡張子別設定 Rec0（既定レコード）。StirHex は設定ファイルへ保存するため、この表記は
+# settings_context がセクション名へ読み替える（Issue #96）。
 PORT_REC0 = r"Software\StirHex\StirHex\Rec0"
 
 ID_EDIT_FIND = 57636          # MFC 標準 ID_EDIT_FIND（drivers の CMD_EDIT_FIND は別コマンド）
@@ -107,25 +109,8 @@ def _caret_address(drv):
 @contextlib.contextmanager
 def _default_charset(value):
     """既定文字セット（拡張子別設定 Rec0 の CharSet）を一時的に差し替える。"""
-    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, PORT_REC0, 0, winreg.KEY_READ | winreg.KEY_WRITE)
-    try:
-        try:
-            previous = winreg.QueryValueEx(key, "CharSet")
-        except FileNotFoundError:
-            previous = None
-        winreg.SetValueEx(key, "CharSet", 0, winreg.REG_DWORD, value)
-        try:
-            yield
-        finally:
-            if previous is None:
-                try:
-                    winreg.DeleteValue(key, "CharSet")
-                except FileNotFoundError:
-                    pass
-            else:
-                winreg.SetValueEx(key, "CharSet", 0, previous[1], previous[0])
-    finally:
-        winreg.CloseKey(key)
+    with settings_value(PORT_REC0, "CharSet", value):
+        yield
 
 
 @pytest.mark.ported

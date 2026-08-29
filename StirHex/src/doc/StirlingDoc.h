@@ -22,6 +22,8 @@ public:
     virtual BOOL OnOpenDocument(LPCTSTR lpszPathName);
     virtual BOOL OnSaveDocument(LPCTSTR lpszPathName);
     virtual void DeleteContents();
+    // 閉じる直前にマークを自動保存する（Issue #100）。
+    virtual void OnCloseDocument();
     virtual void Serialize(CArchive& ar);
     // 変更フラグ変化時に子フレームのタイトル（編集マーク「*」）を更新する。
     virtual void SetModifiedFlag(BOOL bModified = TRUE);
@@ -60,7 +62,8 @@ public:
     // 編集禁止/許可を切替（原 FUN_00436ce5）。状態0はロックで切替不可（false）。2↔1 を反転し true。
     bool ToggleEditState();
 
-    // --- 文字セット（原 doc+0x744。0=ASCII/1=SJIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK） ---
+    // --- 文字セット（原 doc+0x744。0=ASCII/1=SJIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK。
+    //     6=UTF-8 は移植で追加（Issue #98）。表示名は ui::CharsetNameW を使う） ---
     //   原の既定は 1(SJIS)（ctor で doc+0x744=1）。表示（文字欄）に用いる。
     int  GetCharset() const { return m_charset; }
     void SetCharset(int cs) { if (cs >= 0 && cs <= 6) { m_charset = cs; } }
@@ -96,6 +99,8 @@ public:
     stirling::FileOffset Redo();
     bool CanUndo() const { return !m_undoStack.empty(); }
     bool CanRedo() const { return !m_redoStack.empty(); }
+    // メモリ上限の変更を直ちに反映する（環境設定の確定時に呼ぶ。Issue #102）。
+    void ApplyUndoMemoryLimit();
     // 最終変更箇所（原 doc+0x88 Undoスタック先頭の編集位置）。無ければ -1。
     bool HasLastModified() const { return !m_undoStack.empty(); }
     stirling::FileOffset LastModifiedPos() const {
@@ -146,7 +151,7 @@ protected:
     static unsigned long long RecordBytes(const EditRecord& r) {
         return static_cast<unsigned long long>(r.bytes.size());
     }
-    // 環境設定 undoMemoryLimitMB のバイト換算。0 = 無制限。
+    // 環境設定（undoMemoryLimit / undoMemoryLimitMB）のバイト換算。0 = 無制限。
     static unsigned long long UndoMemoryLimitBytes();
     // Undo レコードを積む（保持量へ加算する。破棄判定は TrimUndoHistory が行う）。
     void PushUndoRecord(EditRecord&& r);

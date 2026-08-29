@@ -3,7 +3,8 @@
 #include "dialog/EnvSettingsDlg.h"
 #include "dialog/AccelInputDlg.h"   // 「アクセラレータの指定」ダイアログ（原 IDD 184）
 #include "resource.h"
-#include "app/ShellUtil.h"   // ui::BrowseForFolder（IFileDialog ベースのフォルダ選択）
+#include "app/ShellUtil.h"   // ui::BrowseForFolder / ui::RevealInExplorer
+#include "app/StirlingApp.h"   // theApp（設定ファイルの所在表示。Issue #111）
 #include "app/UiStrings.h"   // UI文字列はリソースから（ui::LoadW / CommandNameW）
 #include "frame/ToolbarCatalog.h"   // ToolbarRawToImage（ツールバー設定のアイコン表示）
 
@@ -17,6 +18,7 @@ static const int kTimeoutMaxDs = 20;   // 2.0 秒
 // ===========================================================================
 BEGIN_MESSAGE_MAP(CEditPage1, CPropertyPage)
     ON_WM_HSCROLL()
+    ON_BN_CLICKED(IDC_ED1_UNDO_LIMIT, &CEditPage1::OnUndoLimitChk)
 END_MESSAGE_MAP()
 
 CEditPage1::CEditPage1() : CPropertyPage(IDD_SETTINGS_EDIT1) {}
@@ -34,6 +36,8 @@ void CEditPage1::ChargeFromSettings() {
     m_highlightBoth     = m_pS->highlightBoth ? TRUE : FALSE;
     m_realtimeBitImage  = m_pS->realtimeBitImage ? TRUE : FALSE;
     m_twoStrokeTimeoutMs = m_pS->twoStrokeTimeoutMs;
+    m_undoMemoryLimit    = m_pS->undoMemoryLimit ? TRUE : FALSE;
+    m_undoMemoryLimitMB  = m_pS->undoMemoryLimitMB;
 }
 
 void CEditPage1::HarvestToSettings() {
@@ -53,6 +57,8 @@ void CEditPage1::HarvestToSettings() {
         m_twoStrokeTimeoutMs = sl->GetPos() * 100;
     }
     m_pS->twoStrokeTimeoutMs = m_twoStrokeTimeoutMs;
+    m_pS->undoMemoryLimit    = (m_undoMemoryLimit != FALSE);
+    m_pS->undoMemoryLimitMB  = m_undoMemoryLimitMB;
 }
 
 void CEditPage1::DoDataExchange(CDataExchange* pDX) {
@@ -68,6 +74,17 @@ void CEditPage1::DoDataExchange(CDataExchange* pDX) {
     DDX_Check(pDX, IDC_ED1_SUBCARET, m_subCaret);
     DDX_Check(pDX, IDC_ED1_HILIGHT_BOTH, m_highlightBoth);
     DDX_Check(pDX, IDC_ED1_REALTIME_BITIMAGE, m_realtimeBitImage);
+    DDX_Check(pDX, IDC_ED1_UNDO_LIMIT, m_undoMemoryLimit);
+    DDX_Text(pDX, IDC_ED1_UNDO_MB, m_undoMemoryLimitMB);
+    // 上限 64GB。Undo データはヒープ上に載るため、実機の RAM 上限として妥当な範囲で
+    //   取る。下限 1MB 未満では直近の1件しか保持できず設定として意味をなさない。
+    //   上限 OFF のときは入力欄も無効なので検証しない（無効な欄の値で確定を妨げない。
+    //   Issue #131）。
+    if (m_undoMemoryLimit) {
+        DDV_MinMaxInt(pDX, m_undoMemoryLimitMB,
+                      CAppSettings::kUndoMemoryLimitMinMB,
+                      CAppSettings::kUndoMemoryLimitMaxMB);
+    }
 }
 
 BOOL CEditPage1::OnInitDialog() {
@@ -80,6 +97,14 @@ BOOL CEditPage1::OnInitDialog() {
         spin->SetBuddy(GetDlgItem(IDC_ED1_SCROLLLINES));
         spin->SetPos(m_scrollLines);
     }
+    // アンドゥ上限スピン（1162 のバディ）: 範囲 1..65536 MB（DDV と同じ）。
+    if (CSpinButtonCtrl* spin = (CSpinButtonCtrl*)GetDlgItem(IDC_ED1_UNDO_MB_SPIN)) {
+        spin->SetRange32(CAppSettings::kUndoMemoryLimitMinMB,
+                         CAppSettings::kUndoMemoryLimitMaxMB);
+        spin->SetBuddy(GetDlgItem(IDC_ED1_UNDO_MB));
+        spin->SetPos(m_undoMemoryLimitMB);
+    }
+    UpdateEnableState();
     // ２ストロークタイムアウト スライダ（0.1秒刻み。ミリ秒→デシ秒に四捨五入）。
     if (CSliderCtrl* sl = (CSliderCtrl*)GetDlgItem(IDC_ED1_2STROKE_SLIDER)) {
         sl->SetRange(kTimeoutMinDs, kTimeoutMaxDs, TRUE);
@@ -120,6 +145,19 @@ void CEditPage1::OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar) {
     CPropertyPage::OnHScroll(nSBCode, nPos, pScrollBar);
 }
 
+// チェック状態に応じて従属コントロールを有効/無効化する。
+void CEditPage1::UpdateEnableState() {
+    const BOOL limit = (IsDlgButtonChecked(IDC_ED1_UNDO_LIMIT) != 0);
+    auto enable = [this](UINT id, BOOL on) {
+        if (CWnd* w = GetDlgItem(id)) { w->EnableWindow(on); }
+    };
+    enable(IDC_ED1_UNDO_MB, limit);
+    enable(IDC_ED1_UNDO_MB_SPIN, limit);
+    enable(IDC_ED1_UNDO_MB_UNIT, limit);
+}
+
+void CEditPage1::OnUndoLimitChk() { UpdateEnableState(); }
+
 // ===========================================================================
 // CEditPage2
 // ===========================================================================
@@ -136,6 +174,7 @@ void CEditPage2::ChargeFromSettings() {
     m_newDocEditable     = m_pS->newDocEditable ? TRUE : FALSE;
     m_endAutoInsert      = m_pS->endAutoInsert ? TRUE : FALSE;
     m_dynamicMark        = m_pS->dynamicMark ? TRUE : FALSE;
+    m_markAutoRestore    = m_pS->markAutoRestore ? TRUE : FALSE;
 }
 
 void CEditPage2::HarvestToSettings() {
@@ -146,6 +185,7 @@ void CEditPage2::HarvestToSettings() {
     m_pS->newDocEditable     = (m_newDocEditable != FALSE);
     m_pS->endAutoInsert      = (m_endAutoInsert != FALSE);
     m_pS->dynamicMark        = (m_dynamicMark != FALSE);
+    m_pS->markAutoRestore    = (m_markAutoRestore != FALSE);
 }
 
 void CEditPage2::DoDataExchange(CDataExchange* pDX) {
@@ -156,6 +196,7 @@ void CEditPage2::DoDataExchange(CDataExchange* pDX) {
     DDX_Check(pDX, IDC_ED2_CURPOS_STRUCT, m_curPosToStructAddr);
     DDX_Check(pDX, IDC_ED2_NEWDOC_EDITABLE, m_newDocEditable);
     DDX_Check(pDX, IDC_ED2_DYNAMIC_MARK, m_dynamicMark);
+    DDX_Check(pDX, IDC_ED2_MARK_AUTO_RESTORE, m_markAutoRestore);
     DDX_Check(pDX, IDC_ED2_END_AUTOINSERT, m_endAutoInsert);
 }
 
@@ -187,8 +228,10 @@ BEGIN_MESSAGE_MAP(CFilePage, CPropertyPage)
     ON_BN_CLICKED(IDC_FILE_BACKUP_CREATE, &CFilePage::OnBackupCreate)
     ON_BN_CLICKED(IDC_FILE_BACKUP_FOLDER_CHK, &CFilePage::OnBackupFolderChk)
     ON_BN_CLICKED(IDC_FILE_DEFFOLDER_CHK, &CFilePage::OnDefFolderChk)
+    ON_BN_CLICKED(IDC_FILE_LARGE_WARN, &CFilePage::OnLargeFileWarnChk)
     ON_BN_CLICKED(IDC_FILE_BACKUP_FOLDER_BTN, &CFilePage::OnBackupFolderBtn)
     ON_BN_CLICKED(IDC_FILE_DEFFOLDER_BTN, &CFilePage::OnDefFolderBtn)
+    ON_BN_CLICKED(IDC_FILE_INI_OPEN, &CFilePage::OnOpenSettingsFolder)
 END_MESSAGE_MAP()
 
 CFilePage::CFilePage() : CPropertyPage(IDD_SETTINGS_FILE) {}
@@ -203,6 +246,8 @@ void CFilePage::ChargeFromSettings() {
     m_linkDirect          = m_pS->linkDirect ? TRUE : FALSE;
     m_defaultFolderSpecify = m_pS->defaultFolderSpecify ? TRUE : FALSE;
     m_defaultFolder       = m_pS->defaultFolder;
+    m_largeFileWarn       = m_pS->largeFileWarn ? TRUE : FALSE;
+    m_largeFileWarnMB     = m_pS->largeFileWarnMB;
 }
 
 void CFilePage::HarvestToSettings() {
@@ -215,6 +260,8 @@ void CFilePage::HarvestToSettings() {
     m_pS->linkDirect           = (m_linkDirect != FALSE);
     m_pS->defaultFolderSpecify = (m_defaultFolderSpecify != FALSE);
     m_pS->defaultFolder        = m_defaultFolder;
+    m_pS->largeFileWarn        = (m_largeFileWarn != FALSE);
+    m_pS->largeFileWarnMB      = m_largeFileWarnMB;
 }
 
 void CFilePage::DoDataExchange(CDataExchange* pDX) {
@@ -228,6 +275,11 @@ void CFilePage::DoDataExchange(CDataExchange* pDX) {
     DDX_Check(pDX, IDC_FILE_LINK_DIRECT, m_linkDirect);
     DDX_Check(pDX, IDC_FILE_DEFFOLDER_CHK, m_defaultFolderSpecify);
     DDX_Text(pDX, IDC_FILE_DEFFOLDER, m_defaultFolder);
+    DDX_Check(pDX, IDC_FILE_LARGE_WARN, m_largeFileWarn);
+    DDX_Text(pDX, IDC_FILE_LARGE_MB, m_largeFileWarnMB);
+    // 上限 1TB。MB×1024×1024 が FileOffset(64bit) に収まる範囲で、下限は 1MB 未満だと
+    //   常に確認が出て意味をなさないため。
+    DDV_MinMaxInt(pDX, m_largeFileWarnMB, 1, 1024 * 1024);
 }
 
 BOOL CFilePage::OnInitDialog() {
@@ -240,8 +292,51 @@ BOOL CFilePage::OnInitDialog() {
         spin->SetBuddy(GetDlgItem(IDC_FILE_BACKUP_GEN));
         spin->SetPos(m_backupGenerations);
     }
+    // しきい値スピン（1157 のバディ）: 範囲 1..1048576 MB（DDV と同じ）。
+    if (CSpinButtonCtrl* spin = (CSpinButtonCtrl*)GetDlgItem(IDC_FILE_LARGE_MB_SPIN)) {
+        spin->SetRange32(1, 1024 * 1024);
+        spin->SetBuddy(GetDlgItem(IDC_FILE_LARGE_MB));
+        spin->SetPos(m_largeFileWarnMB);
+    }
     UpdateEnableState();
+    ShowSettingsFileLocation();
     return TRUE;
+}
+
+// 使用中の設定ファイルの所在を表示する（Issue #111）。
+//   保存先は探索順（コマンドライン指定／実行ファイル隣／APPDATA）で決まるため、パスだけでは
+//   「なぜそこなのか」が分からない。決定の根拠も併せて出す。編集はさせないが、読み取り専用
+//   EDIT にしているのは、長いパスを横スクロールで確認でき Ctrl+C でコピーできるため。
+void CFilePage::ShowSettingsFileLocation() {
+    SetDlgItemText(IDC_FILE_INI_PATH, theApp.SettingsFilePath());
+
+    UINT sourceId = IDS_SETTINGS_SRC_APPDATA;
+    switch (theApp.SettingsPathSource()) {
+    case stirling::settings::SettingsSource::CommandLine:
+        sourceId = IDS_SETTINGS_SRC_CMDLINE;
+        break;
+    case stirling::settings::SettingsSource::PortableExeDir:
+        sourceId = IDS_SETTINGS_SRC_PORTABLE;
+        break;
+    case stirling::settings::SettingsSource::AppData:
+        sourceId = IDS_SETTINGS_SRC_APPDATA;
+        break;
+    }
+    SetDlgItemText(IDC_FILE_INI_SOURCE, ui::LoadW(sourceId));
+
+    // 読み込みに失敗した設定ファイルは温存され、その起動では書き戻さない。設定の所在を
+    //   確かめに来る利用者はまさにその状況にいることが多いため、ここでも伝える。
+    SetDlgItemText(IDC_FILE_INI_READONLY,
+                   theApp.SettingsReadOnly() ? ui::LoadW(IDS_SETTINGS_READONLY_NOTE)
+                                             : CStringW());
+}
+
+// 設定ファイルをエクスプローラで選択表示する。まだ書き出されていなければ親フォルダを開く。
+void CFilePage::OnOpenSettingsFolder() {
+    DWORD error = ERROR_SUCCESS;
+    if (ui::RevealInExplorer(GetSafeHwnd(), theApp.SettingsFilePath(), error)) { return; }
+    ui::MsgBox(GetSafeHwnd(),
+               ui::AppendErrorReason(ui::LoadW(IDS_ERR_SETTINGS_REVEAL), error));
 }
 
 BOOL CFilePage::OnKillActive() {
@@ -257,6 +352,7 @@ void CFilePage::UpdateEnableState() {
     const BOOL backup = (IsDlgButtonChecked(IDC_FILE_BACKUP_CREATE) != 0);
     const BOOL backupFolder = backup && (IsDlgButtonChecked(IDC_FILE_BACKUP_FOLDER_CHK) != 0);
     const BOOL defFolder = (IsDlgButtonChecked(IDC_FILE_DEFFOLDER_CHK) != 0);
+    const BOOL largeWarn = (IsDlgButtonChecked(IDC_FILE_LARGE_WARN) != 0);
 
     auto enable = [this](UINT id, BOOL on) {
         if (CWnd* w = GetDlgItem(id)) { w->EnableWindow(on); }
@@ -269,11 +365,15 @@ void CFilePage::UpdateEnableState() {
     enable(IDC_FILE_BACKUP_FOLDER_BTN, backupFolder);
     enable(IDC_FILE_DEFFOLDER, defFolder);
     enable(IDC_FILE_DEFFOLDER_BTN, defFolder);
+    enable(IDC_FILE_LARGE_MB, largeWarn);
+    enable(IDC_FILE_LARGE_MB_SPIN, largeWarn);
+    enable(IDC_FILE_LARGE_MB_UNIT, largeWarn);
 }
 
 void CFilePage::OnBackupCreate()    { UpdateEnableState(); }
 void CFilePage::OnBackupFolderChk() { UpdateEnableState(); }
 void CFilePage::OnDefFolderChk()    { UpdateEnableState(); }
+void CFilePage::OnLargeFileWarnChk() { UpdateEnableState(); }
 
 // 「...」でフォルダ選択ダイアログを開き、選択結果を edit に反映する。
 void CFilePage::BrowseFolder(UINT editId) {

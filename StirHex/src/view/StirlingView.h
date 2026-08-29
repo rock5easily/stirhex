@@ -418,6 +418,8 @@ protected:
     afx_msg void OnMarkClearAll();
     afx_msg void OnUpdateMarkExists(CCmdUI* pCmdUI);   // next/prev/clear の活性
     afx_msg void OnMarkList();                          // マーク一覧ダイアログを開く
+    afx_msg void OnMarkExport();                        // マークをファイルへ書き出す（Issue #99）
+    afx_msg void OnMarkImport();                        // マークをファイルから読み込む（Issue #99）
     // --- カーソル移動コマンド（原 cat1。keymap 経由で起動。ext=m_selectMode） ---
     afx_msg void OnCursorLeft();                        // 0x800a カーソル左
     afx_msg void OnCursorRight();                       // 0x800b カーソル右

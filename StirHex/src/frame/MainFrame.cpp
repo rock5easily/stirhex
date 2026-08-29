@@ -3,6 +3,7 @@
 #include "app/UiStrings.h"   // UI文字列はリソースから
 #include "frame/MainFrame.h"
 #include "dialog/BgrepDlg.h"
+#include "dialog/DiffListDlg.h"
 #include "dialog/BgrepStatusDlg.h"
 #include "dialog/ExtSettingsDlg.h"
 #include "dialog/EnvSettingsDlg.h"
@@ -232,6 +233,13 @@ BOOL CMainFrame::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct) {
     ActivateFrame();
     SetForegroundWindow();
     return opened ? TRUE : FALSE;
+}
+
+// フレームのサイズ変更とコントロールバーの再配置は、どちらもMDIクライアント領域を変える。
+//   最小化プロキシがクライアント外へ隠れて操作不能にならないよう、ここで追従させる（Issue #123）。
+void CMainFrame::RecalcLayout(BOOL bNotify) {
+    CMDIFrameWnd::RecalcLayout(bNotify);
+    CDiffListDlg::RepositionMinimizedProxies();
 }
 
 void CMainFrame::OnSize(UINT nType, int cx, int cy) {
@@ -514,7 +522,10 @@ void CMainFrame::OnSettingsEnv() {
     theApp.AppSettings().Save();        // レジストリへ保存
     theApp.ApplyFileHistoryCount();     // ファイル履歴（MRU）数の変更を反映
     ApplyBarSettings();                 // ツールバー構成・バー表示状態を反映
-    // ドキュメントのフルパス表示（docFullPath）の変更を全文書のタイトルへ反映。
+    // 全文書へ反映するもの:
+    //   - ドキュメントのフルパス表示（docFullPath）をタイトルへ
+    //   - アンドゥバッファのメモリ上限（Issue #102）。次の編集まで待つと、上限を
+    //     下げて編集をやめた場合に超過分を抱えたままになるため、その場で切り詰める
     if (POSITION posT = theApp.GetFirstDocTemplatePosition()) {
         CDocTemplate* pTpl = theApp.GetNextDocTemplate(posT);
         if (pTpl != nullptr) {
@@ -522,6 +533,7 @@ void CMainFrame::OnSettingsEnv() {
             while (posD != nullptr) {
                 if (CStirlingDoc* d = DYNAMIC_DOWNCAST(CStirlingDoc, pTpl->GetNextDoc(posD))) {
                     d->RefreshDocTitle();
+                    d->ApplyUndoMemoryLimit();
                 }
             }
         }

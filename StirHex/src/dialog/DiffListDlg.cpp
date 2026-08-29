@@ -11,6 +11,8 @@ constexpr UINT kDiffListProxyId = 0x7F84;
 constexpr int kDiffListProxyWidth = 180;
 constexpr UINT kDiffListProxyRestoreMessage = WM_APP + 0x140;
 constexpr UINT kDiffListProxyCloseMessage = WM_APP + 0x141;
+// MDIクライアント領域の変化を最小化プロキシへ通知する（Issue #123）。
+constexpr UINT kDiffListProxyKeepInsideMessage = WM_APP + 0x142;
 }
 
 // 実ダイアログを隠している間だけMDICLIENT直下に置く復元用ウィンドウ。
@@ -37,6 +39,7 @@ public:
     void Detach() { m_owner = nullptr; }
 
 protected:
+    afx_msg LRESULT OnKeepInside(WPARAM wParam, LPARAM lParam);
     afx_msg void OnDestroy();
     afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
     afx_msg void OnNcLButtonDblClk(UINT nHitTest, CPoint point);
@@ -58,11 +61,19 @@ private:
 };
 
 BEGIN_MESSAGE_MAP(CDiffListMinimizedProxy, CWnd)
+    ON_MESSAGE(kDiffListProxyKeepInsideMessage, &CDiffListMinimizedProxy::OnKeepInside)
     ON_WM_DESTROY()
     ON_WM_SYSCOMMAND()
     ON_WM_NCLBUTTONDBLCLK()
     ON_WM_LBUTTONDBLCLK()
 END_MESSAGE_MAP()
+
+// MDIクライアント領域が変化したときの再配置要求。所有ダイアログ側の判定へ委譲する。
+LRESULT CDiffListMinimizedProxy::OnKeepInside(WPARAM /*wParam*/, LPARAM /*lParam*/) {
+    CDiffListDlg* owner = m_owner;
+    if (owner != nullptr) { owner->KeepMinimizedProxyInsideMdi(); }
+    return 0;
+}
 
 void CDiffListMinimizedProxy::OnDestroy() {
     CDiffListDlg* owner = m_owner;
@@ -280,6 +291,24 @@ void CDiffListDlg::KeepMinimizedProxyInsideMdi() {
     if (left != points[0].x || top != points[0].y) {
         m_proxy->SetWindowPos(nullptr, left, top, width, height,
                               SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+}
+
+// MDIクライアント直下のプロキシを列挙して再配置を要求する（Issue #123）。
+//   ダイアログ側の登録簿を持たず、生成時と同じ子IDで対象を特定する。
+void CDiffListDlg::RepositionMinimizedProxies() {
+    CMDIFrameWnd* pMainFrame = DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd());
+    const HWND hMdiClient = (pMainFrame != nullptr) ? pMainFrame->m_hWndMDIClient : nullptr;
+    if (hMdiClient == nullptr || !::IsWindow(hMdiClient)) { return; }
+
+    HWND hChild = ::GetWindow(hMdiClient, GW_CHILD);
+    while (hChild != nullptr) {
+        // 再配置でZオーダーは変えないが、列挙中の破棄に備えて次を先に取得する。
+        const HWND hNext = ::GetWindow(hChild, GW_HWNDNEXT);
+        if (::GetDlgCtrlID(hChild) == static_cast<int>(kDiffListProxyId)) {
+            ::SendMessage(hChild, kDiffListProxyKeepInsideMessage, 0, 0);
+        }
+        hChild = hNext;
     }
 }
 

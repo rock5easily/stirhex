@@ -1,7 +1,16 @@
 import os
 import shutil
+import time
+import warnings
 from pathlib import Path
 import pytest
+from drivers.process_guard import (
+    StirlingProcess,
+    describe_processes,
+    find_stirling_processes,
+    stop_command,
+    terminate_processes,
+)
 from drivers.stirling_driver import StirlingDriver
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -11,6 +20,103 @@ PORTED_EXE_WIN32_RELEASE = WORKSPACE_ROOT / "porting" / "StirHex" / "Release" / 
 PORTED_EXE_WIN32_DEBUG = WORKSPACE_ROOT / "porting" / "StirHex" / "Debug" / "bin" / "StirHex.exe"
 PORTED_EXE_X64_RELEASE = WORKSPACE_ROOT / "porting" / "StirHex" / "x64" / "Release" / "bin" / "StirHex.exe"
 PORTED_EXE_X64_DEBUG = WORKSPACE_ROOT / "porting" / "StirHex" / "x64" / "Debug" / "bin" / "StirHex.exe"
+
+
+class StaleStirlingProcessWarning(UserWarning):
+    """A test left a Stirling / StirHex process behind."""
+
+
+# Stirling and StirHex refuse to run twice, so one leaked process makes every later launch
+# hand its command line to that process and exit - the driver then waits for a window that
+# never appears. Guarding the session start, every test, and the session end keeps a single
+# leak from poisoning the rest of the run (Issue #113).
+_SESSION_BASELINE: set[tuple[int, int]] = set()
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--stale-processes",
+        action="store",
+        default="error",
+        choices=("error", "kill"),
+        help="What to do about Stirling / StirHex processes that are already running when "
+             "the session starts: 'error' (default) stops before any test runs, 'kill' "
+             "terminates them and continues. The default does not kill, because a process "
+             "found here may be an editor you have open with unsaved edits.",
+    )
+
+
+def pytest_sessionstart(session):
+    stale = find_stirling_processes()
+    if stale and session.config.getoption("--stale-processes") == "kill":
+        survivors = terminate_processes(stale)
+        killed = [p for p in stale if p not in survivors]
+        if killed:
+            print(f"\nTerminated stale Stirling / StirHex processes:\n"
+                  f"{describe_processes(killed)}")
+        stale = survivors
+
+    if stale:
+        pytest.exit(
+            "Stirling / StirHex is already running. Every golden test would fail with a\n"
+            "main-window timeout, because a second launch is handed to the running instance\n"
+            f"and exits immediately.\n{describe_processes(stale)}\n"
+            f"Close it, or run it down with:\n  {stop_command(stale)}\n"
+            "Pass --stale-processes=kill to have the test session do that for you.",
+            returncode=pytest.ExitCode.USAGE_ERROR,
+        )
+
+    _SESSION_BASELINE.clear()
+    _SESSION_BASELINE.update(p.key for p in find_stirling_processes())
+
+
+def _processes_since(baseline: set[tuple[int, int]],
+                     settle: float = 2.0) -> list[StirlingProcess]:
+    """Return processes that appeared after `baseline` and are still alive.
+
+    A process that is shutting down normally can outlive the test by a moment, so give the
+    set a short chance to drain before calling anything a leak.
+    """
+    deadline = time.time() + settle
+    while True:
+        extra = [p for p in find_stirling_processes() if p.key not in baseline]
+        if not extra or time.time() >= deadline:
+            return extra
+        time.sleep(0.2)
+
+
+@pytest.fixture(autouse=True)
+def stirling_process_guard(request):
+    """Terminate - and blame - any Stirling / StirHex process a test leaves behind.
+
+    Only processes that appear during the test are touched: anything already running when
+    the test began is somebody else's, and killing it could discard unsaved edits.
+    """
+    before = {p.key for p in find_stirling_processes()}
+    yield
+    leaked = _processes_since(before)
+    if not leaked:
+        return
+    survivors = terminate_processes(leaked)
+    detail = describe_processes(leaked)
+    if survivors:
+        detail += f"\nCould not terminate:\n{describe_processes(survivors)}"
+    warnings.warn(
+        f"{request.node.nodeid} left {len(leaked)} Stirling / StirHex process(es) running; "
+        f"they were terminated so the rest of the session can launch normally.\n{detail}",
+        StaleStirlingProcessWarning,
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    leaked = _processes_since(_SESSION_BASELINE, settle=1.0)
+    if not leaked:
+        return
+    survivors = terminate_processes(leaked)
+    print(f"\nTerminated Stirling / StirHex processes left over from this session:\n"
+          f"{describe_processes(leaked)}")
+    if survivors:
+        print(f"Could not terminate:\n{describe_processes(survivors)}")
 
 
 def get_ported_exe() -> Path:

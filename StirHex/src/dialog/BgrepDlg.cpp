@@ -19,11 +19,6 @@ CBgrepDlg::CBgrepDlg(BgrepSettings* settings, CWnd* pParent)
 
 namespace {
 
-// 文字セット名（索引=文字セットID。0..6）。
-const wchar_t* const kCharsetNames[] = {
-    L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK", L"UTF-8",
-};
-
 // コンボの表示順（索引=コンボの位置、値=文字セットID）。
 //   UTF-8(6) は文字コード体系の近い Unicode(3) の直後に置く（メニューと同じ並び）。
 const int kCharsetOrder[] = {0, 1, 2, 3, 6, 4, 5};
@@ -45,8 +40,9 @@ BOOL CBgrepDlg::OnInitDialog() {
     //   コンボの位置と文字セットIDは一致しない（kCharsetOrder で対応付ける）。
     if (CComboBox* pcs = (CComboBox*)GetDlgItem(IDC_BGREP_CHARSET)) {
         int cs = m_settings->charset;
-        if (cs < 0 || cs >= (int)_countof(kCharsetNames)) { cs = 1; }
-        for (int id : kCharsetOrder) { pcs->AddString(kCharsetNames[id]); }
+        if (ui::CharsetNameW(cs).IsEmpty()) { cs = 1; }
+        // 文字セット名は ui::CharsetNameW（文字列 6040-6046）へ集約する（Issue #125）。
+        for (int id : kCharsetOrder) { pcs->AddString(ui::CharsetNameW(id)); }
         pcs->SetCurSel(CharsetToComboIndex(cs));
     }
 

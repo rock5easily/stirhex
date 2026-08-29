@@ -11,6 +11,12 @@
 
 class CAppSettings {
 public:
+    // Undo メモリ上限（MB）の既定値と入力可能範囲。ダイアログの DDV と読み込み時の
+    //   正規化で同じ値を使う（Issue #131）。
+    static const int kUndoMemoryLimitDefaultMB = 256;
+    static const int kUndoMemoryLimitMinMB     = 1;
+    static const int kUndoMemoryLimitMaxMB     = 64 * 1024;   // 64GB
+
     // === 環境設定「編集１」ページ（IDD_SETTINGS_EDIT1 159） ===
     int  scrollLines        = 1;      // 垂直移動スクロール行数（1007）
     bool pasteOverwrite     = false;  // 上書モード時の貼り付けは上書き処理する（1011）
@@ -19,10 +25,13 @@ public:
     bool escDeselect        = false;  // Escキーで選択解除する（1025）
     bool deselectAfterCopy  = false;  // 選択データのコピー後に選択解除する（1066）
     bool clearUndoOnSave    = false;  // 保存時にアンドゥバッファをクリアする（1069）
-    // UI未公開（移植独自。Issue #30）。Undo/Redo スタックが退避データとして保持する
-    // 合計バイト数の上限（MB）。超過分は古いレコードから破棄する。0=無制限。
-    // レジストリ Env\UndoMemoryLimitMB で変更する。
-    int  undoMemoryLimitMB  = 256;
+    // Undo/Redo スタックが退避データとして保持する合計バイト数の上限（移植独自。
+    //   Issue #30 で導入し #102 で設定化）。超過分は古いレコードから破棄する。
+    //   上限を設けない場合は undoMemoryLimit を false にする。UndoMemoryLimit キーが
+    //   無かった頃の設定ファイル（および手編集）の undoMemoryLimitMB=0 は「無制限」を
+    //   表すため、読み込み時に「上限 OFF ＋ 既定値」へ移行する（Issue #131）。
+    bool undoMemoryLimit    = true;   // メモリ上限を設ける（1161）
+    int  undoMemoryLimitMB  = kUndoMemoryLimitDefaultMB;   // その上限（MB。1162）
     bool subCaret           = true;   // サブキャレットを表示する（1070）
     bool highlightBoth      = true;   // データ選択時にコード・文字共に反転表示する（1088）
     bool realtimeBitImage   = true;   // 編集内容をリアルタイムでビットイメージに反映する（1102）
@@ -35,6 +44,10 @@ public:
     bool newDocEditable     = true;   // 新規ドキュメントは常に編集可能として開く（1020）
     bool endAutoInsert      = true;   // 上書きモード時の末尾自動挿入（1066）
     bool dynamicMark        = false;  // ダイナミックマーク（1025）
+    // マークの自動保存／自動復元（移植独自。Issue #100）。
+    //   OFF の間は設定ファイルのマークストアを読みも書きもしない。復元しない状態で
+    //   閉じたときに 0 件で上書きしてしまい、利用者が気付かないまま記録を失うため。
+    bool markAutoRestore    = false;  // マークの自動復元（1165）
 
     // === 環境設定「ファイル」ページ（IDD_SETTINGS_FILE 157。原 DDX 0x4103f4） ===
     bool     backupCreate         = true;   // バックアップファイルの作成（1030）
@@ -45,6 +58,10 @@ public:
     bool     linkDirect           = false;  // リンクファイルは直接開く（1113）
     bool     defaultFolderSpecify = false;  // デフォルトフォルダの指定（1091）
     CStringW defaultFolder;                 // デフォルトフォルダ（1037）
+    // 大きいファイルを開く前の確認（移植独自の保護。Issue #20 で導入し #101 で設定化）。
+    //   読み込みにファイルサイズと同程度のメモリを使うため、既定では確認する。
+    bool largeFileWarn   = true;   // 開く前に確認する（1155）
+    int  largeFileWarnMB = 512;    // そのしきい値（MB。1156）
 
     // === 環境設定「ウィンドウ」ページ（IDD_SETTINGS_WINDOW 182。原 DDX FUN_0046668d） ===
     int  winPlacement    = 0;      // メインウィンドウのサイズ・位置（1016..1019。0=指定しない/1=前回/2=最大化/3=指定）

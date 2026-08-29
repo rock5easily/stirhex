@@ -211,6 +211,8 @@
 #define ID_SEARCH_RESULT_COPY   33015   // 0x80f7
 #define ID_EDIT_PASTE_HEX       33016   // 0x80f8 クリップボードの16進テキストを貼り付け
 #define ID_CHARSET_UTF8        33017   // 0x80f9 キャラクターセット: UTF-8（原には無い）
+#define ID_MARK_EXPORT         33018   // 0x80fa マークの書き出し（原には無い。Issue #99）
+#define ID_MARK_IMPORT         33019   // 0x80fb マークの読み込み（原には無い。Issue #99）
 
 // ---------------------------------------------------------------------------
 // Status-bar indicator panes (original custom IDs 0xE7xx). The sizing
@@ -432,6 +434,12 @@
 #define IDC_ED1_SUBCARET            1070    // サブキャレットを表示する
 #define IDC_ED1_HILIGHT_BOTH        1088    // データ選択時にコード・文字共に反転表示する
 #define IDC_ED1_REALTIME_BITIMAGE   1102    // 編集内容をリアルタイムでビットイメージに反映する
+// アンドゥバッファのメモリ上限（移植で追加。Issue #102）
+#define IDC_ED1_UNDO_GROUP          1160    // 「アンドゥバッファ」グループ
+#define IDC_ED1_UNDO_LIMIT          1161    // メモリ上限を設ける（check）
+#define IDC_ED1_UNDO_MB             1162    // 上限（edit。MB 単位）
+#define IDC_ED1_UNDO_MB_SPIN        1163    // スピン（1162 のバディ）
+#define IDC_ED1_UNDO_MB_UNIT        1164    // 「MB」（static）
 #define IDC_ED1_2STROKE_SLIDER      1067    // ２ストロークキーのタイムアウト時間（slider）
 #define IDC_ED1_2STROKE_LABEL       1068    // タイムアウト値ラベル（static）
 
@@ -442,6 +450,7 @@
 #define IDC_ED2_CURPOS_STRUCT       1015    // 現在位置を構造体編集アドレスに自動設定
 #define IDC_ED2_NEWDOC_EDITABLE     1020    // 新規ドキュメントは常に編集可能として開く
 #define IDC_ED2_DYNAMIC_MARK        1025    // ダイナミックマーク
+#define IDC_ED2_MARK_AUTO_RESTORE   1165    // マークの自動復元（移植で追加。Issue #100）
 #define IDC_ED2_END_AUTOINSERT      1066    // 上書きモード時の末尾自動挿入
 
 // --- 環境設定「ファイル」ページ（IDD_SETTINGS_FILE 157。原 DDX 0x4103f4） ---
@@ -459,6 +468,18 @@
 #define IDC_FILE_DEFFOLDER_CHK      1091    // デフォルトフォルダの指定
 #define IDC_FILE_DEFFOLDER          1037    // デフォルトフォルダ（edit）
 #define IDC_FILE_DEFFOLDER_BTN      1093    // デフォルトフォルダ参照（...）
+// 設定ファイルの所在表示（移植で追加。Issue #111）
+#define IDC_FILE_INI_GROUP          1149    // 「設定ファイル」グループ
+#define IDC_FILE_INI_PATH           1150    // 設定ファイルのパス（読み取り専用 edit）
+#define IDC_FILE_INI_SOURCE         1151    // 保存先がどの規則で決まったか（static）
+#define IDC_FILE_INI_OPEN           1153    // 「フォルダを開く」
+#define IDC_FILE_INI_READONLY       1154    // 読み込み失敗で保存しない旨の注記（static）
+// 大きいファイルを開く前の確認（移植で追加。Issue #101）
+#define IDC_FILE_LARGE_GROUP        1155    // 「大きいファイル」グループ
+#define IDC_FILE_LARGE_WARN         1156    // 開く前に確認する（check）
+#define IDC_FILE_LARGE_MB           1157    // しきい値（edit。MB 単位）
+#define IDC_FILE_LARGE_MB_SPIN      1158    // スピン（1157 のバディ）
+#define IDC_FILE_LARGE_MB_UNIT      1159    // 「MB 以上」（static）
 
 // --- 環境設定「ウィンドウ」ページ（IDD_SETTINGS_WINDOW 182。原 DDX FUN_0046668d） ---
 #define IDC_WIN_PLACE_NONE      1016    // メインウィンドウ: 指定しない（radio group 先頭）
@@ -566,6 +587,11 @@
 // 構造体編集ポップアップ(189)の第1項目ラベル。原は行種別に応じて実行時に差し替える
 //   （スカラ葉="編集(&E)"＝資源既定 / 折り畳みコンテナ="開く(&E)" / 展開済み="閉じる(&C)"）。
 //   原の文字列表に該当エントリが無いため、移植では空き番号へ追加する。
+// キャラクターセット名（原の文字列表 6040-6045。6046=UTF-8 は移植で追加。Issue #98/#125）。
+//   索引 = 文字セットID（0=ASCII/1=SHIFT-JIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK/6=UTF-8）。
+#define IDS_CHARSET_NAME_BASE   6040
+#define IDS_CHARSET_NAME_LAST   6046
+
 #define IDS_STRUCT_MENU_OPEN    1061    // "開く(&E)"
 #define IDS_STRUCT_MENU_CLOSE   1062    // "閉じる(&C)"
 
@@ -633,6 +659,20 @@
 #define IDS_ERR_PASTE_HEX_EMPTY     1180    // "16進数値が含まれていません。"
 #define IDS_ERR_PASTE_HEX_INVALID   1181    // "16進数として扱えない文字があります（%d文字目）"
 #define IDS_ERR_PASTE_HEX_ODD       1182    // "2桁単位になっていません（%d文字目）"
+#define IDS_ERR_SETTINGS_LOAD       1183    // "設定ファイルを読み込めませんでした。..."
+#define IDS_ERR_SETTINGS_SAVE       1184    // "設定ファイルを保存できませんでした。..."
+#define IDS_SETTINGS_SRC_CMDLINE    1185    // "保存先: コマンドライン指定（/ini:）"
+#define IDS_SETTINGS_SRC_PORTABLE   1186    // "保存先: 実行ファイルと同じフォルダ..."
+#define IDS_SETTINGS_SRC_APPDATA    1187    // "保存先: %APPDATA%（既定）"
+#define IDS_SETTINGS_READONLY_NOTE  1188    // "読み込みに失敗したため..."
+#define IDS_ERR_SETTINGS_REVEAL     1189    // "設定ファイルの場所を開けませんでした"
+#define IDS_MARK_FILE_FILTER        1190    // マークファイルのフィルタ（| 区切り）
+#define IDS_ERR_MARK_LOAD           1191    // "マークファイルを読み込めませんでした..."
+#define IDS_ERR_MARK_SAVE           1192    // "マークファイルを保存できませんでした..."
+#define IDS_CONFIRM_MARK_MERGE      1193    // 既存マークに追加するか置き換えるか
+#define IDS_CONFIRM_MARK_SIZE       1194    // データサイズが異なる旨の確認
+#define IDS_MARK_IMPORT_DONE        1195    // "%d 件のマークを読み込みました"
+#define IDS_MARK_IMPORT_DONE_SKIP   1196    // 範囲外を読み飛ばした場合
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 
 // 既存の文字列リソースを参照するための別名（文言は原の文字列表にあるもの）。
@@ -641,6 +681,8 @@
 #define IDS_EXT_BASE_UNDELETABLE    1052    // "基本設定は削除できません"
 #define IDS_EXT_DELETE_ALL_CONFIRM  1055    // "登録されている項目を全て削除します"
 #define IDS_ERR_SAVE_FAILED         1018    // 保存失敗（"%s"にパスを埋める）
+// 排他制御されたファイルを閲覧モードで開くかの確認（原 AfxMessageBox(1041, MB_OKCANCEL)。Issue #120）
+#define IDS_CONFIRM_VIEW_MODE       1041
 #define IDS_ERR_LOAD_FAILED         1020    // 読込失敗（"%s"にパスを埋める）
 #define IDS_ERR_WRITE_FAILED        1059    // "ファイルの書き込みに失敗しました"
 #define IDS_INDICATOR_OVERWRITE_TEXT 59140  // "上書"（ステータスバー表示）

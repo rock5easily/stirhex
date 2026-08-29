@@ -31,7 +31,7 @@ nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe
 </style>
 </head>
 <body>
-<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#stirhex-とは">StirHex とは</a></li><li><a href="#動作環境">動作環境</a></li><li><a href="#同梱ファイル">同梱ファイル</a></li><li><a href="#インストールとアンインストール">インストールとアンインストール</a></li></ul></nav><h1>1. はじめに</h1>
+<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#stirhex-とは">StirHex とは</a></li><li><a href="#動作環境">動作環境</a></li><li><a href="#同梱ファイル">同梱ファイル</a></li><li><a href="#インストール">インストール</a></li><li><a href="#設定の保存先">設定の保存先</a></li><li><a href="#アンインストール">アンインストール</a></li></ul></nav><h1>1. はじめに</h1>
 <h2 id="stirhex-とは">StirHex とは</h2>
 <p>StirHex は、ファイルの内容を 16 進数と文字で表示・編集する Windows 向けのバイナリエディタです。ファイルの読み込み、保存、編集、検索、比較、印刷などの機能を備えています。</p>
 <p>StirHex は、BinaryEditor Stirling Version 1.31 をリバースエンジニアリングにより解析し、現行の開発環境向けに再構築した非公式の移植版です。原作者が公開またはサポートする製品ではありません。原版の著作権は原作者であるＤＤＳ２氏に帰属します。</p>
@@ -44,14 +44,22 @@ nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe
 <p>配布物の実行フォルダーには、次のファイルとフォルダーを置きます。</p>
 <div class="wrap"><table><thead><tr><th>ファイル名</th><th>説明</th></tr></thead><tbody><tr><td><code>StirHex.exe</code></td><td>StirHex 本体です。</td></tr><tr><td><code>help\</code></td><td>ヘルプフォルダーです。<code>index.html</code> と各章の HTML を入れます。</td></tr></tbody></table></div>
 <p><code>Struct.def</code> は同梱物ではなく利用者が用意するファイルです。<code>StirHex.exe</code> と同じフォルダーに置くと構造体編集で読み込まれます。置かない場合は定義が読み込まれないだけで、エラーにはなりません。書式は第 5 章で扱います。</p>
-<h2 id="インストールとアンインストール">インストールとアンインストール</h2>
+<h2 id="インストール">インストール</h2>
 <p>インストーラはありません。<code>StirHex.exe</code> と <code>help</code> フォルダーを、実行する場所へ手動で配置します。</p>
 <p>ヘルプを表示するには、<code>help</code> フォルダーを <code>StirHex.exe</code> と同じフォルダーに置き、そこへ <code>index.html</code> と各章の HTML を入れます。StirHex は実行ファイルのフォルダーから <code>help\index.html</code> を組み立てて開きます。ファイルがない場合は、エラーメッセージが表示されます。</p>
-<p>設定は INI ファイルや実行ファイルのフォルダーには保存されません。MFC のプロファイル API を使い、次のレジストリキーへ保存されます。</p>
-<p><code>HKEY_CURRENT_USER\Software\StirHex\StirHex</code></p>
-<p>アプリ全体の設定はこのキーの <code>Env</code> セクションに保存されます。拡張子別の表示設定、キャレット位置、ファイル履歴、実行履歴も同じキーの各セクションに保存されます。</p>
-<p>設定は環境設定・拡張子別設定の確定時とアプリケーション終了時に保存されます。設定も削除する場合は、次の手順を実行します。</p>
-<ol><li>StirHex を終了します。</li><li><code>StirHex.exe</code> と <code>help</code> フォルダーを手動で削除します。</li><li>レジストリエディターで <code>HKEY_CURRENT_USER\Software\StirHex\StirHex</code> を削除します。</li></ol>
-<p>レジストリキーを削除すると、StirHex の設定、履歴、キャレット位置が削除されます。実行ファイルと <code>help</code> フォルダーだけを削除した場合、レジストリに保存された設定は残ります。</p><nav class="chapters"><span><a href="index.html">&laquo; 目次</a></span><span><a href="02_basics.html">2. 基本操作 &raquo;</a></span></nav>
+<h2 id="設定の保存先">設定の保存先</h2>
+<p>設定は設定ファイル <code>StirHex.ini</code> へ保存します。形式は <code>[セクション]</code> と <code>キー=値</code> の行からなる INI 風のテキストで、文字コードは UTF-8（BOM なし）です。テキストエディターで開いて内容を確認できます。</p>
+<p>保存先は次の順で決まります。先に決まったものを使います。</p>
+<ol><li>コマンドラインで <code>/ini:&lt;パス&gt;</code> を指定した場合は、そのパス</li><li><code>StirHex.exe</code> と同じフォルダーに <code>StirHex.ini</code> が <strong>存在する</strong> 場合は、そのファイル</li><li>上のどちらでもない場合は <code>%APPDATA%\StirHex\StirHex.ini</code></li></ol>
+<p>2 を「存在する場合」の判定にしているのは、書き込みできない場所へ置かれたときに、書けないパスを保存先にしないためです。実行フォルダーへ設定をまとめる（持ち運ぶ）場合は、空の <code>StirHex.ini</code> を <code>StirHex.exe</code> と同じフォルダーへ置きます。</p>
+<p><code>/ini:</code> は <code>-ini:</code> とも書けます。<code>ini</code> の大文字小文字は区別しません。相対パスを指定した場合は、実行時のカレントフォルダーからの相対位置になります。</p>
+<p>使用中の設定ファイルのパスと、それが上のどの規則で決まったかは、<code>[設定]→[環境設定]</code> の [ファイル]ページで確認できます。詳細は <a href="06_env.html">6. 環境設定</a> で扱います。</p>
+<p>アプリケーション全体の設定、拡張子別設定、ファイル履歴、実行履歴、キャレット位置、マークの自動復元記録は、この設定ファイルの各セクションへ保存されます。変更は、環境設定・拡張子別設定の確定時、操作の合間、アプリケーションの終了時に書き出されます。</p>
+<p>設定ファイルを読み込めなかった場合は、メッセージを表示したうえで既定の設定で起動します。その起動では設定ファイルへ書き戻しません。内容を確認して直せるように、読めなかったファイルをそのまま残すためです。</p>
+<p>バージョン 1.1.0 までは、設定をレジストリキー <code>HKEY_CURRENT_USER\Software\StirHex\StirHex</code> へ保存していました。設定ファイルがまだ無い状態で起動したときに限り、このキーの内容を読み込んで設定ファイルへ引き継ぎます。引き継いだ後も、旧バージョンへ戻せるように、このキーは削除しません。</p>
+<h2 id="アンインストール">アンインストール</h2>
+<p>設定も削除する場合は、次の手順を実行します。</p>
+<ol><li>StirHex を終了します。</li><li><code>StirHex.exe</code> と <code>help</code> フォルダーを手動で削除します。</li><li>使用していた設定ファイル <code>StirHex.ini</code> を削除します。場所は上の探索順のとおりです。 <code>%APPDATA%\StirHex</code> フォルダーを使っていた場合は、フォルダーごと削除します。</li><li>バージョン 1.1.0 以前を使っていた場合は、レジストリエディターで <code>HKEY_CURRENT_USER\Software\StirHex\StirHex</code> を削除します。</li></ol>
+<p>実行ファイルと <code>help</code> フォルダーだけを削除した場合、設定ファイルとレジストリキーは残ります。</p><nav class="chapters"><span><a href="index.html">&laquo; 目次</a></span><span><a href="02_basics.html">2. 基本操作 &raquo;</a></span></nav>
 </body>
 </html>

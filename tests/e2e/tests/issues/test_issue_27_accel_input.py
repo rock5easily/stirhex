@@ -6,7 +6,6 @@ A, B, C... 自動割当だったため、任意キーの指定も既存項目の
 """
 
 import time
-import winreg
 
 import pytest
 
@@ -16,7 +15,7 @@ from drivers.stirling_driver import (
     IDC_UM_AVAILABLE,
     IDC_UM_CURRENT,
 )
-from drivers.settings_context import stirling_settings
+from drivers.settings_context import read_reg_values, stirling_settings
 
 
 def _make_file(tmp_path, name: str):
@@ -237,10 +236,9 @@ class TestIssue27AccelInput:
                 time.sleep(0.5)
 
             time.sleep(0.5)
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r"Software\StirHex\StirHex\Env") as key:
-                count, _ = winreg.QueryValueEx(key, "UserMenu0_Count")
-                assert count == 1, f"メニュー1 の項目数が保存されていない: {count}"
-                item, _ = winreg.QueryValueEx(key, "UserMenu0_0")
+            saved = read_reg_values(r"Software\StirHex\StirHex\Env")
+            count = saved["UserMenu0_Count"][0]
+            assert count == 1, f"メニュー1 の項目数が保存されていない: {count}"
+            item = saved["UserMenu0_0"][0]
             assert (item >> 16) & 0xFF == ord("X"), \
                 f"保存されたアクセラレータが 'X' でない: 0x{item:08X}"

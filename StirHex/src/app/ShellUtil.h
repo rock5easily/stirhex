@@ -25,6 +25,12 @@ bool IsUserCancelled(HRESULT hr);
 //   戻り値   : 起動に成功した場合のみ true
 bool ShellExecuteFile(HWND owner, LPCWSTR file, DWORD& outError);
 
+// ファイルをエクスプローラで選択表示する（Issue #111）。
+//   ファイルがまだ存在しない場合は選択できないため、親フォルダを開くだけにする。
+//   outError : 失敗時の Win32 エラーコード（成功時は ERROR_SUCCESS）
+//   戻り値   : エクスプローラを開けた場合のみ true
+bool RevealInExplorer(HWND owner, LPCWSTR path, DWORD& outError);
+
 // Win32 エラーコード／HRESULT の説明文（取得できない場合は空文字列）。末尾の改行は除去する。
 CStringW FormatSystemError(DWORD error);
 

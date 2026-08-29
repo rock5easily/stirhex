@@ -128,6 +128,8 @@ const Entry kEntries[] = {
     { 0x070C, 0x8063 },
     // 移植で追加した機能（原の表には無い。Issue #97）
     { 0x070D, 0x80F8 },   // 16進テキスト貼り付け
+    { 0x070E, 0x80FA },   // マークの書き出し...
+    { 0x070F, 0x80FB },   // マークの読み込み...
 };
 
 const Entry* Find(UINT raw) {

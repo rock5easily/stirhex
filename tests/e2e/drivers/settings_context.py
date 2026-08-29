@@ -1,4 +1,6 @@
 import ctypes
+import os
+import time
 import winreg
 from ctypes import wintypes
 from pathlib import Path
@@ -6,9 +8,11 @@ from contextlib import contextmanager
 from typing import Any, Dict
 
 
-# Target registry keys:
+# Settings roots, written in registry form. The original Stirling really does live in
+# the registry; the StirHex roots are redirected to sections of its settings file by the
+# helpers below (Issue #96).
 # - Original Stirling: HKCU\Software\DDS2\Stirling\Settings
-# - StirHex: HKCU\Software\StirHex\StirHex\Env
+# - StirHex: the [Env] section of the settings file
 REG_CONFIGS = [
     {
         "root": r"Software\DDS2\Stirling\Settings",
@@ -47,8 +51,213 @@ REG_CONFIGS = [
 ]
 
 
+# --- StirHex settings file (Issue #96) ---
+#
+# StirHex no longer keeps its settings in the registry: CWinApp's profile API is backed by
+# an INI-style file (UTF-8, no BOM). The registry root below is only read once, on the very
+# first start, to carry a pre-1.1.0 installation over.
+#
+# The helpers keep their registry-shaped signatures so the tests do not have to change:
+# a root under STIRHEX_REG_ROOT is redirected to the matching section of the settings file,
+# and anything else (the original Stirling, the legacy StirlingPort root) still goes to the
+# registry.
+STIRHEX_REG_ROOT = r"Software\StirHex\StirHex"
+
+# The app resolves its settings file as: /ini:<path>, then StirHex.ini next to the exe if
+# that file exists, then %APPDATA%\StirHex\StirHex.ini. The tests drive the exe from the
+# build tree, where no portable ini is committed, so the APPDATA path is what they see.
+# STIRHEX_SETTINGS_FILE overrides it for a run against a portable install.
+def settings_file_path() -> Path:
+    override = os.environ.get("STIRHEX_SETTINGS_FILE")
+    if override:
+        return Path(override)
+    return Path(os.environ["APPDATA"]) / "StirHex" / "StirHex.ini"
+
+
+def _section_of(root_key_path: str) -> str | None:
+    """Return the settings-file section a registry root maps to, or None if it is a real
+    registry path (the original Stirling / the legacy port root)."""
+    prefix = STIRHEX_REG_ROOT + "\\"
+    if root_key_path == STIRHEX_REG_ROOT:
+        return ""
+    if root_key_path.startswith(prefix):
+        return root_key_path[len(prefix):]
+    return None
+
+
+def _decode_ini_value(text: str) -> str:
+    """Undo the quoting the app applies to values that cannot be written raw."""
+    if len(text) < 2 or not text.startswith('"') or not text.endswith('"'):
+        return text
+    out = []
+    i = 1
+    end = len(text) - 1
+    while i < end:
+        c = text[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= end:
+            out.append("\\")
+            break
+        esc = text[i + 1]
+        i += 2
+        simple = {"\\": "\\", '"': '"', "r": "\r", "n": "\n", "t": "\t"}
+        if esc in simple:
+            out.append(simple[esc])
+        elif esc == "x":
+            digits = ""
+            while len(digits) < 4 and i < end and text[i] in "0123456789abcdefABCDEF":
+                digits += text[i]
+                i += 1
+            out.append(chr(int(digits, 16)) if digits else "\\x")
+        else:
+            out.append("\\")
+            out.append(esc)
+    return "".join(out)
+
+
+def _encode_ini_value(text: str) -> str:
+    """Quote a value the same way the app does (only when it cannot be written raw)."""
+    needs_quote = bool(text) and (
+        text[0] in " \t" or text[-1] in " \t" or text[0] == '"'
+    )
+    if not needs_quote:
+        needs_quote = any(ord(c) < 0x20 or ord(c) == 0x7F for c in text)
+    if not needs_quote:
+        return text
+    out = ['"']
+    for c in text:
+        if c == "\\":
+            out.append("\\\\")
+        elif c == '"':
+            out.append('\\"')
+        elif c == "\r":
+            out.append("\\r")
+        elif c == "\n":
+            out.append("\\n")
+        elif c == "\t":
+            out.append("\\t")
+        elif ord(c) < 0x20 or ord(c) == 0x7F:
+            out.append("\\x%04X" % ord(c))
+        else:
+            out.append(c)
+    out.append('"')
+    return "".join(out)
+
+
+def _read_settings_text() -> str | None:
+    """Read the settings file, retrying while the app is replacing it.
+
+    The app writes a temp file and swaps it in, so a read that lands on the swap fails
+    with a sharing violation. The swap is over in microseconds - retry briefly rather
+    than let a test flake on it. Returns None when the file does not exist.
+    """
+    path = settings_file_path()
+    for attempt in range(20):
+        if not path.exists():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except (PermissionError, OSError):
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
+    return None
+
+
+def _read_ini() -> Dict[str, Dict[str, str]]:
+    """Read the settings file as {section: {key: value}} (empty if it does not exist)."""
+    text = _read_settings_text()
+    if text is None:
+        return {}
+    sections: Dict[str, Dict[str, str]] = {}
+    current = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line[0] in ";#":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip()
+            sections.setdefault(current, {})
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+        sections.setdefault(current, {})[key] = _decode_ini_value(value.strip())
+    return sections
+
+
+def _write_ini(sections: Dict[str, Dict[str, str]]) -> None:
+    """Write the whole settings file back, creating the folder if needed.
+
+    Retries like the reader: the app may be swapping the file in at this moment.
+    """
+    path = settings_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    chunks = []
+    for name, entries in sections.items():
+        chunks.append(f"[{name}]\r\n")
+        for key, value in entries.items():
+            chunks.append(f"{key}={_encode_ini_value(value)}\r\n")
+        chunks.append("\r\n")
+    payload = "".join(chunks)
+    for attempt in range(20):
+        try:
+            path.write_text(payload, encoding="utf-8", newline="")
+            return
+        except (PermissionError, OSError):
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
+
+
+def _typed(value: str) -> Any:
+    """Present a settings-file value the way the registry helpers used to.
+
+    Everything is text in the file; ints are reported as REG_DWORD so the assertions the
+    tests already make on (value, type) pairs keep working.
+    """
+    try:
+        return (int(value), winreg.REG_DWORD)
+    except ValueError:
+        return (value, winreg.REG_SZ)
+
+
+def _read_ini_values(section: str) -> Dict[str, Any]:
+    return {name: _typed(text) for name, text in _read_ini().get(section, {}).items()}
+
+
+def _write_ini_values(section: str, values: Dict[str, Any]) -> None:
+    sections = _read_ini()
+    entries = sections.setdefault(section, {})
+    for name, (value, _val_type) in values.items():
+        entries[name] = str(value)
+    _write_ini(sections)
+
+
+def _delete_ini_values(section: str, names: list[str]) -> None:
+    sections = _read_ini()
+    # setdefault (not get) so the file exists even when a test only wipes a section:
+    # a missing settings file would make the app re-import the real registry settings.
+    entries = sections.setdefault(section, {})
+    for name in names:
+        entries.pop(name, None)
+    _write_ini(sections)
+
+
 def _read_reg_values(root_key_path: str) -> Dict[str, Any]:
-    """Read all values under HKCU\\<root_key_path> into a dictionary."""
+    """Read all values of a settings root as {name: (value, winreg type)}.
+
+    StirHex roots come from the settings file, everything else from the registry.
+    """
+    section = _section_of(root_key_path)
+    if section is not None:
+        return _read_ini_values(section)
     values = {}
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root_key_path, 0, winreg.KEY_READ) as key:
@@ -66,7 +275,11 @@ def _read_reg_values(root_key_path: str) -> Dict[str, Any]:
 
 
 def _write_reg_values(root_key_path: str, values: Dict[str, Any]):
-    """Write values under HKCU\\<root_key_path>, creating key if needed."""
+    """Write values to a settings root, creating the key or file if needed."""
+    section = _section_of(root_key_path)
+    if section is not None:
+        _write_ini_values(section, values)
+        return
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, root_key_path) as key:
             for name, (val, val_type) in values.items():
@@ -76,7 +289,11 @@ def _write_reg_values(root_key_path: str, values: Dict[str, Any]):
 
 
 def _delete_reg_values(root_key_path: str, names: list[str]):
-    """Delete specified value names under HKCU\\<root_key_path>."""
+    """Delete the named values from a settings root."""
+    section = _section_of(root_key_path)
+    if section is not None:
+        _delete_ini_values(section, names)
+        return
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root_key_path, 0, winreg.KEY_SET_VALUE) as key:
             for name in names:
@@ -107,9 +324,9 @@ def stirling_settings(
 ):
     """Context manager that applies prerequisite settings for Stirling before test
     and strictly restores original settings after test (Setup / Teardown).
-    
+
     Supports both Original Stirling (HKCU\\Software\\DDS2\\Stirling\\Settings)
-    and StirHex (HKCU\\Software\\StirHex\\StirHex\\Env).
+    and StirHex (the [Env] section of its settings file).
     """
     options = {
         "file_exclusive_mode": file_exclusive_mode,
@@ -171,18 +388,44 @@ def stirling_settings(
                 _write_reg_values(root, orig_values)
 
 
+@contextmanager
+def settings_value(root_key_path: str, name: str, value: Any,
+                   val_type: int = winreg.REG_DWORD):
+    """Temporarily replace a single value in a settings root, restoring it afterwards.
+
+    Narrower than registry_section(), which wipes the whole section: use this when the
+    other values in the section have to stay as they are.
+    """
+    previous = _read_reg_values(root_key_path).get(name)
+    _write_reg_values(root_key_path, {name: (value, val_type)})
+    try:
+        yield
+    finally:
+        if previous is None:
+            _delete_reg_values(root_key_path, [name])
+        else:
+            _write_reg_values(root_key_path, {name: previous})
+
+
 # Caret auto-restore store of StirHex (Issue #22).
-#   HKCU\Software\StirHex\StirHex\CaretPositions
-#     Count  REG_DWORD  number of entries (max 16)
-#     Path%d REG_SZ     file path (UTF-16 since the Unicode build, Issue #41)
-#     Addr%d REG_SZ     caret address, 64-bit, uppercase hex without prefix (current format)
-#     Pos%d  REG_DWORD  caret address, 32-bit (legacy format written by the 32-bit build)
+#   the [CaretPositions] section of the settings file
+#     Count  number of entries (max 16)
+#     Path%d file path (UTF-8 in the file; UTF-16 in memory since the Unicode build, Issue #41)
+#     Addr%d caret address, 64-bit, uppercase hex without prefix (current format)
+#     Pos%d  caret address, 32-bit (legacy format written by the 32-bit build)
 CARET_STORE_ROOT = r"Software\StirHex\StirHex\CaretPositions"
 
 
-def read_caret_store() -> Dict[str, Any]:
-    """Read the caret store as {value_name: (value, winreg type)}."""
-    return _read_reg_values(CARET_STORE_ROOT)
+def read_caret_store() -> Dict[str, str]:
+    """Read the caret store as {value_name: text}.
+
+    Raw text, not the (value, type) pairs the other readers return: the settings file has
+    no value types, and what the caret assertions care about is the text the app wrote -
+    Addr%d is an uppercase hex address (Issue #22), which a numeric reading would hide.
+    """
+    section = _section_of(CARET_STORE_ROOT)
+    assert section is not None, "the caret store lives in the StirHex settings file"
+    return dict(_read_ini().get(section, {}))
 
 
 @contextmanager
@@ -264,11 +507,13 @@ def read_reg_values(root_key_path: str) -> Dict[str, Any]:
 
 @contextmanager
 def registry_section(root_key_path: str, entries: Dict[str, Any] | None = None):
-    """Replace HKCU\\<root_key_path> with `entries` for the duration of the test and
-    strictly restore the previous contents afterwards.
+    """Replace one settings root with `entries` for the duration of the test and strictly
+    restore the previous contents afterwards.
 
-    `entries` maps value name to (value, winreg type). Values are written through the wide
-    API; use write_ansi_string_values() inside the context to seed ANSI-written strings.
+    `entries` maps value name to (value, winreg type). A StirHex root is redirected to the
+    settings file, where everything is text and the type is only used to format the value.
+    A real registry root is written through the wide API; use write_ansi_string_values()
+    inside the context to seed ANSI-written strings.
     """
     backup = _read_reg_values(root_key_path)
     _delete_reg_values(root_key_path, list(backup.keys()))

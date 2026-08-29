@@ -6,6 +6,10 @@
 #include "../StirHex/src/core/BlockList.h"
 #include "../StirHex/src/app/SettingsCodec.h"
 #include "../StirHex/src/app/SettingsMigration.h"
+#include "../StirHex/src/app/SettingsStore.h"
+#include "../StirHex/src/app/SettingsFile.h"
+#include "../StirHex/src/util/PathParts.h"
+#include "../StirHex/src/app/MarkFile.h"
 #include "../StirHex/src/core/Cp932Text.h"
 #include "../StirHex/src/core/CharConv.h"
 #include "../StirHex/src/core/StructDef.h"
@@ -22,6 +26,7 @@
 #include <filesystem>
 #include <random>
 #include <share.h>
+#include <thread>
 #define NOMINMAX
 #include <windows.h>   // GetACP / IsDBCSLeadByte（ACP=932 環境での等価確認に使う）
 #undef small           // rpcndr.h の `#define small char` がローカル変数 small と衝突する
@@ -1360,9 +1365,87 @@ static void TestFileIoStatus() {
             CHECK(r.status == FileIoStatus::kOpenFailed, "sharing violation status");
             CHECK(r.systemError != 0, "sharing violation reports a system error");
             CHECK(list.IsEmpty(), "failed load leaves no blocks");
+            CHECK(r.systemError == ERROR_SHARING_VIOLATION ||
+                  r.systemError == ERROR_LOCK_VIOLATION,
+                  "the caller can tell a sharing violation apart");
             std::fclose(holder);
         }
         fs::remove(locked);
+    }
+
+    // 共有モードつきの読み込み（Issue #120）。原は環境設定「ファイルの排他制御」を
+    //   読み込みハンドルの共有モードとして適用し、そのハンドルを保持し続ける。
+    {
+        std::vector<unsigned char> data(300, 0x5A);
+        const fs::path shared = TempFile("sharemode");
+        WriteFile(shared, data);
+
+        // 他プロセスが共有ありで開いているだけなら、共有全許可では読める。
+        std::FILE* holder = _wfsopen(shared.wstring().c_str(), L"rb", _SH_DENYNO);
+        CHECK(holder != nullptr, "shared holder opened");
+        if (holder != nullptr) {
+            BlockList list;
+            CHECK(stirling::LoadFileIntoBlocks(list, shared.wstring().c_str(),
+                                               stirling::FileShareMode::kDenyNone).Ok(),
+                  "deny-none load succeeds while another handle is open");
+            CheckEqual(list, data, "deny-none load content");
+
+            // 排他を要求すると、他のハンドルがある間は共有違反になる。
+            BlockList excl;
+            const FileIoResult r = stirling::LoadFileIntoBlocks(
+                excl, shared.wstring().c_str(), stirling::FileShareMode::kExclusive);
+            CHECK(!r.Ok(), "exclusive load fails while another handle is open");
+            CHECK(r.status == FileIoStatus::kOpenFailed, "exclusive load status");
+            CHECK(r.systemError == ERROR_SHARING_VIOLATION ||
+                  r.systemError == ERROR_LOCK_VIOLATION, "exclusive load reports sharing violation");
+            std::fclose(holder);
+        }
+
+        // 保持したハンドルが実際にロックとして働くこと（排他で開き、閉じるまで他から開けない）。
+        {
+            BlockList list;
+            void* keep = nullptr;
+            const FileIoResult r = stirling::LoadFileIntoBlocks(
+                list, shared.wstring().c_str(), stirling::FileShareMode::kExclusive, &keep);
+            CHECK(r.Ok(), "exclusive load succeeds when nobody else holds the file");
+            CheckEqual(list, data, "exclusive load content");
+            CHECK(keep != nullptr, "the handle is handed over to the caller");
+
+            std::FILE* other = _wfsopen(shared.wstring().c_str(), L"rb", _SH_DENYNO);
+            CHECK(other == nullptr, "the kept handle keeps other openers out");
+            if (other != nullptr) { std::fclose(other); }
+
+            ::CloseHandle(static_cast<HANDLE>(keep));
+            std::FILE* after = _wfsopen(shared.wstring().c_str(), L"rb", _SH_DENYNO);
+            CHECK(after != nullptr, "closing the kept handle releases the lock");
+            if (after != nullptr) { std::fclose(after); }
+        }
+
+        // 書込禁止（原 shareDenyWrite）は他プロセスの読み取りを許す。
+        {
+            BlockList list;
+            void* keep = nullptr;
+            CHECK(stirling::LoadFileIntoBlocks(list, shared.wstring().c_str(),
+                                               stirling::FileShareMode::kDenyWrite, &keep).Ok(),
+                  "deny-write load succeeds");
+            std::FILE* reader = _wfsopen(shared.wstring().c_str(), L"rb", _SH_DENYNO);
+            CHECK(reader != nullptr, "deny-write still allows other readers");
+            if (reader != nullptr) { std::fclose(reader); }
+            if (keep != nullptr) { ::CloseHandle(static_cast<HANDLE>(keep)); }
+        }
+
+        // ハンドルを受け取らない呼び出しは、戻った時点でファイルを掴んでいない。
+        {
+            BlockList list;
+            CHECK(stirling::LoadFileIntoBlocks(list, shared.wstring().c_str(),
+                                               stirling::FileShareMode::kExclusive).Ok(),
+                  "exclusive load without keeping the handle succeeds");
+            std::FILE* after = _wfsopen(shared.wstring().c_str(), L"rb", _SH_DENYNO);
+            CHECK(after != nullptr, "no handle is retained when the caller does not ask");
+            if (after != nullptr) { std::fclose(after); }
+        }
+
+        fs::remove(shared);
     }
 
     // 非 ASCII（日本語）を含むパスの読み書き（ワイドパス化の検証）。
@@ -1713,6 +1796,619 @@ static void TestSettingsMigration() {
         CHECK(!RepairCp932ViaAcp(t, 1252, out) && out.empty(),
               "single-byte-only value is not mistaken for mojibake");
     }
+}
+
+// ---- 設定ストア（Issue #96: 設定ファイルの INI 形式と UTF-8 往復） ----
+static void TestSettingsStoreUtf8() {
+    std::printf("TestSettingsStoreUtf8\n");
+    using stirling::settings::Utf8ToWide;
+    using stirling::settings::WideToUtf8;
+
+    // ASCII・日本語・BMP 外（サロゲートペア）を往復する。
+    const std::wstring samples[] = {
+        L"",
+        L"C:\\Users\\test\\backup",
+        L"\u65e5\u672c\u8a9e\u306e\u30d5\u30a9\u30eb\u30c0",
+        L"\U0001F600 emoji",
+        L"mixed \u00e9 \u4e2d\u6587 123",
+    };
+    for (const std::wstring& sample : samples) {
+        const std::string utf8 = WideToUtf8(sample);
+        std::wstring back;
+        CHECK(Utf8ToWide(utf8, back), "utf8 decode valid");
+        CHECK(back == sample, "utf8 round trip");
+    }
+
+    // 既知のバイト列（UTF-8 として正しいこと）。
+    CHECK(WideToUtf8(L"\u3042") == "\xE3\x81\x82", "utf8 encode HIRAGANA A");
+    CHECK(WideToUtf8(L"\U0001F600") == "\xF0\x9F\x98\x80", "utf8 encode 4-byte");
+
+    // 不正な UTF-8 は検出する（値は置換文字になるが処理は続く）。
+    std::wstring decoded;
+    CHECK(!Utf8ToWide(std::string("\xE3\x81"), decoded), "truncated sequence rejected");
+    CHECK(!Utf8ToWide(std::string("\xC0\xAF"), decoded), "overlong sequence rejected");
+    CHECK(!Utf8ToWide(std::string("\xED\xA0\x80"), decoded), "surrogate rejected");
+    CHECK(Utf8ToWide(std::string("plain"), decoded) && decoded == L"plain", "ascii accepted");
+}
+
+static void TestSettingsStoreValueEscape() {
+    std::printf("TestSettingsStoreValueEscape\n");
+    using stirling::settings::DecodeValue;
+    using stirling::settings::EncodeValue;
+
+    // 普通の値は引用符を付けない（設定ファイルの可読性を保つ）。
+    CHECK(EncodeValue(L"C:\\Program Files\\StirHex") == L"C:\\Program Files\\StirHex",
+          "plain path stays raw");
+    CHECK(EncodeValue(L"") == L"", "empty stays raw");
+    CHECK(EncodeValue(L"\u65e5\u672c\u8a9e") == L"\u65e5\u672c\u8a9e", "japanese stays raw");
+
+    // 前後の空白・制御文字・先頭の引用符だけを引用符付きにする。
+    CHECK(EncodeValue(L" lead") == L"\" lead\"", "leading space quoted");
+    CHECK(EncodeValue(L"trail ") == L"\"trail \"", "trailing space quoted");
+    CHECK(EncodeValue(L"a\nb") == L"\"a\\nb\"", "newline escaped");
+    CHECK(EncodeValue(L"\"quoted\"") == L"\"\\\"quoted\\\"\"", "leading quote escaped");
+
+    // 往復（引用符が付く値・付かない値の両方）。
+    const std::wstring samples[] = {
+        L"", L"simple", L"C:\\path\\to\\file.bin", L" spaced ", L"tab\there",
+        L"line1\r\nline2", L"\"q\"", L"back\\slash", L"\u3042\u3044\u3046",
+        L"bell\x07end",
+    };
+    for (const std::wstring& sample : samples) {
+        CHECK(DecodeValue(EncodeValue(sample)) == sample, "value escape round trip");
+    }
+}
+
+// ---- マークファイル（Issue #99） ----
+
+static void TestMarkFileRoundTrip() {
+    std::printf("[TestMarkFileRoundTrip]\n");
+    using stirling::marks::MarkFileData;
+    using stirling::marks::ParseMarks;
+    using stirling::marks::SerializeMarks;
+
+    MarkFileData src;
+    src.sourcePath = L"C:\\\u30c7\u30fc\u30bf\\sample.bin";   // 日本語パス
+    src.sourceSize = 1048576;
+    src.marks[0x40] = 1;
+    src.marks[0xA0] = 2;
+    src.marks[0x1F400] = 3;
+    src.marks[0] = 1;                      // 先頭アドレス
+    src.marks[0x7FFFFFFFFFFFFFFFLL] = 2;   // 64bit 上限（x64 化の確認）
+
+    const std::wstring text = SerializeMarks(src);
+    CHECK(text.find(L"[Mark]") != std::wstring::npos, "mark file has a header section");
+    CHECK(text.find(L"[Marks]") != std::wstring::npos, "mark file has a marks section");
+    CHECK(text.find(L"1F400=3") != std::wstring::npos, "address is uppercase hex without prefix");
+    CHECK(text.find(L"7FFFFFFFFFFFFFFF=2") != std::wstring::npos, "64-bit address round trips");
+
+    MarkFileData back;
+    std::wstring error;
+    CHECK(ParseMarks(text, back, error), "round trip parses");
+    CHECK(error.empty(), "round trip reports no error");
+    CHECK(back.marks == src.marks, "every mark survives the round trip");
+    CHECK(back.sourcePath == src.sourcePath, "japanese path survives the round trip");
+    CHECK(back.sourceSize == src.sourceSize, "size survives the round trip");
+}
+
+static void TestMarkFileEmptyAndComments() {
+    std::printf("[TestMarkFileEmptyAndComments]\n");
+    using stirling::marks::MarkFileData;
+    using stirling::marks::ParseMarks;
+    using stirling::marks::SerializeMarks;
+
+    // マークが 0 件でも [Marks] を書く（読み込み側が「マークファイルか」を見分けるため）。
+    MarkFileData empty;
+    const std::wstring text = SerializeMarks(empty);
+    CHECK(text.find(L"[Marks]") != std::wstring::npos, "empty export still has [Marks]");
+
+    MarkFileData back;
+    std::wstring error;
+    CHECK(ParseMarks(text, back, error), "empty mark file parses");
+    CHECK(back.marks.empty(), "empty mark file has no marks");
+
+    // [Marks] が無いファイルはマーク 0 件として読む（識別は [Mark] の Version で行う）。
+    MarkFileData headerOnly;
+    CHECK(ParseMarks(L"[Mark]\nVersion=1\n", headerOnly, error),
+          "a file without [Marks] is read as zero marks");
+    CHECK(headerOnly.marks.empty(), "a file without [Marks] has no marks");
+
+    // 手で書いた体裁（コメント・空行・小文字16進・前後の空白）も読めること。
+    const std::wstring handwritten =
+        L"; my marks\n"
+        L"[Mark]\n"
+        L"Version=1\n"
+        L"\n"
+        L"# section below\n"
+        L"[marks]\n"
+        L"  1f4 = 2 \n"
+        L"0=1\n";
+    MarkFileData hand;
+    CHECK(ParseMarks(handwritten, hand, error), "hand written mark file parses");
+    CHECK(hand.marks.size() == 2, "hand written file has two marks");
+    CHECK(hand.marks[0x1F4] == 2, "lowercase hex and spaces are accepted");
+    CHECK(hand.marks[0] == 1, "address zero is accepted");
+    CHECK(hand.sourceSize == -1, "missing size reads as unknown");
+}
+
+static void TestMarkFileRejects() {
+    std::printf("[TestMarkFileRejects]\n");
+    using stirling::marks::MarkFileData;
+    using stirling::marks::ParseMarks;
+
+    MarkFileData out;
+    std::wstring error;
+
+    // 不正なファイルは「1件も適用しない」ことを併せて確認する。
+    const std::wstring notAMarkFile = L"[Env]\nBackupFolder=C:\\tmp\n";
+    CHECK(!ParseMarks(notAMarkFile, out, error), "settings file is not a mark file");
+    CHECK(!error.empty(), "rejection explains itself");
+
+
+    const std::wstring futureVersion = L"[Mark]\nVersion=2\n[Marks]\n40=1\n";
+    CHECK(!ParseMarks(futureVersion, out, error), "unknown version is rejected");
+    CHECK(error.find(L"2") != std::wstring::npos, "version error names the version");
+
+    const std::wstring badAddress = L"[Mark]\nVersion=1\n[Marks]\n40=1\nXYZ=2\n";
+    out.marks.clear();
+    CHECK(!ParseMarks(badAddress, out, error), "non hex address is rejected");
+    CHECK(error.find(L"XYZ") != std::wstring::npos, "address error names the offending key");
+    CHECK(out.marks.empty(), "a rejected file applies nothing at all");
+
+    const std::wstring badType = L"[Mark]\nVersion=1\n[Marks]\n40=4\n";
+    CHECK(!ParseMarks(badType, out, error), "mark number out of 1..3 is rejected");
+    const std::wstring zeroType = L"[Mark]\nVersion=1\n[Marks]\n40=0\n";
+    CHECK(!ParseMarks(zeroType, out, error), "internal type 0 is not a valid file value");
+}
+
+// 手編集された長大な10進値（Issue #132）。符号付き乗算があふれてラップすると、
+//   範囲検査をすり抜けて不正なファイルが受理されてしまう。
+static void TestMarkFileHugeDecimals() {
+    std::printf("[TestMarkFileHugeDecimals]\n");
+    using stirling::marks::MarkFileData;
+    using stirling::marks::ParseMarks;
+    using stirling::marks::DecodeMarkList;
+
+    MarkFileData out;
+    std::wstring error;
+
+    // 2^64+1。ラップすると 1（＝対応する形式版）になり、受理されてしまっていた。
+    const std::wstring wrappedVersion =
+        L"[Mark]\nVersion=18446744073709551617\n[Marks]\n40=1\n";
+    out.marks.clear();
+    CHECK(!ParseMarks(wrappedVersion, out, error), "a wrapping Version is rejected");
+    CHECK(out.marks.empty(), "a rejected file applies nothing at all");
+
+    // 上限ちょうど（LLONG_MAX）は解析でき、1桁超えたものは必ず拒否する。
+    const std::wstring maxVersion = L"[Mark]\nVersion=9223372036854775807\n[Marks]\n40=1\n";
+    CHECK(!ParseMarks(maxVersion, out, error), "LLONG_MAX parses but is not a known version");
+    CHECK(error.find(L"9223372036854775807") != std::wstring::npos,
+          "the version error still names the value it read");
+    const std::wstring overMax = L"[Mark]\nVersion=9223372036854775808\n[Marks]\n40=1\n";
+    CHECK(!ParseMarks(overMax, out, error), "one past LLONG_MAX is rejected");
+
+    // Size は情報でしかないため読み込みは続くが、範囲外の値は「不明」(-1) に倒す。
+    const std::wstring hugeSize =
+        L"[Mark]\nVersion=1\nSize=18446744073709551617\n[Marks]\n40=1\n";
+    CHECK(ParseMarks(hugeSize, out, error), "a broken Size does not fail the load");
+    CHECK(out.sourceSize == -1, "an out-of-range Size becomes unknown");
+    const std::wstring maxSize =
+        L"[Mark]\nVersion=1\nSize=9223372036854775807\n[Marks]\n40=1\n";
+    CHECK(ParseMarks(maxSize, out, error), "LLONG_MAX Size parses");
+    CHECK(out.sourceSize == 9223372036854775807ll, "LLONG_MAX Size is kept as is");
+    const std::wstring overSize =
+        L"[Mark]\nVersion=1\nSize=9223372036854775808\n[Marks]\n40=1\n";
+    CHECK(ParseMarks(overSize, out, error), "one past LLONG_MAX Size does not fail the load");
+    CHECK(out.sourceSize == -1, "one past LLONG_MAX Size becomes unknown");
+
+    // マーク種別の経路（マークファイル / 1行表現）にも同じ解析関数を使う。
+    const std::wstring hugeType =
+        L"[Mark]\nVersion=1\n[Marks]\n40=18446744073709551617\n";
+    out.marks.clear();
+    CHECK(!ParseMarks(hugeType, out, error), "a wrapping mark number is rejected");
+    CHECK(out.marks.empty(), "a rejected file applies nothing at all");
+
+    std::map<stirling::FileOffset, int> list;
+    list[0x10] = 1;
+    CHECK(!DecodeMarkList(L"40:18446744073709551617", list),
+          "a wrapping mark number is rejected in the one-line form");
+    CHECK(list.size() == 1 && list.count(0x10) == 1,
+          "a rejected list leaves the target alone");
+}
+
+// ---- マークの1行表現（自動保存／自動復元。Issue #100） ----
+
+static void TestMarkListRoundTrip() {
+    std::printf("[TestMarkListRoundTrip]\n");
+    using stirling::marks::DecodeMarkList;
+    using stirling::marks::EncodeMarkList;
+
+    std::map<stirling::FileOffset, int> marks;
+    marks[0x40] = 1;
+    marks[0xA0] = 2;
+    marks[0x1F400] = 3;
+    marks[0] = 1;
+
+    const std::wstring text = EncodeMarkList(marks);
+    CHECK(text == L"0:1,40:1,A0:2,1F400:3", "encoded in ascending address order");
+
+    std::map<stirling::FileOffset, int> back;
+    CHECK(DecodeMarkList(text, back), "the encoded list decodes");
+    CHECK(back == marks, "every mark survives the round trip");
+
+    // 空はエラーではない（マークが1件も無い状態を表す）。
+    std::map<stirling::FileOffset, int> empty;
+    CHECK(EncodeMarkList(empty).empty(), "no marks encode to an empty value");
+    std::map<stirling::FileOffset, int> decoded;
+    CHECK(DecodeMarkList(L"", decoded), "an empty value decodes");
+    CHECK(decoded.empty(), "an empty value means no marks");
+
+    // 64bit アドレス（x64 化の確認）。
+    std::map<stirling::FileOffset, int> wide;
+    wide[0x7FFFFFFFFFFFFFFFLL] = 3;
+    std::map<stirling::FileOffset, int> wideBack;
+    CHECK(DecodeMarkList(EncodeMarkList(wide), wideBack), "64-bit address round trips");
+    CHECK(wideBack == wide, "64-bit address keeps its value");
+}
+
+static void TestMarkListLimitAndRejects() {
+    std::printf("[TestMarkListLimitAndRejects]\n");
+    using stirling::marks::DecodeMarkList;
+    using stirling::marks::EncodeMarkList;
+    using stirling::marks::kMaxStoredMarks;
+
+    // 上限を超える分はアドレスの大きい側から捨てる（先頭 kMaxStoredMarks 件を残す）。
+    std::map<stirling::FileOffset, int> many;
+    for (size_t i = 0; i < kMaxStoredMarks + 10; ++i) {
+        many[static_cast<stirling::FileOffset>(i)] = 1;
+    }
+    std::map<stirling::FileOffset, int> capped;
+    CHECK(DecodeMarkList(EncodeMarkList(many), capped), "a capped list is still valid");
+    CHECK(capped.size() == kMaxStoredMarks, "the list is capped");
+    CHECK(capped.count(0) == 1, "the lowest address is kept");
+    CHECK(capped.count(static_cast<stirling::FileOffset>(kMaxStoredMarks)) == 0,
+          "addresses past the cap are dropped");
+
+    // 壊れた値は1件も採らない（キャレットストアと同じく、その1件を捨てる判断は呼び出し側）。
+    std::map<stirling::FileOffset, int> out;
+    out[0x10] = 1;
+    CHECK(!DecodeMarkList(L"40:1,ZZ:2", out), "a non hex address is rejected");
+    CHECK(out.size() == 1 && out.count(0x10) == 1, "a rejected list leaves the target alone");
+    CHECK(!DecodeMarkList(L"40:4", out), "a mark number out of 1..3 is rejected");
+    CHECK(!DecodeMarkList(L"40:0", out), "the internal type 0 is not a valid stored value");
+    CHECK(!DecodeMarkList(L"40", out), "an item without a type is rejected");
+
+    // 区切りが続いた場合は空要素として読み飛ばす（手編集への耐性）。
+    std::map<stirling::FileOffset, int> lenient;
+    CHECK(DecodeMarkList(L"40:1,,A0:2,", lenient), "empty items are skipped");
+    CHECK(lenient.size() == 2, "the surrounding items are still read");
+}
+
+static void TestSettingsStoreIni() {
+    std::printf("TestSettingsStoreIni\n");
+    using stirling::settings::SettingsStore;
+
+    SettingsStore store;
+    CHECK(store.Empty(), "new store is empty");
+    CHECK(!store.Dirty(), "new store is clean");
+
+    store.Set(L"Env", L"ScrollLines", L"3");
+    CHECK(store.Dirty(), "set marks dirty");
+    store.ClearDirty();
+
+    // 同じ値の再設定では書き込みを起こさない。
+    store.Set(L"Env", L"ScrollLines", L"3");
+    CHECK(!store.Dirty(), "same value keeps clean");
+    store.Set(L"Env", L"ScrollLines", L"4");
+    CHECK(store.Dirty(), "changed value marks dirty");
+
+    store.Set(L"Env", L"BackupFolder", L"C:\\backup\\\u65e5\u672c\u8a9e");
+    store.Set(L"Recent File List", L"File1", L"D:\\data\\sample.bin");
+
+    // 大文字小文字を区別せずに引ける（レジストリの挙動に合わせる）。
+    const std::wstring* found = store.Find(L"env", L"scrolllines");
+    CHECK(found != nullptr && *found == L"4", "lookup is case-insensitive");
+    CHECK(store.Find(L"Env", L"Missing") == nullptr, "missing key returns null");
+    CHECK(store.Find(L"Missing", L"ScrollLines") == nullptr, "missing section returns null");
+
+    // シリアライズ→パースで内容が一致する。
+    const std::wstring text = store.Serialize();
+    CHECK(text.find(L"[Env]") != std::wstring::npos, "section header written");
+    CHECK(text.find(L"BackupFolder=C:\\backup\\") != std::wstring::npos,
+          "path value written unquoted");
+
+    SettingsStore reloaded;
+    CHECK(reloaded.ParseInto(text), "serialized text parses cleanly");
+    CHECK(!reloaded.Dirty(), "parse does not mark dirty");
+    for (const SettingsStore::Section& section : store.Sections()) {
+        for (const SettingsStore::Entry& entry : section.entries) {
+            const std::wstring* value = reloaded.Find(section.name, entry.key);
+            CHECK(value != nullptr && *value == entry.value, "ini round trip");
+        }
+    }
+
+    // 削除。
+    store.Remove(L"Env", L"ScrollLines");
+    CHECK(store.Find(L"Env", L"ScrollLines") == nullptr, "value removed");
+    store.RemoveSection(L"Recent File List");
+    CHECK(store.Find(L"Recent File List", L"File1") == nullptr, "section removed");
+
+    // コメント・空行・前後の空白を含むファイルを読む。
+    SettingsStore parsed;
+    const std::wstring source =
+        L"; StirHex settings\r\n"
+        L"# another comment\r\n"
+        L"\r\n"
+        L"  [Env]  \r\n"
+        L"  ScrollLines = 7 \r\n"
+        L"BackupFolder=C:\\dir with space\\x\r\n"
+        L"Quoted=\" padded \"\r\n"
+        L"[Rec0]\r\n"
+        L"FontFace=\uff2d\uff33 \u30b4\u30b7\u30c3\u30af\r\n";
+    CHECK(parsed.ParseInto(source), "well-formed file parses cleanly");
+    const std::wstring* scroll = parsed.Find(L"Env", L"ScrollLines");
+    CHECK(scroll != nullptr && *scroll == L"7", "key and value are trimmed");
+    const std::wstring* folder = parsed.Find(L"Env", L"BackupFolder");
+    CHECK(folder != nullptr && *folder == L"C:\\dir with space\\x", "inner spaces kept");
+    const std::wstring* quoted = parsed.Find(L"Env", L"Quoted");
+    CHECK(quoted != nullptr && *quoted == L" padded ", "quoted value keeps outer spaces");
+    const std::wstring* font = parsed.Find(L"Rec0", L"FontFace");
+    CHECK(font != nullptr && *font == L"\uff2d\uff33 \u30b4\u30b7\u30c3\u30af", "japanese value");
+
+    // 壊れた行は false を返しつつ、読める行は取り込む。
+    SettingsStore lenient;
+    const std::wstring broken =
+        L"[Env\r\n"          // 閉じ括弧なし
+        L"NoEquals\r\n"      // = なし
+        L"=novalue\r\n"      // キーなし
+        L"[Env]\r\n"
+        L"Good=1\r\n";
+    CHECK(!lenient.ParseInto(broken), "broken lines are reported");
+    const std::wstring* good = lenient.Find(L"Env", L"Good");
+    CHECK(good != nullptr && *good == L"1", "readable lines survive broken ones");
+}
+
+// --- 変更記録とマージ保存（Issue #130） ---
+//   複数インスタンスが同じ設定ファイルを使うとき、終了時に自分の古いスナップショット
+//   全体で置換すると別プロセスの更新が消える。ストアは「自分が加えた変更」を記録し、
+//   保存側は最新のファイル内容へその変更だけを適用する。
+
+static void TestSettingsStoreChangeLog() {
+    std::printf("TestSettingsStoreChangeLog\n");
+    using stirling::settings::SettingsStore;
+
+    SettingsStore store;
+    CHECK(store.Changes().empty(), "new store has no changes");
+
+    store.Set(L"Env", L"A", L"1");
+    store.Set(L"Env", L"B", L"2");
+    CHECK(store.Changes().size() == 2, "each set is recorded");
+    store.Set(L"Env", L"A", L"1");
+    CHECK(store.Changes().size() == 2, "an unchanged value is not recorded");
+    store.Remove(L"Env", L"B");
+    CHECK(store.Changes().size() == 3, "remove is recorded");
+    store.Remove(L"Env", L"Missing");
+    CHECK(store.Changes().size() == 3, "removing a missing key is not recorded");
+
+    // 記録を別のストアへ適用すると同じ状態になる。
+    SettingsStore target;
+    target.Set(L"Env", L"Other", L"9");   // 別プロセスが書いた値
+    target.ApplyChanges(store.Changes());
+    const std::wstring* a = target.Find(L"Env", L"A");
+    CHECK(a != nullptr && *a == L"1", "applied set");
+    CHECK(target.Find(L"Env", L"B") == nullptr, "applied remove");
+    const std::wstring* other = target.Find(L"Env", L"Other");
+    CHECK(other != nullptr && *other == L"9", "the other process value survives the merge");
+
+    store.ClearDirty();
+    CHECK(store.Changes().empty(), "ClearDirty drops the recorded changes");
+
+    // 読み込みは変更として記録しない。
+    SettingsStore parsed;
+    CHECK(parsed.ParseInto(L"[Env]\r\nA=1\r\n"), "parses");
+    CHECK(parsed.Changes().empty(), "parse records no change");
+
+    // セクション削除も記録され、マージ先へ伝わる。
+    SettingsStore remover;
+    remover.Set(L"MarkStore", L"Count", L"1");
+    remover.ClearDirty();
+    remover.RemoveSection(L"MarkStore");
+    SettingsStore target2;
+    target2.Set(L"MarkStore", L"Count", L"1");
+    target2.ApplyChanges(remover.Changes());
+    CHECK(target2.Find(L"MarkStore", L"Count") == nullptr, "applied section removal");
+}
+
+// テスト用の一時設定ファイルパス（実ファイルを触るためテンポラリへ置く）。
+static std::wstring MergeTestIniPath(const wchar_t* name) {
+    wchar_t dir[MAX_PATH] = {0};
+    const DWORD n = ::GetTempPathW(MAX_PATH, dir);
+    CHECK(n > 0 && n < MAX_PATH, "temp path");
+    return std::wstring(dir) + name;
+}
+
+static void TestSettingsFileMergedSave() {
+    std::printf("TestSettingsFileMergedSave\n");
+    using stirling::settings::SettingsStore;
+    using stirling::settings::LoadSettingsFile;
+    using stirling::settings::SaveSettingsFile;
+    using stirling::settings::SaveSettingsFileMerged;
+
+    const std::wstring path = MergeTestIniPath(L"stirhex_merge_test.ini");
+    ::DeleteFileW(path.c_str());
+
+    std::wstring error;
+    SettingsStore seed;
+    seed.Set(L"Env", L"Common", L"1");
+    seed.Set(L"Recent File List", L"File1", L"D:\\data\\a.bin");
+    CHECK(SaveSettingsFile(path, seed, error), "seed written");
+
+    // 2プロセス相当。どちらも同じ時点のスナップショットを持つ。
+    SettingsStore first, second;
+    CHECK(LoadSettingsFile(path, first, error), "first snapshot");
+    CHECK(LoadSettingsFile(path, second, error), "second snapshot");
+    first.ClearDirty();
+    second.ClearDirty();
+
+    // 先に終了したプロセスが Env を更新する。
+    first.Set(L"Env", L"FromFirst", L"10");
+    first.Set(L"Env", L"Common", L"2");
+    CHECK(SaveSettingsFileMerged(path, first, error), "first save");
+    CHECK(!first.Dirty(), "first store is clean after saving");
+
+    // 後から終了したプロセスは古い内容のまま別セクションを更新する。
+    second.Set(L"CaretPositions", L"Addr0", L"20");
+    CHECK(SaveSettingsFileMerged(path, second, error), "second save");
+
+    SettingsStore merged;
+    CHECK(LoadSettingsFile(path, merged, error), "reload");
+    const std::wstring* fromFirst = merged.Find(L"Env", L"FromFirst");
+    CHECK(fromFirst != nullptr && *fromFirst == L"10",
+          "the earlier process update survives the later save");
+    const std::wstring* common = merged.Find(L"Env", L"Common");
+    CHECK(common != nullptr && *common == L"2",
+          "an unchanged key is not reverted to the stale snapshot value");
+    const std::wstring* fromSecond = merged.Find(L"CaretPositions", L"Addr0");
+    CHECK(fromSecond != nullptr && *fromSecond == L"20", "the later update is written");
+    const std::wstring* untouched = merged.Find(L"Recent File List", L"File1");
+    CHECK(untouched != nullptr && *untouched == L"D:\\data\\a.bin", "untouched keys survive");
+
+    // 変更が無ければ書きに行かない（ファイルの更新時刻も変えない）。
+    SettingsStore clean;
+    CHECK(LoadSettingsFile(path, clean, error), "clean snapshot");
+    clean.ClearDirty();
+    CHECK(SaveSettingsFileMerged(path, clean, error), "no-op save succeeds");
+
+    // 一時ファイルを残さない。
+    const std::wstring temp = path + L"." + std::to_wstring(::GetCurrentProcessId()) + L".tmp";
+    CHECK(::GetFileAttributesW(temp.c_str()) == INVALID_FILE_ATTRIBUTES,
+          "the temp file is gone after saving");
+
+    ::DeleteFileW(path.c_str());
+}
+
+static void TestSettingsFileConcurrentSave() {
+    std::printf("TestSettingsFileConcurrentSave\n");
+    using stirling::settings::SettingsStore;
+    using stirling::settings::LoadSettingsFile;
+    using stirling::settings::SaveSettingsFile;
+    using stirling::settings::SaveSettingsFileMerged;
+
+    const std::wstring path = MergeTestIniPath(L"stirhex_concurrent_test.ini");
+    ::DeleteFileW(path.c_str());
+
+    std::wstring error;
+    SettingsStore seed;
+    seed.Set(L"Env", L"Common", L"1");
+    CHECK(SaveSettingsFile(path, seed, error), "seed written");
+
+    // 同じ設定ファイルへ同時に書き込んでも壊れず、どちらの更新も残ること。
+    //   （プロセス間ロックは同一プロセスのスレッド間でも効く）
+    const int kRounds = 25;
+    auto writer = [&path](const wchar_t* section, int rounds) {
+        for (int i = 0; i < rounds; ++i) {
+            SettingsStore store;
+            std::wstring err;
+            if (!LoadSettingsFile(path, store, err)) { continue; }
+            store.ClearDirty();
+            store.Set(section, (L"Key" + std::to_wstring(i)).c_str(), std::to_wstring(i));
+            SaveSettingsFileMerged(path, store, err);
+        }
+    };
+    std::thread a(writer, L"WriterA", kRounds);
+    std::thread b(writer, L"WriterB", kRounds);
+    a.join();
+    b.join();
+
+    SettingsStore result;
+    CHECK(LoadSettingsFile(path, result, error), "the file is still readable");
+    const std::wstring* common = result.Find(L"Env", L"Common");
+    CHECK(common != nullptr && *common == L"1", "the seed value survives");
+    int foundA = 0, foundB = 0;
+    for (int i = 0; i < kRounds; ++i) {
+        const std::wstring key = L"Key" + std::to_wstring(i);
+        if (result.Find(L"WriterA", key) != nullptr) { ++foundA; }
+        if (result.Find(L"WriterB", key) != nullptr) { ++foundB; }
+    }
+    CHECK(foundA == kRounds, "every WriterA update is kept");
+    CHECK(foundB == kRounds, "every WriterB update is kept");
+
+    ::DeleteFileW(path.c_str());
+}
+
+// エクスプローラで開くフォルダの決定（Issue #133）。相対 /ini パスの未作成ファイルでも
+//   保存先（カレントディレクトリ）へ辿り着けること。
+static void TestFolderToReveal() {
+    std::printf("[TestFolderToReveal]\n");
+    using stirling::path::FolderToReveal;
+    using stirling::path::IsRooted;
+    using stirling::path::ParentFolder;
+
+    // 親フォルダの取り出し。ルート直下は区切りを残す。
+    CHECK(ParentFolder(L"C:\\dir\\StirHex.ini") == L"C:\\dir", "parent of a nested path");
+    CHECK(ParentFolder(L"C:\\StirHex.ini") == L"C:\\", "parent at the drive root keeps the separator");
+    CHECK(ParentFolder(L"\\StirHex.ini") == L"\\", "parent at the root keeps the separator");
+    CHECK(ParentFolder(L"sub/StirHex.ini") == L"sub", "forward slashes are separators too");
+    CHECK(ParentFolder(L"StirHex.ini").empty(), "a bare file name has no parent");
+
+    CHECK(IsRooted(L"C:\\dir"), "drive absolute");
+    CHECK(IsRooted(L"\\\\server\\share"), "UNC");
+    CHECK(!IsRooted(L"sub"), "a relative folder is not rooted");
+    CHECK(!IsRooted(L"C:sub"), "a drive relative path is not rooted");
+
+    const std::wstring cwd = L"D:\\work";
+
+    // この Issue の主眼: 親フォルダ部分の無い相対ファイル名は保存先＝カレントへ倒す。
+    CHECK(FolderToReveal(L"StirHex.ini", cwd) == cwd,
+          "a bare relative file name reveals the current directory");
+    // 相対サブフォルダはカレントからの絶対パスにする。
+    CHECK(FolderToReveal(L"sub\\StirHex.ini", cwd) == L"D:\\work\\sub",
+          "a relative sub folder is resolved against the current directory");
+    // 絶対パスは従来どおりその親フォルダ。
+    CHECK(FolderToReveal(L"C:\\dir\\StirHex.ini", cwd) == L"C:\\dir",
+          "an absolute path keeps its own parent");
+    CHECK(FolderToReveal(L"C:\\StirHex.ini", cwd) == L"C:\\",
+          "a file at the drive root reveals the root");
+
+    // カレントの末尾区切りで区切りが重ならない。
+    CHECK(FolderToReveal(L"sub\\StirHex.ini", L"D:\\work\\") == L"D:\\work\\sub",
+          "a trailing separator on the current directory is not doubled");
+    CHECK(FolderToReveal(L"StirHex.ini", L"D:\\") == L"D:\\",
+          "the drive root as the current directory is kept as is");
+
+    // 決められないのは対象パスが空のときだけ。
+    CHECK(FolderToReveal(L"", cwd).empty(), "an empty path has no folder");
+    CHECK(FolderToReveal(L"StirHex.ini", L"").empty(),
+          "without a current directory a bare file name cannot be resolved");
+}
+
+static void TestSettingsStoreBinary() {
+    std::printf("TestSettingsStoreBinary\n");
+    using stirling::settings::BytesToHex;
+    using stirling::settings::HexToBytes;
+
+    const unsigned char blob[] = { 0x00, 0x01, 0x7F, 0x80, 0xFF, 0xA5 };
+    const std::wstring hex = BytesToHex(blob, sizeof(blob));
+    CHECK(hex == L"00017F80FFA5", "binary encoded as uppercase hex");
+
+    std::vector<unsigned char> back;
+    CHECK(HexToBytes(hex, back), "hex decodes");
+    CHECK(back.size() == sizeof(blob) &&
+          std::memcmp(back.data(), blob, sizeof(blob)) == 0, "binary round trip");
+
+    // キーマップ相当（256 UINT = 1024 バイト）の往復。
+    std::vector<unsigned char> keymap(1024);
+    for (size_t i = 0; i < keymap.size(); ++i) {
+        keymap[i] = static_cast<unsigned char>(i * 7 + 3);
+    }
+    std::vector<unsigned char> keymapBack;
+    CHECK(HexToBytes(BytesToHex(keymap.data(), keymap.size()), keymapBack), "keymap decodes");
+    CHECK(keymapBack == keymap, "keymap round trip");
+
+    // 不正な16進は拒否する（壊れた設定ファイルで黙って値を作らない）。
+    CHECK(!HexToBytes(L"ABC", back), "odd length rejected");
+    CHECK(!HexToBytes(L"AXBC", back), "non-hex rejected");
+    CHECK(HexToBytes(L"", back) && back.empty(), "empty accepted as empty");
 }
 
 static void TestCp932Text() {
@@ -2701,6 +3397,20 @@ int main() {
     TestSettingsCodec();
     TestSettingsCodecWide();
     TestSettingsMigration();
+    TestSettingsStoreUtf8();
+    TestSettingsStoreValueEscape();
+    TestMarkFileRoundTrip();
+    TestMarkFileEmptyAndComments();
+    TestMarkFileRejects();
+    TestMarkFileHugeDecimals();
+    TestMarkListRoundTrip();
+    TestMarkListLimitAndRejects();
+    TestSettingsStoreIni();
+    TestSettingsStoreChangeLog();
+    TestSettingsFileMergedSave();
+    TestSettingsFileConcurrentSave();
+    TestFolderToReveal();
+    TestSettingsStoreBinary();
     TestCp932Text();
     TestCp932LeadByte();
     TestFormatStructCharArrayCp932();

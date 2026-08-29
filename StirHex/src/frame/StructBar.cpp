@@ -378,17 +378,15 @@ void CStructBar::UpdateStructStatus() {
     CStirlingView* view = ActiveView();
     CStirlingDoc* doc = (view != nullptr) ? view->GetDocument() : nullptr;
     CStringW editText;   // 一時 CStringW から生ポインタを取らない（C26815）
+    CStringW charsetName;
     const wchar_t* charsetText = L"";
     const wchar_t* orderText = L"";
     if (doc != nullptr) {
         if (!doc->CanEdit()) editText = ui::LoadW(IDS_INDICATOR_EDITLOCK_TEXT);
-        static const wchar_t* kCharsets[] = {
-            L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK",
-        };
-        const int charset = doc->GetCharset();
-        if (charset >= 0 && charset < _countof(kCharsets)) {
-            charsetText = kCharsets[charset];
-        }
+        // 文字セット名は ui::CharsetNameW（文字列 6040-6046）へ集約する。UTF-8(6) を含む
+        //   （表をここへ持つと文字セット追加時に更新漏れが起きる。Issue #125）。
+        charsetName = ui::CharsetNameW(doc->GetCharset());
+        charsetText = charsetName;
         orderText = doc->IsByteOrderBig() ? L"BigEndian" : L"LittleEndian";
     }
     ::SetDlgItemTextW(GetSafeHwnd(), IDC_STRUCT_STATUS_EDIT, editText);

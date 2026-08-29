@@ -118,6 +118,15 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\app\SettingsMigration.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\app\SettingsStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\app\MarkFile.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\app\SettingsFile.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="src\frame\MainFrame.cpp" />
     <ClCompile Include="src\frame\ToolbarCatalog.cpp" />
     <ClCompile Include="src\frame\UserMenuCatalog.cpp" />
@@ -185,6 +194,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\app\ClipboardUtil.h" />
     <ClInclude Include="src\app\SettingsCodec.h" />
     <ClInclude Include="src\app\SettingsMigration.h" />
+    <ClInclude Include="src\app\SettingsStore.h" />
+    <ClInclude Include="src\app\MarkFile.h" />
+    <ClInclude Include="src\app\SettingsFile.h" />
     <ClInclude Include="src\dialog\ExtSettingsDlg.h" />
     <ClInclude Include="src\dialog\EnvSettingsDlg.h" />
     <ClInclude Include="src\frame\MainFrame.h" />
@@ -209,6 +221,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\dialog\DlgHexInput.h" />
     <ClInclude Include="src\util\ScopedHandle.h" />
     <ClInclude Include="src\util\ScopedGdi.h" />
+    <ClInclude Include="src\util\PathParts.h" />
     <ClInclude Include="src\core\CoreTypes.h" />
     <ClInclude Include="src\core\BlockList.h" />
     <ClInclude Include="src\core\BlockCursor.h" />

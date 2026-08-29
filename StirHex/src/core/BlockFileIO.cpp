@@ -60,13 +60,27 @@ bool QueryFileSize(const wchar_t* path, FileOffset* outSize, FileIoResult* outEr
     return true;
 }
 
-FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path) {
+// 共有モード → CreateFileW の dwShareMode（原 CFile の share フラグに対応）。
+static DWORD ToShareFlags(FileShareMode share) {
+    switch (share) {
+    case FileShareMode::kDenyWrite:  return FILE_SHARE_READ;   // 原 shareDenyWrite
+    case FileShareMode::kExclusive:  return 0;                 // 原 shareExclusive
+    case FileShareMode::kDenyNone:
+    default:                         return FILE_SHARE_READ | FILE_SHARE_WRITE;
+    }
+}
+
+FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
+                                FileShareMode share, void** outKeepHandle) {
     list.Clear();   // 契約上は空だが、途中失敗時と同じ状態から始めるため防衛的にクリアする
+    if (outKeepHandle != nullptr) { *outKeepHandle = nullptr; }
     if (path == nullptr || *path == L'\0') {
         return MakeResult(FileIoStatus::kOpenFailed, ERROR_INVALID_NAME, 0);
     }
-    // 読取専用・他プロセスの読み書きは許可（原 fopen("rb") = _SH_DENYNO 相当）。
-    ScopedHandle h(::CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    // 読取専用で開く。書き込みは SaveBlocksToFile が別ハンドルで行うため要求しない。
+    //   共有モードは呼出側（環境設定「ファイルの排他制御」）が決める。既定の kDenyNone は
+    //   原 fopen("rb") = _SH_DENYNO 相当（Issue #120）。
+    ScopedHandle h(::CreateFileW(path, GENERIC_READ, ToShareFlags(share),
                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!h.Valid()) {
         return MakeResult(FileIoStatus::kOpenFailed, ::GetLastError(), 0);
@@ -86,6 +100,7 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path) {
             return MakeResult(FileIoStatus::kOutOfMemory, 0, 0);
         }
         list.AppendBlock(buf, kBlockCapacity, 0);
+        if (outKeepHandle != nullptr) { *outKeepHandle = h.Release(); }
         return MakeResult(FileIoStatus::kOk, 0, 0);
     }
 
@@ -147,6 +162,8 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path) {
         list.AppendBlock(buf, kBlockCapacity, 0);
     }
     // 実際に読み込めたバイト数を返す（縮小されていた場合はサイズより少ない）。
+    // 排他制御が有効なら、共有モードを保ったままハンドルを呼出側へ渡す（Issue #120）。
+    if (outKeepHandle != nullptr) { *outKeepHandle = h.Release(); }
     return MakeResult(FileIoStatus::kOk, 0, fileSize - remaining);
 }
 

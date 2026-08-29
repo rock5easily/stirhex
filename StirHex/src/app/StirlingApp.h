@@ -4,8 +4,11 @@
 #include "core/CoreTypes.h"   // stirling::FileOffset（アドレスの 64bit 化。Issue #21）
 #include "app/StirlingSettings.h"
 #include "app/AppSettings.h"
+#include "app/SettingsStore.h"
+#include "app/SettingsFile.h"   // SettingsSource（保存先を決めた規則。Issue #111）
 #include "util/ScopedHandle.h"
 
+#include <map>
 #include <vector>
 #include <utility>
 
@@ -14,7 +17,31 @@ public:
     CStirlingApp();
 
     virtual BOOL InitInstance();
-    virtual int  ExitInstance();   // 終了時に表示設定をレジストリへ保存
+    virtual int  ExitInstance();   // 終了時に設定を保存し、設定ファイルへ書き出す
+    virtual BOOL OnIdle(LONG lCount);   // 変更があれば設定ファイルへ遅延書き出しする
+
+    // --- 設定の永続化（Issue #96: レジストリ→設定ファイル） ---
+    //   CWinApp のプロファイル API を差し替え、実体を設定ファイル（SettingsStore）にする。
+    //   CAppSettings / CStirlingSettings / MRU / キャレットストア / 実行履歴は、この API
+    //   越しに読み書きしているため、呼び出し側を変えずにまとめてファイル化される。
+    virtual UINT    GetProfileInt(LPCTSTR lpszSection, LPCTSTR lpszEntry, int nDefault);
+    virtual BOOL    WriteProfileInt(LPCTSTR lpszSection, LPCTSTR lpszEntry, int nValue);
+    virtual CString GetProfileString(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                     LPCTSTR lpszDefault = NULL);
+    virtual BOOL    WriteProfileString(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                       LPCTSTR lpszValue);
+    virtual BOOL    GetProfileBinary(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                     LPBYTE* ppData, UINT* pBytes);
+    virtual BOOL    WriteProfileBinary(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                       LPBYTE pData, UINT nBytes);
+
+    // 実際に使用している設定ファイルのパス（環境設定「ファイル」ページに出す。Issue #111）。
+    const CStringW& SettingsFilePath() const { return m_settingsPath; }
+    // そのパスが探索順のどの規則で決まったか。パスだけでは「なぜそこなのか」が
+    //   分からないため、UI では併せて出す（Issue #111）。
+    stirling::settings::SettingsSource SettingsPathSource() const { return m_settingsSource; }
+    // 読み込みに失敗した設定ファイルを温存している起動か。true の間は書き戻さない。
+    bool SettingsReadOnly() const { return m_settingsReadOnly; }
 
     // アプリ全体で共有する内部バイナリクリップボード。
     // 原は CMainFrame が保持し WM_USER+7(取得)/WM_USER+8(格納) で受け渡すが、
@@ -60,7 +87,37 @@ public:
     // 復元時: 位置を返す（無ければ -1）
     stirling::FileOffset LookupCaretPos(LPCTSTR path) const;
 
+    // マークの自動保存／自動復元（Issue #100）。設定ファイルのセクション "MarkStore" に
+    //   パス→（データの大きさ, マーク）を最大 kMarkStoreMax 件保持する。
+    //   OFF の間は記録も復元もしないが、読み込みだけは起動時に必ず行う。読まずにいると
+    //   セッション途中で ON にしたときに空のストアで既存記録を上書きしてしまう（Issue #128）。
+    void LoadMarkStore();    // 起動時に設定ファイルから読み込む（設定の ON/OFF によらず）
+    void SaveMarkStore();    // 終了時に設定ファイルへ書き出す
+    // 文書クローズ時: 先頭へ upsert（上限 kMarkStoreMax）。空のマークも記録する
+    //   （設定 ON の間の「利用者が全て解除した」は正しく反映すべき状態のため）。
+    void RecordMarks(LPCTSTR path, stirling::FileOffset size,
+                     const std::map<stirling::FileOffset, int>& marks);
+    // 復元時: パスが一致し、かつ記録時と大きさが同じ場合だけ true（out にマーク）。
+    bool LookupMarks(LPCTSTR path, stirling::FileOffset size,
+                     std::map<stirling::FileOffset, int>& out) const;
+
 private:
+    // 設定ファイルの実体（セクション→キー→値）。プロファイル API の読み書き先。
+    stirling::settings::SettingsStore m_settingsStore;
+    CStringW m_settingsPath;
+    // 保存先を決めた規則（コマンドライン / 実行ファイル隣 / APPDATA）。
+    stirling::settings::SettingsSource m_settingsSource =
+        stirling::settings::SettingsSource::AppData;
+    // 読み込みに失敗した設定ファイルは上書きしない（利用者の設定を壊さないため）。
+    bool m_settingsReadOnly = false;
+    // 保存失敗の通知は起動〜終了で1回だけにする（OnIdle 毎に出さない）。
+    bool m_settingsSaveErrorShown = false;
+
+    // 保存先を決めて設定を読み込む（初回はレジストリから移行する）。InitInstance の冒頭で呼ぶ。
+    void InitSettingsStore();
+    // 変更があれば設定ファイルへ書き出す。
+    void FlushSettingsStore();
+
     // 多重起動禁止時にプロセス生存中保持するミューテックス（RAII。Issue #48）
     stirling::ScopedHandle m_singleInstanceMutex;
 
@@ -68,6 +125,16 @@ private:
     static const int kCaretStoreMax = 16;
     static constexpr LPCTSTR kCaretSection = _T("CaretPositions");
     std::vector<std::pair<CString, stirling::FileOffset>> m_caretStore;
+
+    // マークの自動復元ストア（先頭が最新。最大 kMarkStoreMax 件）。
+    static const int kMarkStoreMax = 16;
+    static constexpr LPCTSTR kMarkSection = _T("MarkStore");
+    struct MarkStoreEntry {
+        CString path;
+        stirling::FileOffset size = -1;   // 記録時のデータの大きさ（変化の検出用）
+        std::map<stirling::FileOffset, int> marks;   // 位置 → 1..3
+    };
+    std::vector<MarkStoreEntry> m_markStore;
 
     // 1件分のキャレット位置の読み書き（保存形式は app/SettingsCodec.h の共通規約）。
     //   読み込みは新形式 Addr%d を優先し、無ければ旧 32bit 形式 Pos%d から移行する。

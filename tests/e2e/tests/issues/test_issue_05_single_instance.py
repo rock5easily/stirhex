@@ -24,9 +24,15 @@ class TestIssue05SingleInstance:
             # Launch 2nd process targeting file2
             proc2 = subprocess.Popen([str(original_exe_path), str(file2)])
 
-            # The 2nd process should terminate quickly after delegating to the 1st instance
-            proc2.wait(timeout=5)
-            assert proc2.returncode is not None, "2nd instance did not terminate"
+            # The 2nd process should terminate quickly after delegating to the 1st instance.
+            # Kill it if it does not: a surviving original Stirling holds the single-instance
+            # mutex and makes every later launch in the session fail (Issue #113).
+            try:
+                proc2.wait(timeout=5)
+                assert proc2.returncode is not None, "2nd instance did not terminate"
+            finally:
+                if proc2.poll() is None:
+                    proc2.kill()
 
             # Check that the 1st instance has opened the new document
             time.sleep(0.5)

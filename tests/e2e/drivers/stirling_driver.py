@@ -11,6 +11,12 @@ from pywinauto.handleprops import is64bitprocess
 from pywinauto.remote_memory_block import RemoteMemoryBlock
 from pywinauto.sysinfo import is_x64_Python
 
+from drivers.process_guard import (
+    describe_processes,
+    find_stirling_processes,
+    stop_command,
+)
+
 # Standard Stirling / MFC Command IDs
 CMD_FILE_NEW = 57600
 CMD_FILE_OPEN = 57601
@@ -50,6 +56,8 @@ ID_MARK_PREV = 32844
 ID_MARK_CLEAR_ALL = 32845
 ID_MARK_LIST = 32846
 ID_MARK2_TOGGLE = 32866
+ID_MARK_EXPORT = 33018     # 0x80FA write marks to a file (port only, issue #99)
+ID_MARK_IMPORT = 33019     # 0x80FB read marks from a file (port only, issue #99)
 ID_MARK3_TOGGLE = 32867
 ID_CHARSET_ASCII = 32851
 ID_CHARSET_SJIS = 32852
@@ -105,6 +113,11 @@ IDC_JUMP_EDIT = 1007
 IDC_JUMP_BASE_DEC = 1016
 IDC_JUMP_BASE_HEX = 1017
 
+# Struct bar's own status statics (ported only): edit lock / charset / byte order.
+IDC_STRUCT_STATUS_EDIT = 1205
+IDC_STRUCT_STATUS_CS = 1206
+IDC_STRUCT_STATUS_ORDER = 1207
+
 IDC_RANGEBAR_START = 1013
 IDC_RANGEBAR_END = 1014
 IDC_RANGEBAR_BASE_DEC = 1016
@@ -156,6 +169,29 @@ IDC_KA_CTRL = 1022
 IDC_KA_SHIFT = 1023
 IDC_KA_FUNC_LIST = 1024
 IDC_KA_FUNC_CATEGORY = 1026
+
+# Environment Settings "Edit 1" page (IDD_SETTINGS_EDIT1 159)
+IDC_ED1_CLEAR_UNDO_ON_SAVE = 1069
+IDC_ED1_SUBCARET = 1070
+IDC_ED1_HILIGHT_BOTH = 1088
+IDC_ED1_REALTIME_BITIMAGE = 1102
+IDC_ED1_UNDO_LIMIT = 1161      # undo memory limit on/off (port only, issue #102)
+IDC_ED1_UNDO_MB = 1162         # the limit in MB (port only, issue #102)
+IDC_ED1_UNDO_MB_SPIN = 1163
+IDC_ED1_UNDO_MB_UNIT = 1164
+
+# Environment Settings "Edit 2" page (IDD_SETTINGS_EDIT2 197)
+IDC_ED2_CARET_RESTORE = 1011
+IDC_ED2_DYNAMIC_MARK = 1025
+IDC_ED2_MARK_AUTO_RESTORE = 1165   # mark auto restore (port only, issue #100)
+
+# Environment Settings "File" page (IDD_SETTINGS_FILE 157)
+IDC_FILE_BACKUP_CREATE = 1030
+IDC_FILE_BACKUP_FOLDER_CHK = 1035
+IDC_FILE_EXCL_NONE = 1016
+IDC_FILE_INI_PATH = 1150       # settings file path, read-only (port only, issue #111)
+IDC_FILE_INI_SOURCE = 1151     # which rule chose that path (port only, issue #111)
+IDC_FILE_INI_READONLY = 1154   # shown only when the file could not be read (issue #111)
 
 # Environment Settings "Toolbar" page (IDD_SETTINGS_TOOLBAR 178)
 IDC_TBAR_CURRENT = 1021
@@ -278,6 +314,19 @@ def _send_message_a(hwnd: int, message: int, wparam: int = 0, lparam: int = 0) -
 
 def _is_unicode_window(hwnd: int) -> bool:
     return bool(USER32.IsWindowUnicode(hwnd))
+
+
+class StirlingAlreadyRunningError(RuntimeError):
+    """A launch was swallowed by an instance that was already running.
+
+    Stirling and StirHex allow only one instance: the process we started handed its
+    command line to the existing one and exited, so it never gets a window of its own
+    (Issue #113).
+    """
+
+
+class StirlingStartupError(RuntimeError):
+    """The launched process exited before showing a window, with no other instance."""
 
 
 def _require_compatible_bitness(python_is_x64: bool, target_is_x64: bool) -> None:
@@ -526,9 +575,15 @@ class StirlingDriver:
         win32gui.EnumWindows(_enum, None)
         return wins
 
-    def start(self, *files: str | Path) -> "StirlingDriver":
-        """Start the Stirling application with optional file arguments."""
+    def start(self, *files: str | Path, options: list[str] | None = None) -> "StirlingDriver":
+        """Start the Stirling application with optional file arguments.
+
+        `options` are switches such as /ini:<path>, passed through verbatim and ahead of the
+        files: they are not paths, so they must not be resolved like one.
+        """
         cmd_parts = [f'"{self.exe_path}"']
+        for opt in (options or []):
+            cmd_parts.append(f'"{opt}"')
         flat_files = []
         for f in files:
             if isinstance(f, (list, tuple)):
@@ -561,12 +616,57 @@ class StirlingDriver:
                     return h
             raise RuntimeError("Main window not found yet")
 
-        self.hwnd = timings.wait_until_passes(10, 0.3, _find_main)
+        self.hwnd = self._wait_for_main_window(_find_main)
         if self.hwnd and win32gui.GetClassName(self.hwnd) != "#32770":
             self.main_window = self.app.window(handle=self.hwnd)
             safe_set_focus(self.hwnd)
         time.sleep(0.3)
         return self
+
+    def _process_exited(self) -> bool:
+        """True once the process we launched has terminated."""
+        handle = KERNEL32.OpenProcess(0x00100000, False, self.pid)  # SYNCHRONIZE
+        if not handle:
+            return True  # gone, or no longer openable - either way it will show no window
+        try:
+            return KERNEL32.WaitForSingleObject(handle, 0) != 0x00000102  # WAIT_TIMEOUT
+        finally:
+            KERNEL32.CloseHandle(handle)
+
+    def _wait_for_main_window(self, find_main, timeout: float = 10.0,
+                              interval: float = 0.3) -> int:
+        """Wait for the main window, failing fast and by name when it can never come.
+
+        Waiting on the clock alone turns every cause into the same timeout. The launch that
+        gets swallowed by an existing instance is the common one (Issue #113): the process
+        exits within milliseconds, so the moment it is gone without a window we can say what
+        happened and name the process that took the launch.
+        """
+        deadline = time.time() + timeout
+        while True:
+            try:
+                return find_main()
+            except Exception:
+                pass
+            if self._process_exited():
+                others = [p for p in find_stirling_processes() if p.pid != self.pid]
+                if others:
+                    raise StirlingAlreadyRunningError(
+                        f"{Path(self.exe_path).name} handed its command line to an instance "
+                        f"that was already running, then exited (single-instance mutex).\n"
+                        f"Running instances:\n{describe_processes(others)}\n"
+                        f"Close them and run again:\n  {stop_command(others)}"
+                    )
+                raise StirlingStartupError(
+                    f"{Path(self.exe_path).name} exited before showing a window "
+                    f"(PID {self.pid}); no other instance is running."
+                )
+            if time.time() >= deadline:
+                raise timings.TimeoutError(
+                    f"Main window of {Path(self.exe_path).name} (PID {self.pid}) did not "
+                    f"appear within {timeout:.0f}s; the process is still running."
+                )
+            time.sleep(interval)
 
     def get_mdi_client(self) -> int:
         """Return the application's MDI client HWND."""
@@ -1102,6 +1202,53 @@ class StirlingDriver:
         self.post_command(CMD_EDIT_COPY)
         time.sleep(0.1)
 
+    def _drive_file_dialog(self, path: str, timeout: float = 10.0):
+        """Type `path` into the common file dialog that is up, then press its OK button."""
+
+        def _find_dlg():
+            wins = self._get_process_windows()
+            for h, cls, _title in wins:
+                if cls == "#32770":
+                    edit_hwnd = _file_dialog_edit(h)
+                    if edit_hwnd:
+                        return h, edit_hwnd
+            raise RuntimeError(f"file dialog not found yet, current wins: {wins}")
+
+        dlg_hwnd, edit_hwnd = timings.wait_until_passes(timeout, 0.2, _find_dlg)
+        _set_control_text(edit_hwnd, path)
+        time.sleep(0.1)
+        btn = win32gui.GetDlgItem(dlg_hwnd, 1)
+        if btn:
+            win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
+        win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        time.sleep(0.4)
+
+    def mark_export(self, dest_path: str | Path):
+        """Write the document's marks to dest_path (ID_MARK_EXPORT = 33018)."""
+        dest_path = str(Path(dest_path).resolve())
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        safe_set_focus(self.hwnd)
+        self.post_command(ID_MARK_EXPORT)
+        self._drive_file_dialog(dest_path)
+
+        def _check_saved():
+            if os.path.exists(dest_path):
+                return True
+            raise RuntimeError("mark file not written yet")
+
+        timings.wait_until_passes(5, 0.2, _check_saved)
+
+    def mark_import(self, src_path: str | Path):
+        """Start reading marks from src_path (ID_MARK_IMPORT = 33019).
+
+        Leaves whatever message boxes the import raises (size mismatch, merge or replace,
+        the completion notice) to the caller: which ones appear is what the tests assert.
+        """
+        safe_set_focus(self.hwnd)
+        self.post_command(ID_MARK_IMPORT)
+        self._drive_file_dialog(str(Path(src_path).resolve()))
+
     def mark_toggle(self):
         """Toggle mark at current cursor position (ID_MARK_TOGGLE = 32842)."""
         self.post_command(ID_MARK_TOGGLE)
@@ -1414,6 +1561,32 @@ class StirlingDriver:
             _inspect(top_hwnd)
             win32gui.EnumChildWindows(top_hwnd, _enum, None)
         return res
+
+    def struct_status_texts(self) -> dict[str, str]:
+        """Return the struct bar's own status texts (ported only).
+
+        Keys: "edit" (edit lock), "charset", "order" (byte order).  A control
+        that is not present is omitted.
+        """
+        wanted = {
+            IDC_STRUCT_STATUS_EDIT: "edit",
+            IDC_STRUCT_STATUS_CS: "charset",
+            IDC_STRUCT_STATUS_ORDER: "order",
+        }
+        found: dict[str, str] = {}
+
+        def _enum(h, _):
+            key = wanted.get(win32gui.GetDlgCtrlID(h))
+            if key is not None and win32gui.GetClassName(h) == "Static":
+                found[key] = _control_text(h)
+            return True
+
+        win32gui.EnumChildWindows(self.hwnd, _enum, None)
+        for top_hwnd, _, _ in self._get_process_windows():
+            if top_hwnd == self.hwnd:
+                continue
+            win32gui.EnumChildWindows(top_hwnd, _enum, None)
+        return found
 
     def is_struct_bar_visible(self) -> bool:
         """Check if Struct Bar is currently visible."""
@@ -2171,6 +2344,87 @@ class StirlingDriver:
             if page is not None:
                 return sheet_hwnd, page
         raise RuntimeError("User Menu page not found in Environment Settings")
+
+    def open_edit1_page(self, timeout: float = 5.0) -> tuple[int, int]:
+        """Open Environment Settings and switch to the "編集１" page.
+
+        Probed by controls the original has too, and by a combination that page 編集２
+        does not share. Returns (sheet_hwnd, page_hwnd).
+        """
+        sheet_hwnd = self.open_env_settings_dialog(timeout=timeout)
+        probe = [IDC_ED1_CLEAR_UNDO_ON_SAVE, IDC_ED1_HILIGHT_BOTH,
+                 IDC_ED1_REALTIME_BITIMAGE]
+        page = self._find_settings_page(sheet_hwnd, probe)
+        if page is not None:
+            return sheet_hwnd, page
+
+        tab = self._find_tab_control(sheet_hwnd)
+        if tab is None:
+            raise RuntimeError("Property sheet tab control not found")
+        count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
+        for index in range(count):
+            win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
+            time.sleep(0.2)
+            page = self._find_settings_page(sheet_hwnd, probe)
+            if page is not None:
+                return sheet_hwnd, page
+        raise RuntimeError("Edit 1 page not found in Environment Settings")
+
+    def open_edit2_page(self, timeout: float = 5.0) -> tuple[int, int]:
+        """Open Environment Settings and switch to the "編集２" page.
+
+        Probed by controls that page 編集１ does not share.  Returns
+        (sheet_hwnd, page_hwnd).
+        """
+        sheet_hwnd = self.open_env_settings_dialog(timeout=timeout)
+        probe = [IDC_ED2_CARET_RESTORE, IDC_ED2_DYNAMIC_MARK,
+                 IDC_ED2_MARK_AUTO_RESTORE]
+        page = self._find_settings_page(sheet_hwnd, probe)
+        if page is not None:
+            return sheet_hwnd, page
+
+        tab = self._find_tab_control(sheet_hwnd)
+        if tab is None:
+            raise RuntimeError("Property sheet tab control not found")
+        count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
+        for index in range(count):
+            win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
+            time.sleep(0.2)
+            page = self._find_settings_page(sheet_hwnd, probe)
+            if page is not None:
+                return sheet_hwnd, page
+        raise RuntimeError("Edit 2 page not found in Environment Settings")
+
+    def open_file_page(self, timeout: float = 5.0) -> tuple[int, int]:
+        """Open Environment Settings and switch to the "ファイル" page.
+
+        Probed by controls the original has too, so the page is found the same way in
+        both builds. Returns (sheet_hwnd, page_hwnd).
+        """
+        sheet_hwnd = self.open_env_settings_dialog(timeout=timeout)
+        probe = [IDC_FILE_BACKUP_CREATE, IDC_FILE_BACKUP_FOLDER_CHK, IDC_FILE_EXCL_NONE]
+        page = self._find_settings_page(sheet_hwnd, probe)
+        if page is not None:
+            return sheet_hwnd, page
+
+        tab = self._find_tab_control(sheet_hwnd)
+        if tab is None:
+            raise RuntimeError("Property sheet tab control not found")
+        count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
+        for index in range(count):
+            win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
+            time.sleep(0.2)
+            page = self._find_settings_page(sheet_hwnd, probe)
+            if page is not None:
+                return sheet_hwnd, page
+        raise RuntimeError("File page not found in Environment Settings")
+
+    def read_control_text(self, page_hwnd: int, ctrl_id: int) -> str:
+        """Read one control's text from a dialog page."""
+        h = win32gui.GetDlgItem(page_hwnd, ctrl_id)
+        if not h:
+            raise RuntimeError(f"control {ctrl_id} not found")
+        return _control_text(h)
 
     def open_key_assign_page(self, timeout: float = 5.0) -> tuple[int, int]:
         """Open Environment Settings and switch to the Key Assign page."""

@@ -43,16 +43,16 @@ def _close_and_wait(drv: StirlingDriver, timeout: float = 20.0) -> bool:
         win32api.CloseHandle(handle)
 
 
-def _store_entries(values: dict) -> dict[str, str]:
+def _store_entries(values: dict[str, str]) -> dict[str, str]:
     """Reduce a raw caret store dump to {path: address text} for readable assertions."""
-    count = int(values.get("Count", (0, None))[0])
+    count = int(values.get("Count", 0))
     entries = {}
     for i in range(count):
         path = values.get(f"Path{i}")
         addr = values.get(f"Addr{i}")
         if path is None or addr is None:
             continue
-        entries[str(path[0])] = str(addr[0])
+        entries[path] = addr
     return entries
 
 
@@ -76,17 +76,18 @@ class TestIssue22SettingsMigration:
     """Tests for Issue #22: 64-bit settings persistence and migration of 32-bit settings.
 
     The caret auto-restore store holds file addresses, so it is saved as an uppercase hex
-    string (REG_SZ) in Addr%d. Values written by the 32-bit build live in Pos%d (REG_DWORD)
-    and must be migrated on read, then removed on save.
+    string in Addr%d. Values written by the 32-bit build live in Pos%d (a decimal number,
+    REG_DWORD back when the store was in the registry) and must be migrated on read, then
+    removed on save.
 
     The caret position on exit is recorded from the view, so the address written back to
-    the registry is what the view actually restored.
+    the settings file is what the view actually restored.
     """
 
     @pytest.mark.ported
     def test_ported_migrates_legacy_32bit_caret_position(self, ported_exe_path, tmp_path):
-        """A caret position saved by the 32-bit build (Pos%d, REG_DWORD) is restored into the
-        view, then rewritten in the 64-bit format (Addr%d, REG_SZ) with the legacy value gone."""
+        """A caret position saved by the 32-bit build (Pos%d, decimal) is restored into the
+        view, then rewritten in the 64-bit format (Addr%d, hex) with the legacy value gone."""
         test_file = tmp_path / "issue22_legacy.dat"
         test_file.write_bytes(bytes(range(256)))
         legacy_pos = 0x40
@@ -101,7 +102,10 @@ class TestIssue22SettingsMigration:
             values = read_caret_store()
 
         assert "Pos0" not in values, "legacy Pos0 must be removed once migrated"
-        assert values["Addr0"][1] == winreg.REG_SZ, "Addr0 must be stored as a string"
+        assert values["Addr0"] == f"{legacy_pos:X}", (
+            "Addr0 must be written in the 64-bit format: an uppercase hex address, not the\n"
+            "decimal a 32-bit REG_DWORD would have produced"
+        )
         assert _store_entries(values) == {str(test_file): f"{legacy_pos:X}"}, (
             "legacy caret position was not restored and rewritten in the 64-bit format"
         )

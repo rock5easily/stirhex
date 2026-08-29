@@ -6,6 +6,8 @@
 
 #include <afxwin.h>
 
+#include "resource.h"   // IDS_CHARSET_NAME_BASE ほか移植側の文字列ID
+
 namespace ui {
 
 // 文字列リソースをワイドで取得する（未定義IDは空文字列）。
@@ -39,6 +41,15 @@ inline UINT CommandNameStringId(UINT rawId) {
 
 // rawID に対応する機能名（未定義は空文字列）。
 inline CStringW CommandNameW(UINT rawId) { return LoadW(CommandNameStringId(rawId)); }
+
+// キャラクターセット名（文字列 6040-6046。範囲外の値は空文字列）。
+//   表示箇所ごとに表を持つと文字セット追加時に更新漏れが起きるため、ここへ集約する（Issue #125）。
+inline CStringW CharsetNameW(int charset) {
+    if (charset < 0 || charset > (IDS_CHARSET_NAME_LAST - IDS_CHARSET_NAME_BASE)) {
+        return CStringW();
+    }
+    return LoadW(static_cast<UINT>(IDS_CHARSET_NAME_BASE + charset));
+}
 
 // カテゴリ名（原 文字列 4000-4007: ファイル系/カーソル移動系/…/その他）。
 inline CStringW CommandCategoryNameW(int category) { return LoadW(4000 + category); }

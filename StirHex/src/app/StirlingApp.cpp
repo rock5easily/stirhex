@@ -7,6 +7,8 @@
 #include "resource.h"
 #include "app/StirlingApp.h"
 #include "app/SettingsCodec.h"       // 64bit 設定値の保存形式（Issue #22）
+#include "app/MarkFile.h"        // マークの1行表現（自動復元ストア。Issue #100）
+#include "app/SettingsFile.h"        // 設定ファイルの保存先解決・入出力（Issue #96）
 #include "app/ShellUtil.h"           // ui::FullPath（MAX_PATH 非依存のパス解決）
 #include "frame/MainFrame.h"
 #include "frame/ChildFrame.h"
@@ -252,6 +254,142 @@ CDocument* CStirlingApp::OpenDroppedFile(LPCTSTR path) {
     return pDoc;
 }
 
+// === 設定の永続化（Issue #96: レジストリ→設定ファイル） ===
+namespace {
+// プロファイル API の引数検査。MFC 版は ASSERT で落とすが、ここでは無効な呼び出しを
+//   既定値で受け流す（設定ファイル層の都合でアプリを落とさない）。
+bool ValidProfileEntry(LPCTSTR section, LPCTSTR entry) {
+    return section != nullptr && *section != _T('\0') &&
+           entry != nullptr && *entry != _T('\0');
+}
+}  // namespace
+
+// 保存先を決めて設定を読み込む。読み込みに失敗した場合はそのファイルを上書きしない。
+void CStirlingApp::InitSettingsStore() {
+    const stirling::settings::SettingsLocation location =
+        stirling::settings::ResolveSettingsLocation();
+    m_settingsPath = location.path.c_str();
+    m_settingsSource = location.source;
+    // 設定ファイルがまだ無い＝初回起動。読み込みの前に見ておく。
+    const bool firstRun = !stirling::settings::SettingsFileExists(location.path);
+
+    std::wstring error;
+    if (!stirling::settings::LoadSettingsFile(location.path, m_settingsStore, error)) {
+        // 壊れた（あるいは読めない）設定ファイルは書き換えない。利用者が中身を確認して
+        //   直せるよう温存し、この起動は既定値で動かす。
+        m_settingsReadOnly = true;
+        m_settingsStore.Clear();
+        m_settingsStore.ClearDirty();
+        CStringW message;
+        message.Format(ui::LoadW(IDS_ERR_SETTINGS_LOAD), error.c_str());
+        ui::MsgBox(nullptr, message);
+        return;
+    }
+    m_settingsStore.ClearDirty();   // 読み込みは「変更」ではない
+
+    if (firstRun) {
+        // 初回起動。1.1.0 以前がレジストリへ保存していた設定を引き継ぐ。
+        //   旧キーは消さない（旧バージョンへ戻せるようにする）。取り込めた場合は
+        //   ストアが dirty のままになり、この後の書き出しで設定ファイルが作られる。
+        stirling::settings::ImportFromRegistry(
+            stirling::settings::kLegacyRegistryKey, m_settingsStore);
+    }
+}
+
+// 変更があれば設定ファイルへ書き出す。書き込みに失敗したら通知は1回だけ行う。
+void CStirlingApp::FlushSettingsStore() {
+    if (m_settingsReadOnly || !m_settingsStore.Dirty()) { return; }
+
+    std::wstring error;
+    // 複数インスタンスが同じ設定ファイルを使う場合に備え、最新の内容へこのプロセスの
+    //   変更だけを適用して書き戻す（Issue #130）。ClearDirty は保存側が行う。
+    if (stirling::settings::SaveSettingsFileMerged(
+            static_cast<LPCWSTR>(m_settingsPath), m_settingsStore, error)) {
+        return;
+    }
+    if (!m_settingsSaveErrorShown) {
+        m_settingsSaveErrorShown = true;   // アイドル毎の再試行と重複通知を止める
+        CStringW message;
+        message.Format(ui::LoadW(IDS_ERR_SETTINGS_SAVE), error.c_str());
+        ui::MsgBox(nullptr, message);
+    }
+}
+
+// 設定変更をためこまず、アイドル時に書き戻す（異常終了で設定を失いにくくする）。
+BOOL CStirlingApp::OnIdle(LONG lCount) {
+    const BOOL more = CWinApp::OnIdle(lCount);
+    if (lCount == 0 && !m_settingsSaveErrorShown) {
+        FlushSettingsStore();
+    }
+    return more;
+}
+
+UINT CStirlingApp::GetProfileInt(LPCTSTR lpszSection, LPCTSTR lpszEntry, int nDefault) {
+    if (!ValidProfileEntry(lpszSection, lpszEntry)) { return static_cast<UINT>(nDefault); }
+    const std::wstring* value = m_settingsStore.Find(lpszSection, lpszEntry);
+    if (value == nullptr) { return static_cast<UINT>(nDefault); }
+    // 負値（キャレット位置の旧形式 -1 等）も往復するため符号付きで解釈する。
+    return static_cast<UINT>(_wtoi(value->c_str()));
+}
+
+BOOL CStirlingApp::WriteProfileInt(LPCTSTR lpszSection, LPCTSTR lpszEntry, int nValue) {
+    if (!ValidProfileEntry(lpszSection, lpszEntry)) { return FALSE; }
+    m_settingsStore.Set(lpszSection, lpszEntry, std::to_wstring(nValue));
+    return TRUE;
+}
+
+CString CStirlingApp::GetProfileString(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                       LPCTSTR lpszDefault) {
+    const CString fallback = (lpszDefault != nullptr) ? CString(lpszDefault) : CString();
+    if (!ValidProfileEntry(lpszSection, lpszEntry)) { return fallback; }
+    const std::wstring* value = m_settingsStore.Find(lpszSection, lpszEntry);
+    if (value == nullptr) { return fallback; }
+    return CString(value->c_str());
+}
+
+BOOL CStirlingApp::WriteProfileString(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                      LPCTSTR lpszValue) {
+    if (lpszSection == nullptr || *lpszSection == _T('\0')) { return FALSE; }
+    if (lpszEntry == nullptr) {
+        // MFC の規約: エントリ名 NULL はセクションごと削除する。
+        m_settingsStore.RemoveSection(lpszSection);
+        return TRUE;
+    }
+    if (*lpszEntry == _T('\0')) { return FALSE; }
+    if (lpszValue == nullptr) {
+        m_settingsStore.Remove(lpszSection, lpszEntry);   // 値の削除
+        return TRUE;
+    }
+    m_settingsStore.Set(lpszSection, lpszEntry, lpszValue);
+    return TRUE;
+}
+
+BOOL CStirlingApp::GetProfileBinary(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                    LPBYTE* ppData, UINT* pBytes) {
+    if (ppData == nullptr || pBytes == nullptr) { return FALSE; }
+    *ppData = nullptr;
+    *pBytes = 0;
+    if (!ValidProfileEntry(lpszSection, lpszEntry)) { return FALSE; }
+    const std::wstring* value = m_settingsStore.Find(lpszSection, lpszEntry);
+    if (value == nullptr) { return FALSE; }
+    std::vector<unsigned char> bytes;
+    if (!stirling::settings::HexToBytes(*value, bytes) || bytes.empty()) { return FALSE; }
+    // 呼び出し側が delete[] で解放する（CWinApp::GetProfileBinary と同じ規約）。
+    *ppData = new BYTE[bytes.size()];
+    ::memcpy(*ppData, bytes.data(), bytes.size());
+    *pBytes = static_cast<UINT>(bytes.size());
+    return TRUE;
+}
+
+BOOL CStirlingApp::WriteProfileBinary(LPCTSTR lpszSection, LPCTSTR lpszEntry,
+                                      LPBYTE pData, UINT nBytes) {
+    if (!ValidProfileEntry(lpszSection, lpszEntry)) { return FALSE; }
+    if (pData == nullptr && nBytes != 0) { return FALSE; }
+    m_settingsStore.Set(lpszSection, lpszEntry,
+                        stirling::settings::BytesToHex(pData, nBytes));
+    return TRUE;
+}
+
 BOOL CStirlingApp::InitInstance() {
     CWinApp::InitInstance();
 
@@ -269,14 +407,14 @@ BOOL CStirlingApp::InitInstance() {
         return FALSE;
     }
 
-    // 表示設定の永続化先（HKCU\Software\StirHex\StirHex\<section>）。
-    //   SetRegistryKey 後は Profile API がレジストリを使う（INI ではなく）。
-    //   旧 StirlingPort キーからは移行せず、StirHex の設定を新規作成する（Issue #66）。
-    SetRegistryKey(_T("StirHex"));
+    // 設定の永続化先（設定ファイル。Issue #96）。プロファイル API を差し替えているため
+    //   SetRegistryKey は呼ばない。以降の Load 系は全てこのストア越しに読む。
+    InitSettingsStore();
     LoadSettings();          // 起動時に拡張子レコード（表示設定）を復元（原 FUN_0041f2a5 相当）
     LoadDefaultExtComment(); // 既定レコードのコメント（静的初期化では読めない。Issue #34）
     m_appSettings.Load();    // アプリ全体の動作環境設定（環境設定 0x8050）を復元
     LoadCaretStore();        // キャレット位置の自動復元ストア（caretAutoRestore）を復元
+    LoadMarkStore();         // マークの自動復元ストア（markAutoRestore）を復元
 
     // コマンドラインは単一起動判定前に解析し、2回目起動のファイル列を既存プロセスへ転送する。
     CStirlingCommandLineInfo cmdInfo;
@@ -536,6 +674,101 @@ void CStirlingApp::RecordCaretPos(LPCTSTR path, stirling::FileOffset pos) {
     }
 }
 
+// --- マークの自動保存／自動復元（Issue #100） ---
+//   セクション "MarkStore" に Count / Path%d / Size%d / Marks%d を最大16件。
+//   Marks%d は "40:1,A0:2"（16進アドレス:種別1..3、アドレス昇順）。表記は #99 の
+//   マークファイルと揃えてあり、両者を見比べられる。
+
+void CStirlingApp::LoadMarkStore() {
+    m_markStore.clear();
+    // 設定の ON/OFF によらず読み込む。OFF のときの復元と記録は LookupMarks / RecordMarks 側で
+    //   抑止しており、ここで読まずにいると OFF→ON の切り替え後の SaveMarkStore が空のストアで
+    //   既存記録を上書きしてしまう（Issue #128）。
+    int count = GetProfileInt(kMarkSection, _T("Count"), 0);
+    if (count > kMarkStoreMax) { count = kMarkStoreMax; }
+    for (int i = 0; i < count; ++i) {
+        CString key;
+        key.Format(_T("Path%d"), i);
+        const CString path = GetProfileString(kMarkSection, key, _T(""));
+        if (path.IsEmpty()) { continue; }
+
+        key.Format(_T("Marks%d"), i);
+        const CString marks = GetProfileString(kMarkSection, key, _T(""));
+        MarkStoreEntry entry;
+        if (!stirling::marks::DecodeMarkList(static_cast<LPCWSTR>(marks), entry.marks)) {
+            // 手編集で壊れた1件は捨てる（既定へ倒さない。キャレットストアと同じ流儀）。
+            TRACE(_T("MarkStore Marks%d: 解釈できない値を無視しました\n"), i);
+            continue;
+        }
+        key.Format(_T("Size%d"), i);
+        const CString size = GetProfileString(kMarkSection, key, _T(""));
+        stirling::FileOffset parsedSize = -1;
+        if (!size.IsEmpty() &&
+            stirling::settings::ParseOffsetHex(static_cast<LPCWSTR>(size), parsedSize)) {
+            entry.size = parsedSize;
+        }
+        entry.path = path;
+        m_markStore.push_back(entry);
+    }
+}
+
+void CStirlingApp::SaveMarkStore() {
+    // OFF のまま終了した場合は書かない（既存記録をそのまま残す）。
+    if (!m_appSettings.markAutoRestore) { return; }
+
+    const int count = static_cast<int>(m_markStore.size());
+    WriteProfileInt(kMarkSection, _T("Count"), count);
+    for (int i = 0; i < count; ++i) {
+        CString key;
+        key.Format(_T("Path%d"), i);
+        WriteProfileString(kMarkSection, key, m_markStore[i].path);
+        key.Format(_T("Size%d"), i);
+        WriteProfileString(kMarkSection, key,
+                           stirling::settings::FormatOffsetHexW(m_markStore[i].size).c_str());
+        key.Format(_T("Marks%d"), i);
+        WriteProfileString(kMarkSection, key,
+                           stirling::marks::EncodeMarkList(m_markStore[i].marks).c_str());
+    }
+}
+
+void CStirlingApp::RecordMarks(LPCTSTR path, stirling::FileOffset size,
+                               const std::map<stirling::FileOffset, int>& marks) {
+    if (!m_appSettings.markAutoRestore) { return; }
+    if (path == nullptr || *path == _T('\0')) { return; }
+
+    // 既存の同一パスを除いてから先頭へ挿入（最新＝[0]）。上限超過分は末尾を落とす。
+    for (auto it = m_markStore.begin(); it != m_markStore.end(); ++it) {
+        if (it->path.CompareNoCase(path) == 0) { m_markStore.erase(it); break; }
+    }
+    if (marks.empty()) {
+        // 全て解除して閉じた場合。設定 ON の間の操作なので、記録も消えるのが正しい。
+        return;
+    }
+    MarkStoreEntry entry;
+    entry.path = path;
+    entry.size = size;
+    entry.marks = marks;
+    m_markStore.insert(m_markStore.begin(), entry);
+    if (static_cast<int>(m_markStore.size()) > kMarkStoreMax) {
+        m_markStore.resize(kMarkStoreMax);
+    }
+}
+
+bool CStirlingApp::LookupMarks(LPCTSTR path, stirling::FileOffset size,
+                               std::map<stirling::FileOffset, int>& out) const {
+    if (!m_appSettings.markAutoRestore) { return false; }
+    if (path == nullptr || *path == _T('\0')) { return false; }
+
+    for (const auto& e : m_markStore) {
+        if (e.path.CompareNoCase(path) != 0) { continue; }
+        // 大きさが変わっていたら復元しない。ずれた位置に復元するのは、復元しないより悪い。
+        if (e.size >= 0 && e.size != size) { return false; }
+        out = e.marks;
+        return true;
+    }
+    return false;
+}
+
 stirling::FileOffset CStirlingApp::LookupCaretPos(LPCTSTR path) const {
     if (path == nullptr || *path == _T('\0')) { return -1; }
     for (const auto& e : m_caretStore) {
@@ -545,12 +778,14 @@ stirling::FileOffset CStirlingApp::LookupCaretPos(LPCTSTR path) const {
 }
 
 int CStirlingApp::ExitInstance() {
-    SaveSettings();          // 終了時に拡張子レコードをレジストリへ保存
+    SaveSettings();          // 終了時に拡張子レコードをストアへ書き出す
     m_appSettings.Save();    // アプリ全体の動作環境設定を保存
     SaveCaretStore();        // キャレット位置の自動復元ストアを保存
+    SaveMarkStore();         // マークの自動復元ストアを保存
     if (m_pRecentFileList != nullptr) {
-        m_pRecentFileList->WriteList();   // ファイル履歴（MRU）をレジストリへ保存
+        m_pRecentFileList->WriteList();   // ファイル履歴（MRU）を保存
     }
+    FlushSettingsStore();    // ストアの内容を設定ファイルへ書き出す
     m_singleInstanceMutex.Close();   // 破棄時にも閉じるが、終了処理の順序を明示するため明示クローズ
     return CWinApp::ExitInstance();
 }

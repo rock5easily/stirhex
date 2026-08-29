@@ -30,7 +30,14 @@ namespace {
 
 // 巨大ファイルを開く前に確認する閾値（原には無い移植独自の保護。Issue #20）。
 //   BlockList はファイルサイズとほぼ同量のメモリを消費するため、事前に確認する。
-constexpr stirling::FileOffset kLargeFileConfirmBytes = 512LL * 1024 * 1024;   // 512MB
+//   しきい値は環境設定「ファイル」ページで変更でき、確認そのものも無効にできる
+//   （Issue #101）。0 以下は設定ファイルを手で編集した場合にのみ起こりうるため、
+//   既定値へ倒して確認を出す側に寄せる。
+stirling::FileOffset LargeFileConfirmBytes(const CAppSettings& settings) {
+    if (!settings.largeFileWarn) { return 0; }   // 0 = 確認しない
+    const int mb = (settings.largeFileWarnMB > 0) ? settings.largeFileWarnMB : 512;
+    return static_cast<stirling::FileOffset>(mb) * 1024 * 1024;
+}
 
 // バイト数を3桁区切りの文字列にする（"バイト" 等の単位語はリソース側に持たせる）。
 CStringW FormatBytesW(stirling::FileOffset bytes) {
@@ -70,6 +77,28 @@ CStringW FileIoReasonW(const stirling::FileIoResult& r) {
         return msg;
     }
     return SystemErrorTextW(r.systemError);
+}
+
+// 環境設定「ファイルの排他制御」→ 読み込みハンドルの共有モード（原 ReadFileIntoBlocks
+//   の 0→shareDenyNone / 1→shareDenyWrite / 2→shareExclusive）。Issue #120。
+stirling::FileShareMode ExclusiveControlToShareMode(int exclusiveControl) {
+    switch (exclusiveControl) {
+    case 1:  return stirling::FileShareMode::kDenyWrite;   // 書込禁止
+    case 2:  return stirling::FileShareMode::kExclusive;   // 読書禁止
+    default: return stirling::FileShareMode::kDenyNone;    // しない
+    }
+}
+
+// 他プロセスが共有を許していないためのオープン失敗か（原 CFileException::sharingViolation）。
+bool IsSharingViolation(const stirling::FileIoResult& r) {
+    if (r.status != stirling::FileIoStatus::kOpenFailed) { return false; }
+    return r.systemError == ERROR_SHARING_VIOLATION || r.systemError == ERROR_LOCK_VIOLATION;
+}
+
+// 読み取り専用属性のファイルか（属性を取得できない場合は false）。
+bool IsReadOnlyFile(const CStringW& path) {
+    const DWORD attr = ::GetFileAttributesW(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_READONLY) != 0;
 }
 
 HWND MainWndHandle() {
@@ -140,9 +169,13 @@ void CStirlingDoc::ReleaseLock() {
     m_lockPath.Empty();
 }
 
-// 排他制御（原 exclusiveControl）: 共有モード付きの参照ハンドルをドキュメント存続期間中保持する。
+// 排他制御（原 exclusiveControl）の再取得: 共有モード付きの参照ハンドルを保持する。
 //   0=しない（保持しない）/ 1=書込禁止（FILE_SHARE_READ で他プロセスの書込を拒否）/
-//   2=読書禁止（共有なし＝排他）。取得失敗時は保持しない（他が既にロック中の場合など）。
+//   2=読書禁止（共有なし＝排他）。
+//   オープン時のロックは読み込みハンドルをそのまま保持する（OnOpenDocument。Issue #120）。
+//   ここは保存の前後で一旦手放したロックを取り直す経路。保存直後は自分が書き込んだ直後で
+//   あり、失敗するのは他プロセスが割り込んだ場合に限られる。利用者へ選択肢を出せる場面では
+//   ないため、取得できなければロックなしで続行する。
 void CStirlingDoc::AcquireLock(LPCTSTR path) {
     ReleaseLock();
     if (path == nullptr || *path == _T('\0')) { return; }
@@ -154,6 +187,8 @@ void CStirlingDoc::AcquireLock(LPCTSTR path) {
     if (h.Valid()) {
         m_lockHandle = std::move(h);
         m_lockPath = path;
+    } else {
+        TRACE(_T("排他制御ハンドルを取り直せませんでした（保存後）"));
     }
 }
 
@@ -206,15 +241,36 @@ BOOL CStirlingDoc::OnNewDocument() {
     return TRUE;
 }
 
+// 閉じる直前にマークを記録する（Issue #100）。
+//   環境設定 markAutoRestore が OFF の間は RecordMarks 側で何もしない。OFF のときは
+//   復元もしないため、ここで書き戻すと「利用者が消した」のか「復元しなかった」のか
+//   区別できないまま記録を失う。
+//   未保存の変更を破棄して閉じる場合も同じ理由で記録しない（Issue #129）。破棄される
+//   メモリ上の大きさとマークで上書きすると、ディスク上の内容と食い違って次回は復元されず、
+//   それ以前の有効な記録まで失われる。
+void CStirlingDoc::OnCloseDocument() {
+    const CString path = GetPathName();
+    if (!path.IsEmpty() && !IsModified()) {
+        std::map<stirling::FileOffset, int> marks;
+        for (const auto& kv : m_marks) {
+            marks[kv.first] = kv.second + 1;   // 内部種別 0..2 → ストア上の 1..3
+        }
+        theApp.RecordMarks(path, GetTotalLength(), marks);
+    }
+    CDocument::OnCloseDocument();
+}
+
 BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
     DeleteContents();
     // core は 64bit オフセット・ワイドパスの API（Issue #20）。MBCS ビルドのため境界で変換する。
     const CStringW wpath(lpszPathName);
 
     // 巨大ファイルは読み込み前に確認する（ファイルサイズ相当のメモリを消費するため）。
+    const stirling::FileOffset confirmBytes = LargeFileConfirmBytes(theApp.AppSettings());
     stirling::FileOffset probeSize = 0;
-    if (stirling::QueryFileSize(wpath, &probeSize, nullptr) &&
-        probeSize >= kLargeFileConfirmBytes) {
+    if (confirmBytes > 0 &&
+        stirling::QueryFileSize(wpath, &probeSize, nullptr) &&
+        probeSize >= confirmBytes) {
         CStringW confirm;
         confirm.Format(ui::LoadW(IDS_CONFIRM_LARGE_FILE), (LPCWSTR)FormatBytesW(probeSize));
         if (ui::MsgBox(MainWndHandle(), confirm, MB_YESNO | MB_ICONQUESTION) != IDYES) {
@@ -222,17 +278,61 @@ BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
         }
     }
 
-    const stirling::FileIoResult loaded = stirling::LoadFileIntoBlocks(m_blocks, wpath);
+    // 排他制御は読み込みハンドルの共有モードとして適用し、有効な間はそのハンドルを
+    //   保持し続ける（原 ReadFileIntoBlocks と同じ形。別ハンドルで後からロックを取ると、
+    //   排他モードでは自分自身の読み込みを弾いてしまう。Issue #120）。
+    ReleaseLock();
+    const int exclusive = theApp.AppSettings().exclusiveControl;
+    const stirling::FileShareMode share = ExclusiveControlToShareMode(exclusive);
+
+    // 読み取り専用属性のファイルは閲覧モードで開く（原挙動）。
+    bool viewMode = IsReadOnlyFile(wpath);
+
+    void* keepHandle = nullptr;
+    stirling::FileIoResult loaded =
+        stirling::LoadFileIntoBlocks(m_blocks, wpath, share,
+                                     (exclusive != 0) ? &keepHandle : nullptr);
+    if (!loaded.Ok() && IsSharingViolation(loaded)) {
+        // 他のアプリケーションが排他制御している。原と同じく閲覧モードで開くか確認する。
+        //   [キャンセル] は追加のメッセージを出さずに中止（原 IDCANCEL 経路）。
+        if (ui::MsgBox(MainWndHandle(), ui::LoadW(IDS_CONFIRM_VIEW_MODE),
+                       MB_OKCANCEL | MB_ICONQUESTION) != IDOK) {
+            return FALSE;
+        }
+        // 閲覧モードは共有を全許可で開き直す（原 modeRead | shareDenyNone）。
+        //   何も排他しないハンドルを保持する意味は無いため、ここでは保持しない。
+        keepHandle = nullptr;
+        loaded = stirling::LoadFileIntoBlocks(m_blocks, wpath,
+                                              stirling::FileShareMode::kDenyNone, nullptr);
+        if (loaded.Ok()) { viewMode = true; }
+    }
     if (!loaded.Ok()) {
         // MFC は OnOpenDocument が FALSE のとき自前のメッセージを出さない契約のため、
         // ここで理由付きのメッセージを表示する。
         ShowFileIoError(IDS_ERR_LOAD_FAILED, lpszPathName, loaded);
         return FALSE;
     }
+    if (keepHandle != nullptr) {
+        m_lockHandle.Reset(static_cast<HANDLE>(keepHandle));   // 読み込みハンドル＝排他ロック
+        m_lockPath = lpszPathName;
+    }
     // 拡張子で表示設定レコードを解決（この時点で GetPathName は未設定のため引数パスを使う）。
     m_settings = theApp.SettingsForPath(CStringW(lpszPathName));
     ApplyOpenDefaults(true);    // ファイルオープン時は編集禁止既定も適用
-    AcquireLock(lpszPathName);  // 排他制御（設定に応じて共有モード付きハンドルを保持）
+    // 閲覧モード（原 doc+0x64 = 0）。編集できず、[編集禁止]の切替もできない状態。
+    //   拡張子別設定の「ファイルオープン時に編集禁止とする」より強い（Issue #120）。
+    if (viewMode) { m_editState = 0; }
+
+    // マークの自動復元（Issue #100）。環境設定 markAutoRestore が OFF のとき、および
+    //   記録時とデータの大きさが違うときは LookupMarks が false を返す（復元しない）。
+    std::map<stirling::FileOffset, int> restored;
+    if (theApp.LookupMarks(lpszPathName, GetTotalLength(), restored)) {
+        const stirling::FileOffset total = GetTotalLength();
+        for (const auto& kv : restored) {
+            if (kv.first < 0 || kv.first >= total) { continue; }
+            SetMark(kv.first, kv.second - 1);   // ストア上の 1..3 → 内部種別 0..2
+        }
+    }
     m_diskTimeValid = ReadDiskTime(lpszPathName, m_diskTime);   // 外部変更検知の基準時刻
     SetModifiedFlag(FALSE);
     return TRUE;
@@ -624,13 +724,22 @@ bool CStirlingDoc::SetByteNoUndo(stirling::FileOffset pos, unsigned char b) {
 
 // ---- Undo 履歴の容量管理（Issue #30） ----
 
-// 上限のバイト換算。0（および負値）は無制限を意味する。
+// 上限のバイト換算。0 は無制限を意味する。
+//   チェックを外している場合のほか、設定ファイルを手で編集して 0 以下にした場合も
+//   無制限として扱う（Issue #30 当時からの「0=無制限」の意味を残す）。
 unsigned long long CStirlingDoc::UndoMemoryLimitBytes() {
-    const int mb = theApp.AppSettings().undoMemoryLimitMB;
-    if (mb <= 0) {
+    const CAppSettings& s = theApp.AppSettings();
+    if (!s.undoMemoryLimit || s.undoMemoryLimitMB <= 0) {
         return 0;   // 無制限
     }
-    return static_cast<unsigned long long>(mb) * 1024ull * 1024ull;
+    return static_cast<unsigned long long>(s.undoMemoryLimitMB) * 1024ull * 1024ull;
+}
+
+// 上限の変更を直ちに反映する（環境設定の確定時。Issue #102）。
+//   次の編集まで待つと、利用者が上限を下げて編集をやめた場合に超過分を抱えたままに
+//   なるため、その場で切り詰める。
+void CStirlingDoc::ApplyUndoMemoryLimit() {
+    TrimUndoHistory();
 }
 
 void CStirlingDoc::PushUndoRecord(EditRecord&& r) {

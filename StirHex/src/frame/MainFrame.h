@@ -65,6 +65,9 @@ protected:
     // bitImageDockable を現在位置を変えずにドッキング可否へ反映する。
     void ApplyBitImageBarSettings();
 
+    // 相違一覧のアプリ内最小化プロキシを、MDIクライアント領域の変化へ追従させる（Issue #123）。
+    virtual void RecalcLayout(BOOL bNotify = TRUE) override;
+
     afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
     afx_msg void OnDestroy();
     afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);

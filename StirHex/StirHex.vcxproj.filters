@@ -16,6 +16,9 @@
     <ClCompile Include="src\app\AppSettings.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\ShellUtil.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\SettingsCodec.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\SettingsStore.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\MarkFile.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\SettingsFile.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\SettingsMigration.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\dialog\EnvSettingsDlg.cpp"><Filter>dialog</Filter></ClCompile>
     <ClCompile Include="src\frame\MainFrame.cpp"><Filter>frame</Filter></ClCompile>
@@ -54,6 +57,9 @@
     <ClInclude Include="src\app\ShellUtil.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\ClipboardUtil.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\SettingsCodec.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\app\SettingsStore.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\app\MarkFile.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\app\SettingsFile.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\SettingsMigration.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\dialog\EnvSettingsDlg.h"><Filter>dialog</Filter></ClInclude>
     <ClInclude Include="src\frame\MainFrame.h"><Filter>frame</Filter></ClInclude>
@@ -82,6 +88,7 @@
     <ClInclude Include="src\dialog\DlgHexInput.h"><Filter>dialog</Filter></ClInclude>
     <ClInclude Include="src\util\ScopedHandle.h"><Filter>util</Filter></ClInclude>
     <ClInclude Include="src\util\ScopedGdi.h"><Filter>util</Filter></ClInclude>
+    <ClInclude Include="src\util\PathParts.h"><Filter>util</Filter></ClInclude>
     <ClInclude Include="src\core\CoreTypes.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\BlockList.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\BlockCursor.h"><Filter>core</Filter></ClInclude>

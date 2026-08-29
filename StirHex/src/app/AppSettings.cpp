@@ -58,7 +58,15 @@ void CAppSettings::Load() {
     escDeselect       = GetBool(_T("EscDeselect"), escDeselect);
     deselectAfterCopy = GetBool(_T("DeselectAfterCopy"), deselectAfterCopy);
     clearUndoOnSave   = GetBool(_T("ClearUndoOnSave"), clearUndoOnSave);
+    undoMemoryLimit   = GetBool(_T("UndoMemoryLimit"), undoMemoryLimit);
     undoMemoryLimitMB = GetInt(_T("UndoMemoryLimitMB"), undoMemoryLimitMB);
+    // UndoMemoryLimit キーが無かった頃は UndoMemoryLimitMB=0 が「無制限」だった。
+    //   0 以下は上限 OFF ＋ 既定値へ移行する。動作は従来どおり無制限のまま、環境設定の
+    //   入力欄には有効な値が出るので、そのまま確定できる（Issue #131）。
+    if (undoMemoryLimitMB <= 0) {
+        undoMemoryLimit   = false;
+        undoMemoryLimitMB = kUndoMemoryLimitDefaultMB;
+    }
     subCaret          = GetBool(_T("SubCaret"), subCaret);
     highlightBoth     = GetBool(_T("HighlightBoth"), highlightBoth);
     realtimeBitImage  = GetBool(_T("RealtimeBitImage"), realtimeBitImage);
@@ -70,6 +78,7 @@ void CAppSettings::Load() {
     newDocEditable     = GetBool(_T("NewDocEditable"), newDocEditable);
     endAutoInsert      = GetBool(_T("EndAutoInsert"), endAutoInsert);
     dynamicMark        = GetBool(_T("DynamicMark"), dynamicMark);
+    markAutoRestore    = GetBool(_T("MarkAutoRestore"), markAutoRestore);
 
     backupCreate         = GetBool(_T("BackupCreate"), backupCreate);
     backupGenerations    = GetInt(_T("BackupGenerations"), backupGenerations);
@@ -79,6 +88,8 @@ void CAppSettings::Load() {
     linkDirect           = GetBool(_T("LinkDirect"), linkDirect);
     defaultFolderSpecify = GetBool(_T("DefaultFolderSpecify"), defaultFolderSpecify);
     defaultFolder        = GetStr(_T("DefaultFolder"));
+    largeFileWarn        = GetBool(_T("LargeFileWarn"), largeFileWarn);
+    largeFileWarnMB      = GetInt(_T("LargeFileWarnMB"), largeFileWarnMB);
 
     winPlacement    = GetInt(_T("WinPlacement"), winPlacement);
     winLeft         = GetInt(_T("WinLeft"), winLeft);
@@ -164,6 +175,7 @@ void CAppSettings::Save() const {
     PutBool(_T("EscDeselect"), escDeselect);
     PutBool(_T("DeselectAfterCopy"), deselectAfterCopy);
     PutBool(_T("ClearUndoOnSave"), clearUndoOnSave);
+    PutBool(_T("UndoMemoryLimit"), undoMemoryLimit);
     PutInt(_T("UndoMemoryLimitMB"), undoMemoryLimitMB);
     PutBool(_T("SubCaret"), subCaret);
     PutBool(_T("HighlightBoth"), highlightBoth);
@@ -176,6 +188,7 @@ void CAppSettings::Save() const {
     PutBool(_T("NewDocEditable"), newDocEditable);
     PutBool(_T("EndAutoInsert"), endAutoInsert);
     PutBool(_T("DynamicMark"), dynamicMark);
+    PutBool(_T("MarkAutoRestore"), markAutoRestore);
 
     PutBool(_T("BackupCreate"), backupCreate);
     PutInt(_T("BackupGenerations"), backupGenerations);
@@ -185,6 +198,8 @@ void CAppSettings::Save() const {
     PutBool(_T("LinkDirect"), linkDirect);
     PutBool(_T("DefaultFolderSpecify"), defaultFolderSpecify);
     PutStr(_T("DefaultFolder"), defaultFolder);
+    PutBool(_T("LargeFileWarn"), largeFileWarn);
+    PutInt(_T("LargeFileWarnMB"), largeFileWarnMB);
 
     PutInt(_T("WinPlacement"), winPlacement);
     PutInt(_T("WinLeft"), winLeft);

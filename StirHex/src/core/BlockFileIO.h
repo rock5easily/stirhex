@@ -47,13 +47,32 @@ struct FileIoResult {
 //   outSize / outErr は nullptr を許容する。
 bool QueryFileSize(const wchar_t* path, FileOffset* outSize, FileIoResult* outErr);
 
+// 読み込みハンドルの共有モード（原 CFile の share フラグに対応。Issue #120）。
+//   原は環境設定「ファイルの排他制御」をこの共有モードとして読み込みハンドルへ適用し、
+//   排他が有効な間はそのハンドルを保持し続ける（＝ロックの実体）。別ハンドルで後から
+//   ロックを取ると、排他モードでは自分自身の読み込みを弾いてしまう。
+enum class FileShareMode {
+    kDenyNone = 0,   // 他プロセスの読み書きを許可（原 shareDenyNone）
+    kDenyWrite,      // 他プロセスの書込を拒否（原 shareDenyWrite）
+    kExclusive,      // 他プロセスの読み書きを拒否（原 shareExclusive）
+};
+
 // ファイルを読み込み、16KB ブロック列として list へ格納する（原 ReadFileIntoBlocks 読込部）。
 //   - 空ファイルは空の 16KB ブロック 1 個（原挙動: 新規は常に編集可能）。
 //   - それ以外は先頭から 16KB ブロックへ分割し、末尾のみ端数ブロック。
 // list は空であることを前提とするが、防衛的に先頭でも空へ戻す。
 // 失敗時も list を空へ戻してから結果を返す（中途半端なブロック列を残さない）。
 // 成功時は必ず 1 個以上のブロックを持つ（空ファイルは空の 16KB ブロック 1 個）。
-FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path);
+//
+// share       : 開くときの共有モード。他プロセスと競合すると kOpenFailed（systemError は
+//               ERROR_SHARING_VIOLATION 等）になる。呼出側が閲覧モードの確認へ分岐できる。
+// outKeepHandle: 非 nullptr かつ成功したとき、開いたハンドルの所有権を呼出側へ渡す
+//               （共有モードを保ったまま保持し続ける＝排他制御）。呼出側が CloseHandle
+//               する責務を負う。型は windows.h をこのヘッダへ持ち込まないため void*。
+//               nullptr のときは戻る前に閉じる（従来どおり）。
+FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
+                                FileShareMode share = FileShareMode::kDenyNone,
+                                void** outKeepHandle = nullptr);
 
 // list の各ブロックの usedLen バイトを先頭から順次ファイルへ書き出す
 //   （原 SaveFile_WriteLoop の本質: 全ブロックを head→tail で Write）。

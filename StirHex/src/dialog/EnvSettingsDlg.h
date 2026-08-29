@@ -28,6 +28,8 @@ protected:
     BOOL m_highlightBoth = FALSE;
     BOOL m_realtimeBitImage = FALSE;
     int  m_twoStrokeTimeoutMs = 500;
+    BOOL m_undoMemoryLimit = TRUE;    // アンドゥバッファのメモリ上限を設ける
+    int  m_undoMemoryLimitMB = 256;   // その上限（MB）
 
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();
@@ -36,8 +38,10 @@ protected:
     void ChargeFromSettings();   // m_pS → 中間値
     void HarvestToSettings();    // 中間値 → m_pS
     void UpdateTimeoutLabel();   // スライダ値をラベルへ反映
+    void UpdateEnableState();    // チェック状態に応じて従属コントロールを有効/無効化
 
     afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
+    afx_msg void OnUndoLimitChk();
     DECLARE_MESSAGE_MAP()
 };
 
@@ -57,6 +61,7 @@ protected:
     BOOL m_newDocEditable = FALSE;
     BOOL m_endAutoInsert = FALSE;
     BOOL m_dynamicMark = FALSE;
+    BOOL m_markAutoRestore = FALSE;
 
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();
@@ -69,6 +74,7 @@ protected:
 
 // 「ファイル」ページ（子ダイアログ IDD_SETTINGS_FILE 157）。
 //   バックアップ作成/世代数/フォルダ、ファイル排他制御、リンク直接オープン、デフォルトフォルダを編集。
+//   併せて、使用中の設定ファイルの所在を読み取り専用で表示する（移植で追加。Issue #111）。
 class CFilePage : public CPropertyPage {
 public:
     CFilePage();
@@ -84,6 +90,8 @@ protected:
     BOOL     m_linkDirect = FALSE;
     BOOL     m_defaultFolderSpecify = FALSE;
     CString  m_defaultFolder;
+    BOOL     m_largeFileWarn = TRUE;    // 大きいファイルを開く前に確認する
+    int      m_largeFileWarnMB = 512;   // そのしきい値（MB）
 
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();
@@ -92,13 +100,16 @@ protected:
     void ChargeFromSettings();
     void HarvestToSettings();
     void UpdateEnableState();    // チェック状態に応じて従属コントロールを有効/無効化
+    void ShowSettingsFileLocation();  // 設定ファイルの所在を表示する（Issue #111）
     void BrowseFolder(UINT editId);   // 「...」でフォルダ選択→edit へ反映
 
     afx_msg void OnBackupCreate();
     afx_msg void OnBackupFolderChk();
     afx_msg void OnDefFolderChk();
+    afx_msg void OnLargeFileWarnChk();
     afx_msg void OnBackupFolderBtn();
     afx_msg void OnDefFolderBtn();
+    afx_msg void OnOpenSettingsFolder();
     DECLARE_MESSAGE_MAP()
 };
 

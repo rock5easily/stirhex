@@ -22,6 +22,10 @@ public:
                         const std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>>& diffs, CWnd* pParent);
     void OnViewDestroyed(CStirlingView* view);
 
+    // MDIクライアント領域が変化したときに、アプリ内最小化プロキシを操作可能な
+    // 範囲へ収め直す（Issue #123）。プロキシを持つダイアログが無ければ何もしない。
+    static void RepositionMinimizedProxies();
+
 protected:
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();

@@ -12,6 +12,8 @@
 #include "app/StirlingApp.h"
 #include "app/ShellUtil.h"   // ui::DragQueryPath（MAX_PATH 非依存のドロップパス取得）
 #include "app/ClipboardUtil.h"   // クリップボード転送の RAII（#47）
+#include "app/MarkFile.h"        // マークファイルの直列化（Issue #99）
+#include "app/SettingsFile.h"    // UTF-8 テキストファイルの読み書き
 #include "core/HexText.h"   // 16進テキスト → バイト列（Issue #97）
 #include "core/Utf8Text.h"   // UTF-8 の復号・符号化（Issue #98）
 #include "util/ScopedGdi.h"   // GDI オブジェクトの RAII（Issue #48）
@@ -148,6 +150,9 @@ BEGIN_MESSAGE_MAP(CStirlingView, CView)
     ON_UPDATE_COMMAND_UI(ID_MARK_PREV, &CStirlingView::OnUpdateMarkExists)
     ON_UPDATE_COMMAND_UI(ID_MARK_CLEAR_ALL, &CStirlingView::OnUpdateMarkExists)
     ON_COMMAND(ID_MARK_LIST, &CStirlingView::OnMarkList)
+    ON_COMMAND(ID_MARK_EXPORT, &CStirlingView::OnMarkExport)
+    ON_UPDATE_COMMAND_UI(ID_MARK_EXPORT, &CStirlingView::OnUpdateMarkExists)
+    ON_COMMAND(ID_MARK_IMPORT, &CStirlingView::OnMarkImport)
     // カーソル移動（原 cat1。keymap 経由で起動）
     ON_COMMAND(ID_CURSOR_LEFT, &CStirlingView::OnCursorLeft)
     ON_COMMAND(ID_CURSOR_RIGHT, &CStirlingView::OnCursorRight)
@@ -2973,6 +2978,109 @@ void CStirlingView::OnMarkList() {
     }
 }
 
+// マークファイルの選択（書き出し／読み込み共通）。既定名は文書名 + .mrk。
+//   戻り値: 利用者が選んだパス。キャンセルなら空。
+static CStringW AskMarkFilePath(CWnd* owner, const CStringW& docPath, bool forSave) {
+    CStringW initial;
+    if (!docPath.IsEmpty()) {
+        initial = docPath;
+        const int dot = initial.ReverseFind(L'.');
+        const int sep = initial.ReverseFind(L'\\');
+        if (dot > sep) { initial = initial.Left(dot); }
+        initial += L".mrk";
+    }
+
+    CFileDialog dlg(forSave ? FALSE : TRUE, L"mrk", initial,
+                    forSave ? (OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY)
+                            : (OFN_FILEMUSTEXIST | OFN_HIDEREADONLY),
+                    ui::LoadW(IDS_MARK_FILE_FILTER), owner);
+    if (dlg.DoModal() != IDOK) { return CStringW(); }
+    return CStringW(dlg.GetPathName());
+}
+
+// マークをファイルへ書き出す（Issue #99）。マークが無いときはメニューが無効なため来ない。
+void CStirlingView::OnMarkExport() {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr || !pDoc->HasMarks()) { return; }
+
+    const CStringW path = AskMarkFilePath(this, CStringW(pDoc->GetPathName()), true);
+    if (path.IsEmpty()) { return; }
+
+    stirling::marks::MarkFileData data;
+    data.sourcePath = static_cast<LPCWSTR>(CStringW(pDoc->GetPathName()));
+    data.sourceSize = pDoc->GetTotalLength();
+    for (const auto& kv : pDoc->Marks()) {
+        // 内部種別 0..2 → ファイル上の 1..3（UI の「マーク1/2/3」に合わせる）。
+        data.marks[kv.first] = kv.second + 1;
+    }
+
+    std::wstring error;
+    if (!stirling::settings::WriteTextFileUtf8(
+            static_cast<LPCWSTR>(path), stirling::marks::SerializeMarks(data), error)) {
+        CStringW message;
+        message.Format(ui::LoadW(IDS_ERR_MARK_SAVE), error.c_str());
+        ui::MsgBox(GetSafeHwnd(), message);
+    }
+}
+
+// マークをファイルから読み込む（Issue #99）。
+//   既存マークがあれば追加／置き換えを問い、データの大きさが違えば続行を問う。
+//   ファイルが1つでも解釈できなければ、マークには一切手を触れない。
+void CStirlingView::OnMarkImport() {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr) { return; }
+
+    const CStringW path = AskMarkFilePath(this, CStringW(pDoc->GetPathName()), false);
+    if (path.IsEmpty()) { return; }
+
+    std::wstring text;
+    std::wstring error;
+    stirling::marks::MarkFileData data;
+    if (!stirling::settings::ReadTextFileUtf8(static_cast<LPCWSTR>(path), text, error) ||
+        !stirling::marks::ParseMarks(text, data, error)) {
+        CStringW message;
+        message.Format(ui::LoadW(IDS_ERR_MARK_LOAD), error.c_str());
+        ui::MsgBox(GetSafeHwnd(), message);
+        return;
+    }
+
+    const stirling::FileOffset total = pDoc->GetTotalLength();
+    if (data.sourceSize >= 0 && data.sourceSize != total) {
+        CStringW message;
+        CStringW sizeText;
+        sizeText.Format(L"%lld", static_cast<long long>(data.sourceSize));
+        message.Format(ui::LoadW(IDS_CONFIRM_MARK_SIZE), static_cast<LPCWSTR>(sizeText));
+        if (ui::MsgBox(GetSafeHwnd(), message, MB_YESNO | MB_ICONQUESTION) != IDYES) { return; }
+    }
+
+    bool merge = true;
+    if (pDoc->HasMarks()) {
+        const int answer = ui::MsgBox(GetSafeHwnd(), ui::LoadW(IDS_CONFIRM_MARK_MERGE),
+                                      MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (answer == IDCANCEL) { return; }
+        merge = (answer == IDYES);
+    }
+    if (!merge) { pDoc->ClearMarks(); }
+
+    int applied = 0;
+    int skipped = 0;
+    for (const auto& kv : data.marks) {
+        // データ末尾を超える位置は捨てる（別バージョンのデータへ流用した場合に起こる）。
+        if (kv.first < 0 || kv.first >= total) { ++skipped; continue; }
+        pDoc->SetMark(kv.first, kv.second - 1);   // ファイル上の 1..3 → 内部種別 0..2
+        ++applied;
+    }
+    Invalidate(FALSE);
+
+    CStringW message;
+    if (skipped > 0) {
+        message.Format(ui::LoadW(IDS_MARK_IMPORT_DONE_SKIP), applied, skipped);
+    } else {
+        message.Format(ui::LoadW(IDS_MARK_IMPORT_DONE), applied);
+    }
+    ui::MsgBox(GetSafeHwnd(), message, MB_OK | MB_ICONINFORMATION);
+}
+
 void CStirlingView::JumpToMark(stirling::FileOffset pos) {
     // 原: 位置がデータ範囲外なら beep（データ縮小でマークが宙に浮いた場合の保険）。
     if (pos < 0 || pos >= Total()) { ::MessageBeep(0); return; }
@@ -3410,14 +3518,11 @@ void CStirlingView::OnUpdateIndicatorSize(CCmdUI* pCmdUI) {
 
 void CStirlingView::OnUpdateIndicatorCharset(CCmdUI* pCmdUI) {
     // 原 FUN_00424bd0: 文字セット名（0=ASCII/1=SHIFT-JIS/2=EUC/3=Unicode/4=EBCDIC/5=EBCIDK）。
-    //   ラベルは純 ASCII（RC 6040+cs と同値）。6=UTF-8 は移植で追加（Issue #98）。
-    static const wchar_t* const kNames[] = {
-        L"ASCII", L"SHIFT-JIS", L"EUC", L"Unicode", L"EBCDIC", L"EBCIDK", L"UTF-8",
-    };
+    //   ラベルは RC 6040+cs。6=UTF-8 は移植で追加（Issue #98）。表は ui::CharsetNameW へ集約（Issue #125）。
     CStirlingDoc* pDoc = GetDocument();
     pCmdUI->Enable(TRUE);
     const int cs = (pDoc != nullptr) ? pDoc->GetCharset() : 1;
-    pCmdUI->SetText((cs >= 0 && cs < (int)_countof(kNames)) ? kNames[cs] : L"");
+    pCmdUI->SetText(ui::CharsetNameW(cs));
 }
 
 void CStirlingView::OnUpdateIndicatorAddrDec(CCmdUI* pCmdUI) {
@@ -3950,11 +4055,16 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
     }
     if (byteCount < 0) { byteCount = 0; }
 
-    // UTF-8 は行末で文字が途切れるとセル数が変わるため、末尾を最大 3 バイト余分に読む。
+    // UTF-8 はページ境界で文字が途切れるとセル数が変わるため、末尾を最大 3 バイト余分に読む。
+    //   先読みは指定範囲の論理終端 end までに限る。範囲外のバイトまで読むと
+    //   BuildCharCellsUtf8 がそれを消費して文字欄だけ範囲外の文字を描いてしまう（Issue #124）。
     long long readCount = byteCount;
     if (cs == 6) {
         const long long avail = static_cast<long long>(Total()) - dataStart;
-        readCount = (byteCount + 3 <= avail) ? (byteCount + 3) : avail;
+        const long long inRange = static_cast<long long>(end) + 1 - dataStart;
+        long long limit = (inRange < avail) ? inRange : avail;
+        if (limit < 0) { limit = 0; }
+        readCount = (byteCount + 3 <= limit) ? (byteCount + 3) : limit;
         if (readCount < 0) { readCount = 0; }
     }
     const std::vector<unsigned char> buf = pDoc->ReadRange(dataStart, static_cast<int>(readCount));
@@ -4149,15 +4259,11 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
         return false;   // 呼び元が原 1010 メッセージを表示
     }
 
+    // 指定範囲のみを読む。UTF-8 でも範囲外へ先読みしない: 先読みしたバイトは
+    //   BuildCharCellsUtf8 が消費して文字欄だけ範囲外の文字を描いてしまう（Issue #124）。
+    //   ダンプは範囲全体を1つのバッファへ読むため、ページ境界の先読みも要らない。
     const stirling::FileOffset count = endPos - startPos + 1;
-    // UTF-8 は行末で文字が途切れるとセル数が変わるため、末尾を最大 3 バイト余分に読む。
-    stirling::FileOffset readCount = count;
-    if (cs == 6) {
-        const stirling::FileOffset avail = Total() - startPos;
-        readCount = (count + 3 <= avail) ? (count + 3) : avail;
-        if (readCount < 0) { readCount = 0; }
-    }
-    const std::vector<unsigned char> buf = pDoc->ReadRange(startPos, readCount);
+    const std::vector<unsigned char> buf = pDoc->ReadRange(startPos, count);
     const int nbuf = static_cast<int>(buf.size());
 
     const stirling::FileOffset rowStart = startPos - (startPos % bpr);

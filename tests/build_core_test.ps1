@@ -29,6 +29,11 @@ $srcIO   = Join-Path $root "..\StirHex\src\core\BlockFileIO.cpp"
 $srcCodec = Join-Path $root "..\StirHex\src\app\SettingsCodec.cpp"
 # MFC non-dependent encoding migration for MBCS-era settings (Issue #43)
 $srcMigrate = Join-Path $root "..\StirHex\src\app\SettingsMigration.cpp"
+# Settings store: INI serialization and UTF-8 codec for the settings file (Issue #96)
+$srcStore = Join-Path $root "..\StirHex\src\app\SettingsStore.cpp"
+# Settings file I/O: cross-process merged save of the settings file (Issue #130)
+$srcSettingsFile = Join-Path $root "..\StirHex\src\app\SettingsFile.cpp"
+$srcMarkFile = Join-Path $root "..\StirHex\src\app\MarkFile.cpp"
 # CP932 <-> wide conversion helpers at the byte-layer boundary (Issue #41)
 $srcCp932 = Join-Path $root "..\StirHex\src\core\Cp932Text.cpp"
 # Charset-specific byte formatting for the struct bar (byte layer, Issue #42)
@@ -43,7 +48,7 @@ $srcInc  = Join-Path $root "..\StirHex\src"
 # ClipboardUtil.h (header only, Issue #47) needs the clipboard APIs from user32.lib
 
 Write-Host "== build ($Arch) =="
-& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcCodec" "$srcMigrate" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" /link user32.lib
+& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" /link user32.lib shell32.lib ole32.lib advapi32.lib
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
 Write-Host "== run =="

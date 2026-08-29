@@ -5,8 +5,11 @@
 #include "resource.h"
 
 #include <atlbase.h>    // CComPtr（COM ポインタの RAII）
-#include <shlobj.h>     // SHCreateItemFromParsingName, IFileDialog
+#include <shlobj.h>     // SHCreateItemFromParsingName, IFileDialog,
+                        //   SHParseDisplayName, SHOpenFolderAndSelectItems
 #include <shellapi.h>   // ShellExecuteExW
+
+#include "util/PathParts.h"   // 開くフォルダの決定（Issue #133）
 
 namespace ui {
 
@@ -101,6 +104,41 @@ bool ShellExecuteFile(HWND owner, LPCWSTR file, DWORD& outError) {
     const DWORD err = ::GetLastError();
     outError = (err != ERROR_SUCCESS) ? err : ERROR_GEN_FAILURE;
     return false;
+}
+
+bool RevealInExplorer(HWND owner, LPCWSTR path, DWORD& outError) {
+    outError = ERROR_SUCCESS;
+    if (path == nullptr || *path == L'\0') {
+        outError = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+
+    // `/ini:StirHex.ini` のような相対パスでも扱えるよう、まず絶対パスへ正規化する
+    //   （相対パスは SHParseDisplayName でも解決できない。Issue #133）。
+    const CStringW full = FullPath(path);
+
+    // SHOpenFolderAndSelectItems はフォルダを開いた上で対象を選択状態にする。
+    //   explorer.exe へ /select, 付きのコマンドラインを渡す方法と違い、パスの引用符や
+    //   空白の扱いをシェルに委ねられる。
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(::SHParseDisplayName(full, nullptr, &pidl, 0, nullptr))) {
+        const HRESULT hr = ::SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        ::CoTaskMemFree(pidl);
+        if (SUCCEEDED(hr)) { return true; }
+    }
+
+    // ここへ来るのは主に、設定ファイルがまだ書き出されていない初回起動。
+    //   選択はできないが、置かれる場所は見せられる。
+    //   相対ファイル名のように親フォルダ部分が無い場合は、保存先であるカレント
+    //   ディレクトリを開く（Issue #133）。
+    const std::wstring folder = stirling::path::FolderToReveal(
+        std::wstring(static_cast<LPCWSTR>(full)),
+        std::wstring(static_cast<LPCWSTR>(CurrentDirectory())));
+    if (folder.empty()) {
+        outError = ERROR_PATH_NOT_FOUND;
+        return false;
+    }
+    return ShellExecuteFile(owner, folder.c_str(), outError);
 }
 
 CStringW FormatSystemError(DWORD error) {
