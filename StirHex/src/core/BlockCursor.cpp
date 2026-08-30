@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>      // std::bad_alloc（事前確保の失敗を戻り値へ落とす。Issue #153）
+#include <vector>   // 挿入トランザクションの未連結ノード保持（Issue #153）
 
 namespace stirling {
 
@@ -234,58 +236,92 @@ bool BlockCursor::Insert(FileOffset pos, const void* srcv, FileOffset count) {
     int capacity = curNode_->capacity;
     int used = curNode_->usedLen;
     if (curOffset_ < 0 || used < curOffset_) return false;  // curOffset==used(EOF追記)は許容
-    InsertWorker(used, capacity, data, count, static_cast<const unsigned char*>(srcv));
-    return true;
+    return InsertWorker(used, capacity, data, count, static_cast<const unsigned char*>(srcv));
 }
 
-void BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data,
+bool BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data,
                                FileOffset insertCount, const unsigned char* src) {
-    if (capacity < curUsedLen + insertCount) {
-        // 現ブロックに収まらない。
-        if (curOffset_ < curUsedLen) {
-            // カーソルがブロック途中: 後半を新ブロックへ退避(分割)。
-            // 原 BlockCursor_InsertWorker(0x0041cd40) はここが `curOffset_ < curUsedLen - 1` で、
-            // 「ブロック最終データバイト上(curOffset_ == curUsedLen-1)」がどの分岐にも入らず
-            // 末尾バイトを右へずらさないまま後続ブロックへ追記していた（Issue #93）。
-            // 挿入バイトと既存の最終バイトが入れ替わるデータ破壊のため、原版から意図的に逸脱する。
-            int tailLen = curUsedLen - curOffset_;
-            unsigned char* nb = new unsigned char[kBlockCapacity];
-            std::memmove(nb, data + curOffset_, static_cast<size_t>(tailLen));
-            list_->InsertNodeAfter(curNode_, nb, kBlockCapacity, tailLen);
-            // 先頭側の空きに入る分だけ src を書込む（上限 capacity - curOffset_ のため int）。
-            const int fill =
-                static_cast<int>(std::min<FileOffset>(insertCount, capacity - curOffset_));
-            std::memmove(data + curOffset_, src, static_cast<size_t>(fill));
-            curNode_->usedLen = curOffset_ + fill;
-            insertCount -= fill;
-            src += fill;
-        } else if (curUsedLen == 0) {
-            // 空ブロック: 容量いっぱいまで書込む。
-            std::memmove(data, src, static_cast<size_t>(capacity));
-            curNode_->usedLen = capacity;
-            insertCount -= capacity;
-            src += capacity;
-        }
-        // 残りを 16KB ブロック単位で現ノードの後ろへ順次追加（カーソルは末尾側へ前進）。
-        while (insertCount != 0) {
-            const int chunk = (insertCount < kBlockCapacity) ? static_cast<int>(insertCount)
-                                                             : kBlockCapacity;
-            unsigned char* nb = new unsigned char[kBlockCapacity];
-            std::memmove(nb, src, static_cast<size_t>(chunk));
-            BlockNode* nn = list_->InsertNodeAfter(curNode_, nb, kBlockCapacity, chunk);
-            curNode_ = nn;
-            src += chunk;
-            insertCount -= chunk;
-        }
-    } else {
-        // 空きに収まる: buf[off..] を右シフトして src を挿入。
+    if (capacity >= curUsedLen + insertCount) {
+        // 空きに収まる: buf[off..] を右シフトして src を挿入（確保は発生しない）。
         // ここでは curUsedLen + insertCount <= capacity のため int に収まる。
         const int n = static_cast<int>(insertCount);
         std::memmove(data + curOffset_ + n, data + curOffset_,
                      static_cast<size_t>(curUsedLen - curOffset_));
         std::memmove(data + curOffset_, src, static_cast<size_t>(n));
         curNode_->usedLen = curUsedLen + n;
+        return true;
     }
+
+    // 現ブロックに収まらない。
+    // Issue #153: 原実装は「1ブロック確保しては連結」を繰り返していたため、途中の確保が
+    // 失敗すると部分的に更新されたリストを残したまま std::bad_alloc が上位へ抜けていた。
+    // ここでは必要ブロック数を先に数えて全て確保し、成功したときにだけ
+    // 「確保を伴わない連結・memmove」だけでリストを更新する（全か無かのトランザクション）。
+    const bool split = (curOffset_ < curUsedLen);   // カーソルがブロック途中 → 後半を退避
+    int fill = 0;                 // 先頭側の空きへ書き込む分（split のときのみ）
+    FileOffset rest = insertCount;   // 新規ブロックへ書き込む残量
+    if (split) {
+        // 上限 capacity - curOffset_ のため int に収まる。
+        fill = static_cast<int>(std::min<FileOffset>(insertCount, capacity - curOffset_));
+        rest = insertCount - fill;
+    } else if (curUsedLen == 0) {
+        // 空ブロック: 容量いっぱいまで現ブロックへ書込む（capacity < insertCount）。
+        rest = insertCount - capacity;
+    }
+    const FileOffset tailBlocks = (rest + kBlockCapacity - 1) / kBlockCapacity;
+    const size_t needed = static_cast<size_t>(tailBlocks) + (split ? 1u : 0u);
+
+    std::vector<BlockNode*> pending;   // 未連結のノード（確保のみ済み）
+    try {
+        pending.reserve(needed);
+    } catch (const std::bad_alloc&) {
+        return false;   // リストは無変更
+    }
+    for (size_t i = 0; i < needed; ++i) {
+        unsigned char* nb = AllocBlockData();
+        BlockNode* node = (nb != nullptr) ? AllocBlockNode(nb, kBlockCapacity, 0) : nullptr;
+        if (node == nullptr) {
+            delete[] nb;   // ノード確保に失敗した分のデータ
+            for (BlockNode* n : pending) { FreeBlockNode(n); }
+            return false;   // リストは無変更
+        }
+        pending.push_back(node);   // reserve 済みのため投げない
+    }
+
+    // ここから先は失敗しない。
+    size_t idx = 0;
+    if (split) {
+        // カーソルがブロック途中: 後半を新ブロックへ退避(分割)。
+        // 原 BlockCursor_InsertWorker(0x0041cd40) はここが `curOffset_ < curUsedLen - 1` で、
+        // 「ブロック最終データバイト上(curOffset_ == curUsedLen-1)」がどの分岐にも入らず
+        // 末尾バイトを右へずらさないまま後続ブロックへ追記していた（Issue #93）。
+        // 挿入バイトと既存の最終バイトが入れ替わるデータ破壊のため、原版から意図的に逸脱する。
+        const int tailLen = curUsedLen - curOffset_;
+        BlockNode* tail = pending[idx++];
+        std::memmove(tail->data, data + curOffset_, static_cast<size_t>(tailLen));
+        tail->usedLen = tailLen;
+        list_->LinkNodeAfter(curNode_, tail);
+        // 先頭側の空きに入る分だけ src を書込む。
+        std::memmove(data + curOffset_, src, static_cast<size_t>(fill));
+        curNode_->usedLen = curOffset_ + fill;
+        src += fill;
+    } else if (curUsedLen == 0) {
+        std::memmove(data, src, static_cast<size_t>(capacity));
+        curNode_->usedLen = capacity;
+        src += capacity;
+    }
+    // 残りを 16KB ブロック単位で現ノードの後ろへ順次連結（カーソルは末尾側へ前進）。
+    while (rest != 0) {
+        const int chunk = (rest < kBlockCapacity) ? static_cast<int>(rest) : kBlockCapacity;
+        BlockNode* node = pending[idx++];
+        std::memmove(node->data, src, static_cast<size_t>(chunk));
+        node->usedLen = chunk;
+        list_->LinkNodeAfter(curNode_, node);
+        curNode_ = node;
+        src += chunk;
+        rest -= chunk;
+    }
+    return true;
 }
 
 bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
@@ -298,8 +334,16 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
 
     if (used == capacity) {
         // 満杯ブロックを半分に分割してから挿入。
+        // Issue #153: ブロックとノードを先に確保し、成功したときにだけ既存ブロックを
+        // 書き換える。失敗時はリストもブロック内容も操作前のまま false を返す。
         int half = capacity / 2;
-        unsigned char* nb = new unsigned char[kBlockCapacity];
+        unsigned char* nb = AllocBlockData();
+        BlockNode* newNode = (nb != nullptr) ? AllocBlockNode(nb, kBlockCapacity, half + 1)
+                                             : nullptr;
+        if (newNode == nullptr) {
+            delete[] nb;
+            return false;
+        }
         if (curOffset_ < half) {
             // 前半側へ挿入 → 新ブロックを手前(Before)へ。
             if (curOffset_ == 0) {
@@ -314,7 +358,7 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
             // 現ブロックは後半を先頭へ寄せる
             std::memmove(data, data + half, static_cast<size_t>(half));
             curNode_->usedLen = half;
-            BlockNode* newNode = list_->InsertNodeBefore(curNode_, nb, kBlockCapacity, half + 1);
+            list_->LinkNodeBefore(curNode_, newNode);
             curNode_ = newNode;
             curOffset_ = curOffset_ + 1;
         } else {
@@ -329,7 +373,7 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
             std::memmove(nb + newOff + 1, data + curOffset_,
                          static_cast<size_t>(used - curOffset_));
             curNode_->usedLen = half;
-            BlockNode* newNode = list_->InsertNodeAfter(curNode_, nb, kBlockCapacity, half + 1);
+            list_->LinkNodeAfter(curNode_, newNode);
             curNode_ = newNode;
             curOffset_ = newOff;
         }
@@ -492,6 +536,73 @@ bool BlockCursor::SetByteAt(FileOffset pos, unsigned char b) {
     curNode_->data[curOffset_] = b;
     curAbs_ = pos;
     return true;
+}
+
+// 絶対位置 pos から count バイトを一括上書きする（Issue #154）。
+//   ブロックを 1 度だけ辿り、各ブロックの有効範囲へ memmove する。長さは変わらない。
+FileOffset BlockCursor::Write(FileOffset pos, const void* srcv, FileOffset count) {
+    if (count <= 0) {
+        return 0;
+    }
+    if (!Seek(pos, kBegin, nullptr)) {
+        return 0;
+    }
+    if (curNode_ == nullptr || curOffset_ < 0) {
+        return 0;
+    }
+    const unsigned char* src = static_cast<const unsigned char*>(srcv);
+    FileOffset written = 0;
+    BlockNode* node = curNode_;
+    int off = curOffset_;   // 最初のノードだけ途中から書く
+    while (node != nullptr && count > 0) {
+        const int used = node->usedLen;
+        if (off < used) {
+            const int avail = used - off;
+            const int n = (count < static_cast<FileOffset>(avail)) ? static_cast<int>(count)
+                                                                  : avail;
+            std::memmove(node->data + off, src, static_cast<size_t>(n));
+            src += n;
+            written += n;
+            count -= n;
+        }
+        off = 0;
+        node = list_->GetNext(node);
+    }
+    curAbs_ = pos + written;
+    return written;
+}
+
+// 絶対位置 pos から count バイトを定数 value で埋める（Issue #154）。
+//   一時バッファを介さずブロックへ直接 memset するため、範囲の大きさによらず
+//   追加メモリを必要としない。
+FileOffset BlockCursor::FillRange(FileOffset pos, FileOffset count, unsigned char value) {
+    if (count <= 0) {
+        return 0;
+    }
+    if (!Seek(pos, kBegin, nullptr)) {
+        return 0;
+    }
+    if (curNode_ == nullptr || curOffset_ < 0) {
+        return 0;
+    }
+    FileOffset filled = 0;
+    BlockNode* node = curNode_;
+    int off = curOffset_;
+    while (node != nullptr && count > 0) {
+        const int used = node->usedLen;
+        if (off < used) {
+            const int avail = used - off;
+            const int n = (count < static_cast<FileOffset>(avail)) ? static_cast<int>(count)
+                                                                  : avail;
+            std::memset(node->data + off, value, static_cast<size_t>(n));
+            filled += n;
+            count -= n;
+        }
+        off = 0;
+        node = list_->GetNext(node);
+    }
+    curAbs_ = pos + filled;
+    return filled;
 }
 
 bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, FileOffset* outPos,

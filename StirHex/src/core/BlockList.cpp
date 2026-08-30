@@ -1,7 +1,49 @@
 // BlockList / BlockNode 実装。原 Stirling 1.31 の循環双方向リスト操作を忠実に移植。
 #include "BlockList.h"
 
+#include <new>
+
 namespace stirling {
+
+// ---- 確保ヘルパ（Issue #153） ----
+
+#ifdef STIRLING_TEST_ALLOC_HOOK
+namespace {
+int g_allocFailCountdown = 0;   // >0 のとき、この回数目の確保を失敗させる
+}  // namespace
+
+void SetAllocFailCountdown(int n) { g_allocFailCountdown = (n > 0) ? n : 0; }
+int  AllocFailCountdown() { return g_allocFailCountdown; }
+
+// 注入が有効なら、この確保を失敗させるべきか判定して1つ消費する。
+static bool TestAllocShouldFail() {
+    if (g_allocFailCountdown <= 0) { return false; }
+    return (--g_allocFailCountdown == 0);
+}
+#else
+static bool TestAllocShouldFail() { return false; }
+#endif
+
+unsigned char* AllocBlockData() {
+    if (TestAllocShouldFail()) { return nullptr; }
+    return new (std::nothrow) unsigned char[kBlockCapacity];
+}
+
+BlockNode* AllocBlockNode(unsigned char* data, int capacity, int usedLen) {
+    if (TestAllocShouldFail()) { return nullptr; }
+    BlockNode* node = new (std::nothrow) BlockNode();
+    if (node == nullptr) { return nullptr; }   // data の所有権は呼出側に残る
+    node->data = data;
+    node->capacity = capacity;
+    node->usedLen = usedLen;
+    return node;
+}
+
+void FreeBlockNode(BlockNode* node) {
+    if (node == nullptr) { return; }
+    delete[] node->data;
+    delete node;
+}
 
 BlockList::BlockList() {
     // 空状態: センチネルの prev/next は自分自身（原 BlockList_ctor 0x0040da47）。
@@ -58,38 +100,45 @@ static void LinkAfter(BlockNode* at, BlockNode* node) {
     at->next = node;
 }
 
-BlockNode* BlockList::AppendBlock(unsigned char* data, int capacity, int usedLen) {
-    BlockNode* node = new BlockNode();
-    node->data = data;
-    node->capacity = capacity;
-    node->usedLen = usedLen;
+// 内部: 原挙動「3値すべて非ゼロのときのみデータ設定」を適用してノードを確保する。
+static BlockNode* AllocNodeWithLegacyDataRule(unsigned char* data, int capacity, int usedLen) {
+    const bool withData = (data != nullptr && capacity != 0 && usedLen != 0);
+    return withData ? AllocBlockNode(data, capacity, usedLen) : AllocBlockNode(nullptr, 0, 0);
+}
+
+void BlockList::LinkNodeAfter(BlockNode* at, BlockNode* node) {
+    LinkAfter(at, node);
+    ++count_;
+}
+
+void BlockList::LinkNodeBefore(BlockNode* at, BlockNode* node) {
+    LinkAfter(at->prev, node);  // at の前 = at->prev の後
+    ++count_;
+}
+
+void BlockList::AppendNode(BlockNode* node) {
     LinkAfter(sentinel_.prev, node);  // 末尾（センチネル直前）へ
     ++count_;
+}
+
+BlockNode* BlockList::AppendBlock(unsigned char* data, int capacity, int usedLen) {
+    BlockNode* node = AllocBlockNode(data, capacity, usedLen);
+    if (node == nullptr) { return nullptr; }   // data の所有権は移さない（Issue #153）
+    AppendNode(node);
     return node;
 }
 
 BlockNode* BlockList::InsertNodeAfter(BlockNode* at, unsigned char* data, int capacity, int usedLen) {
-    BlockNode* node = new BlockNode();
-    LinkAfter(at, node);
-    // 原挙動: 3値すべて非ゼロのときのみデータ設定。
-    if (data != nullptr && capacity != 0 && usedLen != 0) {
-        node->data = data;
-        node->capacity = capacity;
-        node->usedLen = usedLen;
-    }
-    ++count_;
+    BlockNode* node = AllocNodeWithLegacyDataRule(data, capacity, usedLen);
+    if (node == nullptr) { return nullptr; }
+    LinkNodeAfter(at, node);
     return node;
 }
 
 BlockNode* BlockList::InsertNodeBefore(BlockNode* at, unsigned char* data, int capacity, int usedLen) {
-    BlockNode* node = new BlockNode();
-    LinkAfter(at->prev, node);  // at の前 = at->prev の後
-    if (data != nullptr && capacity != 0 && usedLen != 0) {
-        node->data = data;
-        node->capacity = capacity;
-        node->usedLen = usedLen;
-    }
-    ++count_;
+    BlockNode* node = AllocNodeWithLegacyDataRule(data, capacity, usedLen);
+    if (node == nullptr) { return nullptr; }
+    LinkNodeBefore(at, node);
     return node;
 }
 

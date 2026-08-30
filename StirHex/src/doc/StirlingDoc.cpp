@@ -11,18 +11,14 @@
 
 #include <limits>
 #include <utility>   // std::move（ScopedHandle の所有権移動）
-#include <new>   // std::bad_alloc（巨大範囲の退避失敗を捕捉する。Issue #30）
+#include <new>        // std::bad_alloc（巨大範囲の退避失敗を捕捉する。Issue #30）
+#include <stdexcept>   // std::length_error（Undo 記録の予約長が max_size を超える場合。Issue #153）
 
 namespace {
 
-// FileOffset(64bit) の長さが、このビルドのバッファ長(size_t)に収まるか。
-//   x86 では size_t が 32bit のため、4GB 超をそのままキャストすると下位32bitへ
-//   黙って切り捨てられ、確保より大きな読取でヒープを破壊しうる。必ず先に弾く。
-bool FitsInBuffer(stirling::FileOffset n) {
-    if (n < 0) { return false; }
-    return static_cast<unsigned long long>(n) <=
-           static_cast<unsigned long long>((std::numeric_limits<size_t>::max)());
-}
+// FileOffset(64bit) の長さがこのビルドのバッファ長(size_t)に収まるかの共通検査
+//   （実体は core/CoreTypes.h。ビュー層とも共用する。Issue #154）。
+using stirling::FitsInBuffer;
 
 }  // namespace
 
@@ -235,7 +231,15 @@ BOOL CStirlingDoc::OnNewDocument() {
         return FALSE;
     }
     // 原 OnNewDocument: 空の16KBブロック1個（新規は常に編集可能）
-    m_blocks.AppendBlock(new unsigned char[stirling::kBlockCapacity], stirling::kBlockCapacity, 0);
+    // 確保できなければ空文書を作らず失敗させる（例外を投げない。Issue #153）。
+    unsigned char* buf = stirling::AllocBlockData();
+    if (buf == nullptr) {
+        return FALSE;
+    }
+    if (m_blocks.AppendBlock(buf, stirling::kBlockCapacity, 0) == nullptr) {
+        delete[] buf;   // ノード確保失敗時は所有権が移らない
+        return FALSE;
+    }
     m_settings = theApp.SettingsForPath(nullptr);   // 新規は既定 "*" レコード
     ApplyOpenDefaults(false);   // 新規は編集可のまま（文字セット/バイトオーダ/挿入既定のみ）
     return TRUE;
@@ -478,6 +482,7 @@ bool CStirlingDoc::RevertToSaved() {
 // BlockCursor::InsertByte を、上書きは in-place SetByteAt を用いる。
 
 bool CStirlingDoc::InsertByteAt(stirling::FileOffset pos, unsigned char b) {
+    if (!ReserveUndoSlot()) { return false; }   // 変更前に記録領域を確保（Issue #153）
     stirling::BlockCursor c(&m_blocks);
     if (!c.InsertByte(pos, b)) {
         return false;
@@ -490,6 +495,7 @@ bool CStirlingDoc::InsertByteAt(stirling::FileOffset pos, unsigned char b) {
 }
 
 bool CStirlingDoc::OverwriteByteAt(stirling::FileOffset pos, unsigned char b) {
+    if (!ReserveUndoSlot()) { return false; }   // 変更前に記録領域を確保（Issue #153）
     const stirling::FileOffset total = GetTotalLength();
     if (pos < total) {
         unsigned char old = 0;
@@ -515,6 +521,7 @@ bool CStirlingDoc::OverwriteByteAt(stirling::FileOffset pos, unsigned char b) {
 }
 
 bool CStirlingDoc::DeleteByteAt(stirling::FileOffset pos, unsigned char* outByte) {
+    if (!ReserveUndoSlot()) { return false; }   // 変更前に記録領域を確保（Issue #153）
     unsigned char old = 0;
     if (!GetByteAt(pos, &old)) {
         return false;   // pos が実データ外
@@ -571,6 +578,9 @@ bool CStirlingDoc::DeleteRange(stirling::FileOffset pos, stirling::FileOffset co
             return false;
         }
     }
+    if (!undoless && !ReserveUndoSlot()) {
+        return false;   // 変更前に記録領域を確保（Issue #153）。データは無傷
+    }
     stirling::FileOffset deleted = 0;
     {
         stirling::BlockCursor d(&m_blocks);
@@ -611,7 +621,7 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
     // 置換前に削除対象を退避（逆＝元データ再挿入用）。上限超過時の扱いは DeleteRange と同じ。
     std::vector<unsigned char> removed;
     bool undoless = false;
-    stirling::FileOffset actualDel = 0;   // 実際に削除できたバイト数
+    stirling::FileOffset target = 0;   // 削除を試みるバイト数
     if (delLen > 0) {
         if (!FitsInBuffer(delLen)) {
             return false;   // このビルドのバッファに載らない長さ（データは無傷）
@@ -621,7 +631,7 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
         case UndoCapacityDecision::kUndoless: undoless = true; break;
         case UndoCapacityDecision::kNormal:   break;
         }
-        stirling::FileOffset target = delLen;   // 削除を試みるバイト数
+        target = delLen;
         if (!undoless) {
             try {
                 removed.resize(static_cast<size_t>(delLen));
@@ -635,21 +645,31 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
             target = c.Read(delLen, removed.data());
             removed.resize(static_cast<size_t>(target));
         }
-        {
-            stirling::BlockCursor d(&m_blocks);
-            actualDel = d.DeleteRange(pos, target);   // ブロック単位の一括削除（Issue #62）
-        }
-        if (actualDel < target && !undoless) {
-            removed.resize(static_cast<size_t>(actualDel));   // 実削除数へ合わせる
-        }
     }
-    // 実際に挿入できたバイト数（失敗しても削除済みデータを復元できるよう記録に反映する）。
-    stirling::FileOffset insLen = 0;
+    // Undo レコードの領域も、ドキュメントを変更する前に確保しておく（Issue #153）。
+    if (!undoless && !ReserveUndoSlot()) {
+        return false;   // データは無傷
+    }
+    // Issue #153: 「挿入 → 削除」の順で行う。挿入は全ブロックの確保に成功したときだけ
+    //   成立する全か無かの操作であり、削除は確保を伴わないため失敗しない。
+    //   この順序なら、確保失敗時にドキュメント・マーク・履歴のいずれも変化しない
+    //   （逆順だと削除だけが成立した部分編集が残る）。
+    stirling::FileOffset insLen = 0;   // 実際に挿入できたバイト数
     if (!ins.empty()) {
         stirling::BlockCursor c(&m_blocks);
-        if (c.Insert(pos, ins.data(), static_cast<stirling::FileOffset>(ins.size()))) {
-            insLen = static_cast<stirling::FileOffset>(ins.size());
+        if (!c.Insert(pos, ins.data(), static_cast<stirling::FileOffset>(ins.size()))) {
+            return false;   // メモリ不足。ドキュメントは無変更
         }
+        insLen = static_cast<stirling::FileOffset>(ins.size());
+    }
+    stirling::FileOffset actualDel = 0;   // 実際に削除できたバイト数
+    if (target > 0) {
+        stirling::BlockCursor d(&m_blocks);
+        // 挿入した分だけ削除開始位置が後ろへずれる。
+        actualDel = d.DeleteRange(pos + insLen, target);   // ブロック単位の一括削除（Issue #62）
+    }
+    if (actualDel < target && !undoless) {
+        removed.resize(static_cast<size_t>(actualDel));   // 実削除数へ合わせる
     }
     if (actualDel == 0 && insLen == 0) {
         return false;   // ドキュメントは無変更（履歴にも触れない）
@@ -663,11 +683,87 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
         rec.pos = pos;
         rec.count = insLen;
         rec.bytes = std::move(removed);
-        PushUndoRecord(std::move(rec));
+        PushUndoRecord(std::move(rec));   // 予約済みのため失敗しない
     }
     AdjustMarksForSplice(pos, actualDel, insLen);   // ダイナミックマーク: 置換に追従
     CommitForwardEdit();   // Redo破棄＋容量トリム＋保存点比較で変更フラグ更新
     return true;
+}
+
+// 範囲初期化（Issue #154）。選択範囲と同容量の一時バッファを作らず、ブロックへ直接
+//   定数値を書き込む。長さが変わらないため確保・挿入・削除は発生しない。
+//   Undo は単一の kOverwrite レコード（退避量は範囲と同容量。上限判定は Issue #30 と共通）。
+CStirlingDoc::FillRangeResult CStirlingDoc::FillRange(stirling::FileOffset pos,
+                                                     stirling::FileOffset count,
+                                                     unsigned char value) {
+    if (count <= 0) {
+        return FillRangeResult::kInvalid;
+    }
+    const stirling::FileOffset total = GetTotalLength();
+    if (pos < 0 || pos >= total) {
+        return FillRangeResult::kInvalid;
+    }
+    if (count > total - pos) { count = total - pos; }   // 実データ長へ丸める
+
+    // Undo 用の退避。上限を超える場合は中止か「取り消しなしで続行」を選ばせる。
+    bool undoless = false;
+    switch (CheckUndoCapacity(count)) {
+    case UndoCapacityDecision::kCancel:   return FillRangeResult::kCanceled;
+    case UndoCapacityDecision::kUndoless: undoless = true; break;
+    case UndoCapacityDecision::kNormal:   break;
+    }
+    std::vector<unsigned char> captured;   // undoless のときは空のまま（退避しない）
+    if (!undoless) {
+        if (!FitsInBuffer(count)) {
+            return FillRangeResult::kOutOfMemory;   // このビルドのバッファに載らない長さ
+        }
+        try {
+            captured.resize(static_cast<size_t>(count));
+        } catch (const std::bad_alloc&) {
+            return FillRangeResult::kOutOfMemory;   // 退避できないなら実行しない（データは無傷）
+        } catch (const std::length_error&) {
+            return FillRangeResult::kOutOfMemory;
+        }
+        stirling::BlockCursor c(&m_blocks);
+        if (!c.Seek(pos, stirling::BlockCursor::kBegin, nullptr)) {
+            return FillRangeResult::kInvalid;
+        }
+        const stirling::FileOffset n = c.Read(count, captured.data());
+        if (n < count) { count = n; }
+        captured.resize(static_cast<size_t>(count));
+        if (count <= 0) {
+            return FillRangeResult::kInvalid;
+        }
+        if (!ReserveUndoSlot()) {
+            return FillRangeResult::kOutOfMemory;   // 変更前に記録領域を確保（Issue #153）
+        }
+    }
+    stirling::FileOffset filled = 0;
+    {
+        stirling::BlockCursor c(&m_blocks);
+        filled = c.FillRange(pos, count, value);   // 確保を伴わないため失敗しない
+    }
+    if (filled <= 0) {
+        return FillRangeResult::kInvalid;   // ドキュメントは無変更
+    }
+    if (undoless) {
+        ClearUndoHistory(true);   // この操作は取り消せない＝保存点も到達不能にする
+    } else {
+        if (filled < static_cast<stirling::FileOffset>(captured.size())) {
+            captured.resize(static_cast<size_t>(filled));   // 実書込数へ合わせる
+        }
+        EditRecord rec;
+        rec.kind = EditRecord::kOverwrite; rec.pos = pos; rec.bytes = std::move(captured);
+        PushUndoRecord(std::move(rec));   // 予約済みのため失敗しない
+    }
+    // マークには触れない（Issue #161）。長さが変わらない上書きなので移動は起きず、
+    //   範囲内のマークも消さない。原版 Stirling 1.31 で「マークを含む範囲を初期化しても
+    //   マークは残る」ことを実測して確認済み（e2e test_issue_161_fill_marks.py）。
+    //   移植版は初期化を ReplaceRange で実装していたため AdjustMarksForSplice が
+    //   範囲内のマークを消しており、原版と食い違っていた。上書き入力
+    //   （OverwriteByteAt / SetByteNoUndo）がマークを残すのとも整合する。
+    CommitForwardEdit();   // Redo破棄＋容量トリム＋保存点比較で変更フラグ更新
+    return FillRangeResult::kOk;
 }
 
 bool CStirlingDoc::GetByteAt(stirling::FileOffset pos, unsigned char* outByte) {
@@ -712,6 +808,20 @@ std::vector<unsigned char> CStirlingDoc::ReadRange(stirling::FileOffset pos,
     return out;
 }
 
+// 範囲読取（呼出側バッファ版。Issue #155）。ReadRange と違い確保を行わないため、
+//   大きな範囲でもチャンク単位で回せる。読めたバイト数を返す。
+stirling::FileOffset CStirlingDoc::ReadInto(stirling::FileOffset pos,
+                                            stirling::FileOffset count, void* dst) {
+    if (count <= 0 || dst == nullptr) {
+        return 0;
+    }
+    stirling::BlockCursor c(&m_blocks);
+    if (!c.Seek(pos, stirling::BlockCursor::kBegin, nullptr)) {
+        return 0;
+    }
+    return c.Read(count, dst);
+}
+
 bool CStirlingDoc::SetByteNoUndo(stirling::FileOffset pos, unsigned char b) {
     // Undo スタックには触れない（上位ニブルのレコードへ畳み込む）。変更フラグのみ更新。
     stirling::BlockCursor c(&m_blocks);
@@ -742,14 +852,67 @@ void CStirlingDoc::ApplyUndoMemoryLimit() {
     TrimUndoHistory();
 }
 
-void CStirlingDoc::PushUndoRecord(EditRecord&& r) {
-    m_undoStack.push_back(std::move(r));           // 確保に失敗しても計上が狂わないよう
-    m_undoBytes += RecordBytes(m_undoStack.back());   // 成功後に加算する
+namespace {
+
+// スタックへ 1 件積める空きを確保する（Issue #153）。
+//   空きがあれば何もしない。無ければ倍々で伸ばし（push_back の償却計算量を保つ）、
+//   それが確保できなければ最小限（+1）で再試行する。どちらも失敗したら false。
+template <class Vec>
+bool ReserveOneSlot(Vec& v) {
+    if (v.size() < v.capacity()) {
+        return true;
+    }
+    const size_t grown = (v.capacity() == 0) ? 8 : v.capacity() * 2;
+    try {
+        v.reserve(grown);
+        return true;
+    } catch (const std::bad_alloc&) {
+        // 倍化に失敗しても、あと 1 件なら載る可能性がある。
+    } catch (const std::length_error&) {
+        // 要求長が max_size 超過。以下の最小要求で判定し直す。
+    }
+    try {
+        v.reserve(v.size() + 1);
+    } catch (const std::bad_alloc&) {
+        return false;
+    } catch (const std::length_error&) {
+        return false;
+    }
+    return true;
 }
 
-void CStirlingDoc::PushRedoRecord(EditRecord&& r) {
-    m_redoStack.push_back(std::move(r));
+}  // namespace
+
+bool CStirlingDoc::ReserveUndoSlot() {
+    return ReserveOneSlot(m_undoStack);   // ドキュメントを変更する前に諦めるための予約
+}
+
+bool CStirlingDoc::ReserveRedoSlot() {
+    return ReserveOneSlot(m_redoStack);
+}
+
+bool CStirlingDoc::PushUndoRecord(EditRecord&& r) {
+    try {
+        m_undoStack.push_back(std::move(r));       // 確保に失敗しても計上が狂わないよう
+    } catch (const std::bad_alloc&) {
+        // 予約済みならここへは来ない。万一記録できなければ履歴を捨て、
+        // 「この編集は取り消せない＝保存点も到達不能」という一貫した状態へ倒す。
+        ClearUndoHistory(true);
+        return false;
+    }
+    m_undoBytes += RecordBytes(m_undoStack.back());   // 成功後に加算する
+    return true;
+}
+
+bool CStirlingDoc::PushRedoRecord(EditRecord&& r) {
+    try {
+        m_redoStack.push_back(std::move(r));
+    } catch (const std::bad_alloc&) {
+        ClearUndoHistory(true);
+        return false;
+    }
     m_undoBytes += RecordBytes(m_redoStack.back());
+    return true;
 }
 
 void CStirlingDoc::ClearUndoHistory(bool savePointLost) {
@@ -815,20 +978,34 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
     switch (r.kind) {
     case EditRecord::kOverwrite: {
         // in-place 書換え。旧値を退避して逆レコード（再度 kOverwrite）を作る。
-        std::vector<unsigned char> old(r.bytes.size());
-        for (size_t i = 0; i < r.bytes.size(); ++i) {
-            unsigned char o = 0;
-            GetByteAt(r.pos + static_cast<stirling::FileOffset>(i), &o);
-            old[i] = o;
+        // Issue #154: 範囲初期化が大きな kOverwrite レコードを積むようになったため、
+        //   1 バイトずつ Seek し直す実装（O(n^2)）をやめ、Read/Write で一括処理する。
+        std::vector<unsigned char> old;
+        try {
+            old.resize(r.bytes.size());
+        } catch (const std::bad_alloc&) {
+            return false;   // 退避できないならドキュメントを変更しない（Issue #153）
+        }
+        const stirling::FileOffset n = static_cast<stirling::FileOffset>(r.bytes.size());
+        if (n > 0) {
             stirling::BlockCursor c(&m_blocks);
-            c.SetByteAt(r.pos + static_cast<stirling::FileOffset>(i), r.bytes[i]);
+            if (!c.Seek(r.pos, stirling::BlockCursor::kBegin, nullptr)) {
+                return false;
+            }
+            const stirling::FileOffset got = c.Read(n, old.data());
+            old.resize(static_cast<size_t>(got));
+            const stirling::FileOffset wrote = c.Write(r.pos, r.bytes.data(), got);
+            old.resize(static_cast<size_t>(wrote));   // 実書込数へ合わせる
         }
         inv.kind = EditRecord::kOverwrite; inv.pos = r.pos; inv.bytes = std::move(old);
         break;
     }
     case EditRecord::kInsert: {
         stirling::BlockCursor c(&m_blocks);
-        c.Insert(r.pos, r.bytes.data(), static_cast<stirling::FileOffset>(r.bytes.size()));
+        // 確保失敗時はドキュメントを変更せずに中断する（Issue #153）。
+        if (!c.Insert(r.pos, r.bytes.data(), static_cast<stirling::FileOffset>(r.bytes.size()))) {
+            return false;
+        }
         inv.kind = EditRecord::kDelete; inv.pos = r.pos;
         inv.count = static_cast<stirling::FileOffset>(r.bytes.size());
         // ダイナミックマーク追従
@@ -885,17 +1062,24 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
                 cap.clear();
             }
         }
+        // ReplaceRange と同じく「挿入 → 削除」の順で行う。挿入は全か無かで失敗し得るが、
+        // 削除は確保を伴わないため、この順序なら失敗時にドキュメントが無変更で済む
+        //（Issue #153）。
+        const stirling::FileOffset insLen = static_cast<stirling::FileOffset>(r.bytes.size());
+        if (!r.bytes.empty()) {
+            stirling::BlockCursor c(&m_blocks);
+            if (!c.Insert(r.pos, r.bytes.data(), insLen)) {
+                return false;
+            }
+        }
         stirling::FileOffset nDel = 0;
         {
             stirling::BlockCursor d(&m_blocks);
-            nDel = d.DeleteRange(r.pos, r.count);   // ブロック単位の一括削除（Issue #62）
+            // 挿入した分だけ削除開始位置が後ろへずれる。
+            nDel = d.DeleteRange(r.pos + insLen, r.count);   // ブロック単位の一括削除（Issue #62）
         }
         if (nDel < static_cast<stirling::FileOffset>(cap.size())) {
             cap.resize(static_cast<size_t>(nDel));   // 実削除数へ合わせる
-        }
-        if (!r.bytes.empty()) {
-            stirling::BlockCursor c(&m_blocks);
-            c.Insert(r.pos, r.bytes.data(), static_cast<stirling::FileOffset>(r.bytes.size()));
         }
         inv.kind = EditRecord::kReplace; inv.pos = r.pos;
         inv.count = static_cast<stirling::FileOffset>(r.bytes.size());
@@ -911,6 +1095,9 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
 
 stirling::FileOffset CStirlingDoc::Undo() {
     if (m_undoStack.empty()) {
+        return -1;
+    }
+    if (!ReserveRedoSlot()) {          // 逆レコードの領域を先に確保（Issue #153）
         return -1;
     }
     EditRecord r = std::move(m_undoStack.back());
@@ -930,6 +1117,9 @@ stirling::FileOffset CStirlingDoc::Undo() {
 
 stirling::FileOffset CStirlingDoc::Redo() {
     if (m_redoStack.empty()) {
+        return -1;
+    }
+    if (!ReserveUndoSlot()) {          // 逆レコードの領域を先に確保（Issue #153）
         return -1;
     }
     EditRecord r = std::move(m_redoStack.back());

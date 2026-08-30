@@ -7,14 +7,19 @@
 
 #include "resource.h"
 #include "dialog/BgrepDlg.h"   // BgrepSettings
+#include "core/BgrepNotify.h"   // 通知構造体（64bit のサイズ・位置。Issue #156）
 
 #include <vector>
 
 class CStirlingOutputBar;
 
 // ワーカ↔UI 通知メッセージ（原 0x414/0x415/0x417）。
-#define WM_BGREP_SCAN (WM_APP + 0x20)   // wParam=ファイルサイズ, lParam=(LPCWSTR)フルパス
-#define WM_BGREP_HIT  (WM_APP + 0x21)   // wParam=オフセット, lParam=(LPCWSTR)フルパス
+//   Issue #156: サイズ・位置は WPARAM へ入れない（Win32 では 32bit で切り詰められる）。
+//   LPARAM に通知構造体のポインタを渡し、FileOffset(64bit) のまま受け渡す。
+//   構造体は送信側（ワーカスレッド）のスタック上にあり、SendMessage が同期であることに
+//   依存している。PostMessage へ変えてはならない（stirling::BgrepScanNotify のコメント参照）。
+#define WM_BGREP_SCAN (WM_APP + 0x20)   // wParam=未使用, lParam=(stirling::BgrepScanNotify*)
+#define WM_BGREP_HIT  (WM_APP + 0x21)   // wParam=未使用, lParam=(stirling::BgrepHitNotify*)
 #define WM_BGREP_DONE (WM_APP + 0x22)   // 走査完了（またはキャンセル）
 
 // ワーカへ渡す走査ジョブ（ダイアログが所有し、ワーカ生存中は保持）。

@@ -3,6 +3,8 @@
 // ビルド: porting/tests/build_core_test.ps1（cl.exe）または任意の C++17 コンパイラ。
 #include "../StirHex/src/core/BlockCursor.h"
 #include "../StirHex/src/core/BlockFileIO.h"
+#include "../StirHex/src/core/StreamFileWriter.h"
+#include "../StirHex/src/core/BgrepNotify.h"
 #include "../StirHex/src/core/BlockList.h"
 #include "../StirHex/src/app/SettingsCodec.h"
 #include "../StirHex/src/app/SettingsMigration.h"
@@ -3368,6 +3370,458 @@ static void TestDeleteRange() {
     }
 }
 
+// ---- メモリ確保失敗時のロールバック（Issue #153） ----
+// SetAllocFailCountdown(n) は「n 回目のブロック／ノード確保」を失敗させる注入フック。
+// Win32 ではメモリ不足が現実的に起こるため、失敗が戻り値で返り、かつリストが
+// 操作前の内容・ブロック構造のまま保たれることを、失敗位置を変えながら確認する。
+#ifdef STIRLING_TEST_ALLOC_HOOK
+static void TestAllocFailureRollback() {
+    std::printf("TestAllocFailureRollback\n");
+
+    // 1) 複数ブロックへ跨る Insert の途中で確保が失敗する。
+    for (int failAt = 1; failAt <= 8; ++failAt) {
+        BlockList list;
+        NewEmptyDoc(list);
+        std::vector<unsigned char> seed(1000);
+        for (size_t i = 0; i < seed.size(); ++i) { seed[i] = static_cast<unsigned char>(i); }
+        {
+            BlockCursor c(&list);
+            CHECK(c.Insert(0, seed.data(), static_cast<FileOffset>(seed.size())), "seed insert");
+        }
+        const std::vector<unsigned char> before = ReadAll(list);
+        const int nodesBefore = list.Count();
+
+        // ブロック途中への挿入（分割＋複数ブロック追加）＝確保回数が最も多い経路。
+        const std::vector<unsigned char> big(static_cast<size_t>(kBlockCapacity) * 3 + 7, 0xAB);
+        stirling::SetAllocFailCountdown(failAt);
+        bool ok = false;
+        {
+            BlockCursor c(&list);
+            ok = c.Insert(500, big.data(), static_cast<FileOffset>(big.size()));
+        }
+        stirling::SetAllocFailCountdown(0);
+        CHECK(!ok, "Insert reports failure when a block allocation fails");
+        CHECK(list.Count() == nodesBefore, "failed Insert leaves the block count unchanged");
+        CHECK(list.GetTotalLength() == static_cast<FileOffset>(before.size()),
+              "failed Insert leaves the total length unchanged");
+        CHECK(ReadAll(list) == before, "failed Insert leaves the content unchanged");
+
+        // 注入解除後は同じ挿入が成功する（内部状態が壊れていない）。
+        {
+            BlockCursor c(&list);
+            CHECK(c.Insert(500, big.data(), static_cast<FileOffset>(big.size())),
+                  "Insert succeeds once allocation recovers");
+        }
+        std::vector<unsigned char> expect = before;
+        expect.insert(expect.begin() + 500, big.begin(), big.end());
+        CHECK(ReadAll(list) == expect, "content after the retried insert");
+    }
+
+    // 2) 満杯ブロックの分割を伴う InsertByte。データ確保・ノード確保の両方を失敗させる。
+    {
+        BlockList list;
+        NewEmptyDoc(list);
+        const std::vector<unsigned char> full(static_cast<size_t>(kBlockCapacity), 0x11);
+        {
+            BlockCursor c(&list);
+            CHECK(c.Insert(0, full.data(), kBlockCapacity), "fill a whole block");
+        }
+        const std::vector<unsigned char> before = ReadAll(list);
+        for (int failAt = 1; failAt <= 2; ++failAt) {
+            stirling::SetAllocFailCountdown(failAt);
+            bool ok = false;
+            {
+                BlockCursor c(&list);
+                ok = c.InsertByte(100, 0x99);
+            }
+            stirling::SetAllocFailCountdown(0);
+            CHECK(!ok, "InsertByte reports failure when the split allocation fails");
+            CHECK(list.Count() == 1, "failed InsertByte adds no node");
+            CHECK(ReadAll(list) == before, "failed InsertByte leaves the content unchanged");
+        }
+        {
+            BlockCursor c(&list);
+            CHECK(c.InsertByte(100, 0x99), "InsertByte succeeds once allocation recovers");
+        }
+        std::vector<unsigned char> expect = before;
+        expect.insert(expect.begin() + 100, 0x99);
+        CHECK(ReadAll(list) == expect, "content after the retried InsertByte");
+    }
+
+    // 3) ファイル読込。ノード確保／データ確保のどちらが失敗しても kOutOfMemory を返し、
+    //    ブロックを残さない（例外を UI 境界へ伝播させない）。
+    {
+        using stirling::FileIoResult;
+        using stirling::FileIoStatus;
+        const fs::path in = TempFile("oom");
+        std::vector<unsigned char> data(static_cast<size_t>(kBlockCapacity) * 3 + 5);
+        for (size_t i = 0; i < data.size(); ++i) { data[i] = static_cast<unsigned char>(i * 7); }
+        WriteFile(in, data);
+        for (int failAt = 1; failAt <= 6; ++failAt) {
+            BlockList list;
+            stirling::SetAllocFailCountdown(failAt);
+            const FileIoResult r = stirling::LoadFileIntoBlocks(list, in.wstring().c_str());
+            stirling::SetAllocFailCountdown(0);
+            CHECK(!r.Ok(), "load fails when a block allocation fails");
+            CHECK(r.status == FileIoStatus::kOutOfMemory, "load reports kOutOfMemory");
+            CHECK(list.IsEmpty(), "failed load leaves no blocks behind");
+        }
+        {
+            BlockList list;
+            CHECK(stirling::LoadFileIntoBlocks(list, in.wstring().c_str()).Ok(),
+                  "load succeeds once allocation recovers");
+            CHECK(ReadAll(list) == data, "loaded content after recovery");
+        }
+        fs::remove(in);
+
+        // 空ファイルの「空ブロック 1 個」確保も同じ扱い。
+        const fs::path empty = TempFile("oom_empty");
+        WriteFile(empty, std::vector<unsigned char>());
+        for (int failAt = 1; failAt <= 2; ++failAt) {
+            BlockList list;
+            stirling::SetAllocFailCountdown(failAt);
+            const FileIoResult r = stirling::LoadFileIntoBlocks(list, empty.wstring().c_str());
+            stirling::SetAllocFailCountdown(0);
+            CHECK(!r.Ok(), "empty-file load fails when allocation fails");
+            CHECK(r.status == FileIoStatus::kOutOfMemory, "empty-file load reports kOutOfMemory");
+            CHECK(list.IsEmpty(), "failed empty-file load leaves no blocks behind");
+        }
+        fs::remove(empty);
+    }
+
+    // 4) 所有権規約: AppendBlock / InsertNode* が失敗したとき data の所有権は移らない。
+    {
+        BlockList list;
+        unsigned char* buf = stirling::AllocBlockData();
+        CHECK(buf != nullptr, "AllocBlockData for the ownership check");
+        stirling::SetAllocFailCountdown(1);
+        BlockNode* n = list.AppendBlock(buf, kBlockCapacity, 4);
+        stirling::SetAllocFailCountdown(0);
+        CHECK(n == nullptr, "AppendBlock returns nullptr when the node allocation fails");
+        CHECK(list.IsEmpty(), "failed AppendBlock links nothing");
+        delete[] buf;   // 所有権は呼出側に残る（二重解放にならないことを確認する）
+
+        BlockNode* head = NewEmptyDoc(list);
+        CHECK(head != nullptr, "seed node for the ownership check");
+        unsigned char* buf2 = stirling::AllocBlockData();
+        stirling::SetAllocFailCountdown(1);
+        BlockNode* after = list.InsertNodeAfter(head, buf2, kBlockCapacity, 4);
+        stirling::SetAllocFailCountdown(0);
+        CHECK(after == nullptr, "InsertNodeAfter returns nullptr when the node allocation fails");
+        CHECK(list.Count() == 1, "failed InsertNodeAfter links nothing");
+        stirling::SetAllocFailCountdown(1);
+        BlockNode* bef = list.InsertNodeBefore(head, buf2, kBlockCapacity, 4);
+        stirling::SetAllocFailCountdown(0);
+        CHECK(bef == nullptr, "InsertNodeBefore returns nullptr when the node allocation fails");
+        CHECK(list.Count() == 1, "failed InsertNodeBefore links nothing");
+        delete[] buf2;
+    }
+}
+#endif  // STIRLING_TEST_ALLOC_HOOK
+
+// ---- 一括上書き / 範囲初期化（Issue #154） ----
+// 範囲初期化を「選択長と同容量の一時バッファ＋置換」から「ブロックへの直接 memset」へ
+// 変えたため、ブロック跨ぎ・境界・末尾クランプが SetByteAt の反復と一致することを確認する。
+static void TestWriteAndFillRange() {
+    std::printf("TestWriteAndFillRange\n");
+
+    // 複数ブロックに跨るデータを用意する（16KB ブロック 3 個 + 端数）。
+    std::vector<unsigned char> ref(static_cast<size_t>(kBlockCapacity) * 3 + 1234);
+    for (size_t i = 0; i < ref.size(); ++i) { ref[i] = static_cast<unsigned char>(i * 31 + 7); }
+    BlockList list;
+    NewEmptyDoc(list);
+    {
+        BlockCursor c(&list);
+        CHECK(c.Insert(0, ref.data(), static_cast<FileOffset>(ref.size())), "seed for write/fill");
+    }
+    CHECK(ReadAll(list) == ref, "seed content");
+
+    // Write: ブロック境界を跨ぐ上書き。
+    {
+        const FileOffset pos = kBlockCapacity - 100;
+        std::vector<unsigned char> src(500);
+        for (size_t i = 0; i < src.size(); ++i) { src[i] = static_cast<unsigned char>(0xC0 + i); }
+        BlockCursor c(&list);
+        const FileOffset n = c.Write(pos, src.data(), static_cast<FileOffset>(src.size()));
+        CHECK(n == static_cast<FileOffset>(src.size()), "Write returns the written length");
+        std::copy(src.begin(), src.end(), ref.begin() + static_cast<size_t>(pos));
+        CHECK(ReadAll(list) == ref, "Write across a block boundary");
+        CHECK(list.GetTotalLength() == static_cast<FileOffset>(ref.size()),
+              "Write keeps the total length");
+    }
+
+    // Write: データ末尾を越える分は書かずに打ち切る。
+    {
+        const FileOffset pos = static_cast<FileOffset>(ref.size()) - 10;
+        std::vector<unsigned char> src(100, 0x5A);
+        BlockCursor c(&list);
+        const FileOffset n = c.Write(pos, src.data(), static_cast<FileOffset>(src.size()));
+        CHECK(n == 10, "Write clamps at the end of data");
+        std::fill(ref.end() - 10, ref.end(), static_cast<unsigned char>(0x5A));
+        CHECK(ReadAll(list) == ref, "clamped Write content");
+        CHECK(list.GetTotalLength() == static_cast<FileOffset>(ref.size()),
+              "clamped Write keeps the total length");
+    }
+
+    // FillRange: ブロック跨ぎの定数上書き。
+    {
+        const FileOffset pos = 5000;
+        const FileOffset len = static_cast<FileOffset>(kBlockCapacity) * 2 + 3;
+        BlockCursor c(&list);
+        const FileOffset n = c.FillRange(pos, len, 0xE7);
+        CHECK(n == len, "FillRange returns the filled length");
+        std::fill(ref.begin() + static_cast<size_t>(pos),
+                  ref.begin() + static_cast<size_t>(pos + len),
+                  static_cast<unsigned char>(0xE7));
+        CHECK(ReadAll(list) == ref, "FillRange across blocks");
+        CHECK(list.GetTotalLength() == static_cast<FileOffset>(ref.size()),
+              "FillRange keeps the total length");
+    }
+
+    // FillRange: 末尾クランプと境界値。
+    {
+        BlockCursor c(&list);
+        CHECK(c.FillRange(0, 0, 0x00) == 0, "FillRange of zero length writes nothing");
+        CHECK(c.FillRange(-1, 10, 0x00) == 0, "FillRange rejects a negative position");
+        CHECK(c.FillRange(static_cast<FileOffset>(ref.size()), 10, 0x00) == 0,
+              "FillRange past the end writes nothing");
+        const FileOffset pos = static_cast<FileOffset>(ref.size()) - 3;
+        CHECK(c.FillRange(pos, 100, 0x11) == 3, "FillRange clamps at the end of data");
+        std::fill(ref.end() - 3, ref.end(), static_cast<unsigned char>(0x11));
+        CHECK(ReadAll(list) == ref, "clamped FillRange content");
+    }
+
+    // FillRange は SetByteAt の反復と同じ結果になる（小さな範囲で突合）。
+    {
+        BlockList a;
+        BlockList b;
+        std::vector<unsigned char> seed(kBlockCapacity + 500);
+        for (size_t i = 0; i < seed.size(); ++i) { seed[i] = static_cast<unsigned char>(i); }
+        for (BlockList* l : {&a, &b}) {
+            NewEmptyDoc(*l);
+            BlockCursor c(l);
+            CHECK(c.Insert(0, seed.data(), static_cast<FileOffset>(seed.size())), "seed pair");
+        }
+        const FileOffset pos = kBlockCapacity - 50;
+        const FileOffset len = 200;
+        {
+            BlockCursor c(&a);
+            c.FillRange(pos, len, 0x77);
+        }
+        for (FileOffset i = 0; i < len; ++i) {
+            BlockCursor c(&b);
+            c.SetByteAt(pos + i, 0x77);
+        }
+        CHECK(ReadAll(a) == ReadAll(b), "FillRange matches repeated SetByteAt");
+    }
+
+#ifdef STIRLING_TEST_ALLOC_HOOK
+    // 確保を伴わないため、確保失敗の注入下でも成功しドキュメントは正しく更新される。
+    {
+        BlockList l;
+        NewEmptyDoc(l);
+        std::vector<unsigned char> seed(kBlockCapacity + 100, 0x01);
+        {
+            BlockCursor c(&l);
+            CHECK(c.Insert(0, seed.data(), static_cast<FileOffset>(seed.size())), "seed no-alloc");
+        }
+        stirling::SetAllocFailCountdown(1);
+        FileOffset n = 0;
+        {
+            BlockCursor c(&l);
+            n = c.FillRange(0, static_cast<FileOffset>(seed.size()), 0x02);
+        }
+        stirling::SetAllocFailCountdown(0);
+        CHECK(n == static_cast<FileOffset>(seed.size()), "FillRange needs no allocation");
+        const std::vector<unsigned char> got = ReadAll(l);
+        CHECK(got == std::vector<unsigned char>(seed.size(), 0x02), "FillRange content under injection");
+    }
+#endif
+}
+
+// ---- StreamFileWriter: 一時ファイル経由の逐次書込（Issue #155） ----
+// 選択範囲の保存・ダンプ保存は、書き終えてから出力先を置換する。途中で失敗しても
+// 既存ファイルが空や不完全な内容に置き換わらないことを確認する。
+static void TestStreamFileWriter() {
+    std::printf("TestStreamFileWriter\n");
+    using stirling::StreamFileWriter;
+
+    // 1) 新規作成。チャンクを分けて書いても内容が連結される。
+    {
+        const fs::path out = TempFile("sfw_new");
+        fs::remove(out);
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for a new file");
+        CHECK(w.IsOpen(), "writer is open");
+        CHECK(!fs::exists(out), "the target is not created until commit");
+        const std::string a = "ABCDE";
+        const std::string b = "0123456789";
+        CHECK(w.Write(a.data(), a.size()).Ok(), "write first chunk");
+        CHECK(w.Write(b.data(), b.size()).Ok(), "write second chunk");
+        CHECK(w.Written() == static_cast<FileOffset>(a.size() + b.size()), "written total");
+        CHECK(w.Commit().Ok(), "commit");
+        CHECK(!w.IsOpen(), "writer is closed after commit");
+        const std::vector<unsigned char> got = ReadFileBytes(out);
+        const std::string want = a + b;
+        CHECK(got == std::vector<unsigned char>(want.begin(), want.end()), "committed content");
+        fs::remove(out);
+    }
+
+    // 2) 既存ファイルの置換。Commit までは元の内容が残る。
+    {
+        const fs::path out = TempFile("sfw_replace");
+        const std::vector<unsigned char> orig = { 'o', 'l', 'd' };
+        WriteFile(out, orig);
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open over an existing file");
+        const std::string neu = "brand-new-content";
+        CHECK(w.Write(neu.data(), neu.size()).Ok(), "write replacement");
+        CHECK(ReadFileBytes(out) == orig, "the existing file is untouched before commit");
+        CHECK(w.Commit().Ok(), "commit the replacement");
+        const std::vector<unsigned char> got = ReadFileBytes(out);
+        CHECK(got == std::vector<unsigned char>(neu.begin(), neu.end()), "replaced content");
+        fs::remove(out);
+    }
+
+    // 3) Abort（途中失敗の代替）。既存ファイルは元のまま、一時ファイルも残らない。
+    {
+        const fs::path out = TempFile("sfw_abort");
+        const std::vector<unsigned char> orig = { 'k', 'e', 'e', 'p' };
+        WriteFile(out, orig);
+        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
+                                            fs::directory_iterator());
+        {
+            StreamFileWriter w;
+            CHECK(w.Open(out.wstring().c_str()).Ok(), "open for abort");
+            const std::string partial = "partial";
+            CHECK(w.Write(partial.data(), partial.size()).Ok(), "write partial data");
+            w.Abort();
+            CHECK(!w.IsOpen(), "writer is closed after abort");
+        }
+        CHECK(ReadFileBytes(out) == orig, "aborting leaves the existing file untouched");
+        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
+                                           fs::directory_iterator());
+        CHECK(after == before, "aborting leaves no temporary file behind");
+        fs::remove(out);
+    }
+
+    // 4) デストラクタでも一時ファイルを片付ける（Commit を呼ばずに抜けた場合）。
+    {
+        const fs::path out = TempFile("sfw_dtor");
+        const std::vector<unsigned char> orig = { 'k', 'e', 'e', 'p', '2' };
+        WriteFile(out, orig);
+        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
+                                            fs::directory_iterator());
+        {
+            StreamFileWriter w;
+            CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the destructor case");
+            const std::string partial = "partial";
+            CHECK(w.Write(partial.data(), partial.size()).Ok(), "write partial data");
+        }   // ここでデストラクタ＝Abort 相当
+        CHECK(ReadFileBytes(out) == orig, "the destructor leaves the existing file untouched");
+        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
+                                           fs::directory_iterator());
+        CHECK(after == before, "the destructor leaves no temporary file behind");
+        fs::remove(out);
+    }
+
+    // 5) 8MB の書込分割（1 回の WriteFile 上限）を跨ぐサイズでも内容が一致する。
+    {
+        const fs::path out = TempFile("sfw_big");
+        fs::remove(out);
+        std::vector<unsigned char> big(9u * 1024u * 1024u + 12345u);
+        for (size_t i = 0; i < big.size(); ++i) { big[i] = static_cast<unsigned char>(i * 13); }
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for a large write");
+        CHECK(w.Write(big.data(), big.size()).Ok(), "write across the internal chunk limit");
+        CHECK(w.Commit().Ok(), "commit the large write");
+        CHECK(ReadFileBytes(out) == big, "large content round-trips");
+        fs::remove(out);
+    }
+
+    // 6) 開けないパス（存在しないディレクトリ）は失敗を返す。
+    {
+        const fs::path bad = TempFile("sfw_nodir") / L"sub" / L"out.bin";
+        StreamFileWriter w;
+        const stirling::FileIoResult r = w.Open(bad.wstring().c_str());
+        CHECK(!r.Ok(), "opening under a missing directory fails");
+        CHECK(r.status == stirling::FileIoStatus::kOpenFailed, "open failure status");
+        CHECK(!w.IsOpen(), "writer stays closed after a failed open");
+        CHECK(!w.Write("x", 1).Ok(), "writing without an open target fails");
+        CHECK(!w.Commit().Ok(), "committing without an open target fails");
+    }
+
+    // 7) 空パスは開かずに失敗する。
+    {
+        StreamFileWriter w;
+        CHECK(!w.Open(L"").Ok(), "empty path fails");
+        CHECK(!w.Open(nullptr).Ok(), "null path fails");
+    }
+}
+
+// ---- BGREP 通知（Issue #156） ----
+// ワーカ→UI の通知は、以前はファイルサイズ・ヒット位置を WPARAM へ直接入れていた。
+// WPARAM は Win32 で 32bit のため 4GB 以上が切り詰められる（4GB の倍数は 0 に化けて
+// 「アクセス拒否」と誤判定される）。LPARAM 経由で構造体を渡す形になったことで、
+// 4GB 境界前後の値が欠損しないことを確認する。
+static void TestBgrepNotify() {
+    std::printf("TestBgrepNotify\n");
+    using stirling::BgrepHitNotify;
+    using stirling::BgrepScanNotify;
+
+    // 通知が 64bit を保持できる型であること（WPARAM への逆戻りを型で防ぐ）。
+    static_assert(sizeof(BgrepScanNotify::size) == 8, "scan size must stay 64-bit");
+    static_assert(sizeof(BgrepHitNotify::pos) == 8, "hit position must stay 64-bit");
+
+    const FileOffset kValues[] = {
+        0,
+        1,
+        0x7FFFFFFFll,          // 2GB - 1
+        0x80000000ll,          // 2GB（int なら符号反転する境界）
+        0xFFFFFFFFll,          // 4GB - 1
+        0x100000000ll,         // 4GB ちょうど（WPARAM 直接格納だと Win32 で 0 に化ける）
+        0x100000001ll,         // 4GB + 1
+        0x200000000ll,         // 8GB（同上）
+        0x123456789Abcll,      // 任意の 4GB 超
+    };
+    const wchar_t* const kPath = L"C:\\dir\\sub\\target.bin";
+
+    for (const FileOffset v : kValues) {
+        // 走査通知: LPARAM 経由で往復しても値が欠けない。
+        BgrepScanNotify scan;
+        scan.path = kPath;
+        scan.size = v;
+        const LPARAM lp = (LPARAM)&scan;
+        const BgrepScanNotify* rs = (const BgrepScanNotify*)lp;
+        CHECK(rs->size == v, "scan size survives the LPARAM round trip");
+        CHECK(std::wcscmp(rs->path, kPath) == 0, "scan path survives the LPARAM round trip");
+        // 「サイズ 0＝アクセス拒否」の判定が 4GB の倍数で誤発火しない。
+        CHECK((rs->size == 0) == (v == 0), "access-denied decision uses the full 64-bit size");
+
+        // ヒット通知: 同上。
+        BgrepHitNotify hit;
+        hit.path = kPath;
+        hit.pos = v;
+        const LPARAM lph = (LPARAM)&hit;
+        const BgrepHitNotify* rh = (const BgrepHitNotify*)lph;
+        CHECK(rh->pos == v, "hit position survives the LPARAM round trip");
+        CHECK(std::wcscmp(rh->path, kPath) == 0, "hit path survives the LPARAM round trip");
+    }
+
+    // 対比: WPARAM へ直接入れると Win32 では 4GB 以上が失われる（退行の検知用）。
+    //   x64 では WPARAM も 64bit なので欠損しない。ビルド毎に期待値を切り替える。
+    {
+        const FileOffset v = 0x100000000ll;   // 4GB ちょうど
+        const WPARAM packed = (WPARAM)v;
+        const FileOffset unpacked = (FileOffset)packed;
+        if (sizeof(WPARAM) == 4) {
+            CHECK(unpacked == 0, "WPARAM truncates 4GB to 0 on Win32 (why the struct is needed)");
+        } else {
+            CHECK(unpacked == v, "WPARAM keeps 4GB on x64");
+        }
+    }
+}
+
 int main() {
     std::printf("=== Stirling core unit tests ===\n");
     TestBlockListBasics();
@@ -3421,6 +3875,12 @@ int main() {
     TestClipboardUtil();
     TestUndoBudget();
     TestDeleteRange();
+    TestWriteAndFillRange();
+    TestStreamFileWriter();
+    TestBgrepNotify();
+#ifdef STIRLING_TEST_ALLOC_HOOK
+    TestAllocFailureRollback();
+#endif
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     if (g_failures == 0) {

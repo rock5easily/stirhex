@@ -47,6 +47,7 @@
     <ClCompile Include="src\core\BlockList.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\BlockCursor.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\BlockFileIO.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\core\StreamFileWriter.cpp"><Filter>core</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
@@ -92,7 +93,9 @@
     <ClInclude Include="src\core\CoreTypes.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\BlockList.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\BlockCursor.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\BgrepNotify.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\BlockFileIO.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\StreamFileWriter.h"><Filter>core</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="StirHex.rc"><Filter>resource</Filter></ResourceCompile>

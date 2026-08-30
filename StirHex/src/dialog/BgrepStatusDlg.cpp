@@ -43,8 +43,12 @@ void SearchOneFile(BgrepJob* job, const CStringW& full) {
     const stirling::FileOffset total = ok ? stirling::RecalcTotalLength(bl) : 0;
 
     // 走査通知（サイズ 0＝開けない/空 は受信側で「アクセス拒否」行を追記）。
-    // WPARAM は x64 で 64bit のため、サイズをそのまま渡す（Win32 ビルドでは 32bit のまま）。
-    ::SendMessageW(job->notify, WM_BGREP_SCAN, (WPARAM)total, (LPARAM)full.GetString());
+    // Issue #156: サイズは 64bit のまま構造体で渡す（WPARAM は Win32 で 32bit）。
+    //   SendMessageW は同期のため、スタック上の構造体を指したままで安全。
+    stirling::BgrepScanNotify scan;
+    scan.path = full.GetString();
+    scan.size = total;
+    ::SendMessageW(job->notify, WM_BGREP_SCAN, 0, (LPARAM)&scan);
     if (!ok || total == 0) { return; }
 
     const int plen = (int)job->pattern.size();
@@ -56,8 +60,11 @@ void SearchOneFile(BgrepJob* job, const CStringW& full) {
     while (job->running != 0 &&
            cur.SearchPattern(job->pattern.data(), plen, &hit,
                              stirling::BlockCursor::kForward, pos, 0)) {
-        // WPARAM は x64 で 64bit のため、位置をそのまま渡す。
-        ::SendMessageW(job->notify, WM_BGREP_HIT, (WPARAM)hit, (LPARAM)full.GetString());
+        // Issue #156: ヒット位置も 64bit のまま構造体で渡す（同上）。
+        stirling::BgrepHitNotify notify;
+        notify.path = full.GetString();
+        notify.pos = hit;
+        ::SendMessageW(job->notify, WM_BGREP_HIT, 0, (LPARAM)&notify);
         pos = hit + plen;
         if (pos > total - plen) { break; }
     }
@@ -155,10 +162,13 @@ void CBgrepStatusDlg::OnCancel() {
 }
 
 // 走査通知（原 0x414）。サイズ 0 は開けない/空＝アウトプットへアクセス拒否行。
-LRESULT CBgrepStatusDlg::OnScan(WPARAM wParam, LPARAM lParam) {
+//   lParam は送信側スタック上の BgrepScanNotify（Issue #156）。
+LRESULT CBgrepStatusDlg::OnScan(WPARAM /*wParam*/, LPARAM lParam) {
     ++m_fileCount;
-    const CStringW path((LPCWSTR)lParam);
-    if (wParam == 0) {
+    const stirling::BgrepScanNotify* n = (const stirling::BgrepScanNotify*)lParam;
+    if (n == nullptr) { return 0; }
+    const CStringW path(n->path);
+    if (n->size == 0) {
         if (m_outbar != nullptr) {
             m_outbar->AddMessage(path + ui::LoadW(IDS_BGREP_ACCESS_DENIED));
         }
@@ -169,11 +179,14 @@ LRESULT CBgrepStatusDlg::OnScan(WPARAM wParam, LPARAM lParam) {
 }
 
 // ヒット通知（原 0x415）。件数更新＋アウトプットペインへ 1 行追記。
-LRESULT CBgrepStatusDlg::OnHit(WPARAM wParam, LPARAM lParam) {
+//   lParam は送信側スタック上の BgrepHitNotify（Issue #156）。
+LRESULT CBgrepStatusDlg::OnHit(WPARAM /*wParam*/, LPARAM lParam) {
+    const stirling::BgrepHitNotify* n = (const stirling::BgrepHitNotify*)lParam;
+    if (n == nullptr) { return 0; }
     ++m_hitCount;
     SetDlgItemInt(IDC_BGREP_STAT_COUNT, m_hitCount);
     if (m_outbar != nullptr) {
-        m_outbar->AddResult(CStringW((LPCWSTR)lParam), (stirling::FileOffset)wParam);
+        m_outbar->AddResult(CStringW(n->path), n->pos);   // 位置は 64bit のまま
     }
     return 0;
 }

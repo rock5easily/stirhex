@@ -673,6 +673,8 @@
 #define IDS_CONFIRM_MARK_SIZE       1194    // データサイズが異なる旨の確認
 #define IDS_MARK_IMPORT_DONE        1195    // "%d 件のマークを読み込みました"
 #define IDS_MARK_IMPORT_DONE_SKIP   1196    // 範囲外を読み飛ばした場合
+#define IDS_ERR_RANGE_READ_FAILED   1198    // "データを読み取れませんでした..."
+#define IDS_ERR_EDIT_OUT_OF_MEMORY  1197    // "メモリが不足しているため、この操作を実行できませんでした"
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 
 // 既存の文字列リソースを参照するための別名（文言は原の文字列表にあるもの）。

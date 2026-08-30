@@ -84,11 +84,29 @@ public:
     // 範囲置換（1レコード。原 ReplaceRange 0xc00009。選択範囲へ入力＝選択削除+挿入を単一Undo単位に）
     bool ReplaceRange(stirling::FileOffset pos, stirling::FileOffset delLen,
                       const std::vector<unsigned char>& ins);
+    // 範囲初期化（1レコード。選択範囲を定数バイトで上書き。Issue #154）。
+    //   長さが変わらないため挿入・削除・ブロック確保を伴わず、選択範囲と同容量の
+    //   一時バッファも作らない。Win32 でも範囲の大きさに依存せず実行できる
+    //   （Undo 用の退避のみ範囲と同容量を要し、その可否は Issue #30 の上限設定に従う）。
+    enum class FillRangeResult {
+        kOk,            // 上書きした
+        kInvalid,       // 範囲が不正／1バイトも上書きできなかった（無変更）
+        kCanceled,      // 退避量が上限超過で利用者が中止（無変更）
+        kOutOfMemory,   // 退避・記録用のメモリを確保できなかった（無変更）
+    };
+    FillRangeResult FillRange(stirling::FileOffset pos, stirling::FileOffset count,
+                              unsigned char value);
     // 読取（キャレット表示/ニブル合成用）
     bool GetByteAt(stirling::FileOffset pos, unsigned char* outByte);
     // 範囲読取（Copy/Cut 用）。pos から count バイトを実データ範囲までクランプして返す。
     //   戻り値はメモリ上のバッファのため、要求長はメモリに収まる範囲であること。
     std::vector<unsigned char> ReadRange(stirling::FileOffset pos, stirling::FileOffset count);
+    // 範囲読取（呼出側バッファ版。Issue #155）。pos から count バイトを dst へ読み、
+    //   実際に読めたバイト数を返す。確保を伴わないため、選択範囲の保存やダンプ保存を
+    //   固定サイズのチャンクで回すのに使う（範囲全体をメモリへ載せない）。
+    //   戻り値が count 未満なら「そこまでしか読めなかった」＝呼出側は失敗として扱える。
+    stirling::FileOffset ReadInto(stirling::FileOffset pos, stirling::FileOffset count,
+                                  void* dst);
     // in-place 書換（Undo記録なし）。16進の下位ニブル確定で使用し、1バイト＝1レコードの
     // Undo粒度を原に合わせる（上位ニブルの1レコードに下位ニブルを畳み込む）。
     bool SetByteNoUndo(stirling::FileOffset pos, unsigned char b);
@@ -153,10 +171,18 @@ protected:
     }
     // 環境設定（undoMemoryLimit / undoMemoryLimitMB）のバイト換算。0 = 無制限。
     static unsigned long long UndoMemoryLimitBytes();
+    // 編集を行う前に Undo スタックの空きを 1 件分予約する（Issue #153）。
+    //   確保に失敗したら false を返す。編集後に記録できず履歴が欠落する事態を防ぐため、
+    //   呼出側はドキュメントを変更する前に呼び、false なら編集自体を行わない。
+    bool ReserveUndoSlot();
+    // 同上（Redo スタック側）。Undo 実行時、逆レコードを積む前に予約する。
+    bool ReserveRedoSlot();
     // Undo レコードを積む（保持量へ加算する。破棄判定は TrimUndoHistory が行う）。
-    void PushUndoRecord(EditRecord&& r);
+    //   ReserveUndoSlot 済みなら失敗しない。予約なしで確保に失敗した場合は履歴を破棄して
+    //   false を返す（取り消し不能な編集として扱う。Issue #153）。
+    bool PushUndoRecord(EditRecord&& r);
     // Redo レコードを積む（同上）。
-    void PushRedoRecord(EditRecord&& r);
+    bool PushRedoRecord(EditRecord&& r);
     // 保持合計が上限に収まるまで、Undo スタック先頭（最古の編集）→ Redo スタック先頭
     // （Redo 連鎖の末端）の順に破棄する。破棄した分だけ保存点 m_cleanUndoSize をずらし、
     // 保存点そのものを捨てた場合は到達不能(-1)にする。

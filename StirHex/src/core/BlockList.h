@@ -27,6 +27,26 @@ struct BlockNode {
     int             usedLen = 0;      // 有効バイト数（原 +0x14）
 };
 
+// ---- 確保ヘルパ（Issue #153） ----
+// ブロックデータ／ノードの確保はいずれも例外を投げず、失敗時に nullptr を返す。
+// メモリ不足は上位へ戻り値で伝え、UI 境界まで std::bad_alloc を伝播させない。
+
+// kBlockCapacity バイトのブロックデータを確保する（失敗時 nullptr）。
+unsigned char* AllocBlockData();
+
+// リスト未連結のノードを確保する（失敗時 nullptr。失敗時は data の所有権を移さない）。
+BlockNode* AllocBlockNode(unsigned char* data, int capacity, int usedLen);
+
+// AllocBlockNode で得た未連結ノードを、保持データごと解放する（nullptr 可）。
+void FreeBlockNode(BlockNode* node);
+
+#ifdef STIRLING_TEST_ALLOC_HOOK
+// テスト専用の確保失敗注入。n>0 のとき「n 回目の確保」を失敗させ、以後は無効化する。
+// 0 以下を渡すと注入を解除する。本体ビルドではこの API 自体が存在しない。
+void SetAllocFailCountdown(int n);
+int  AllocFailCountdown();
+#endif
+
 // センチネルノードを内包する循環双方向リスト。
 // 原 Stirling では BlockList 自身がセンチネル BlockNode を兼ねる（+0x04=tail, +0x08=head, +0x18=count）。
 // 移植では専用センチネルを内部に持ち、走査系はセンチネルを検出して nullptr を返す。
@@ -52,13 +72,23 @@ public:
     BlockNode* GetPrev(const BlockNode* n) const;  // 原 BlockList_GetPrev 0x0041d9a0
 
     // 末尾（センチネル直前）へノードを追加（原 BlockList_AppendBlock 0x00403430）。
+    // ノード確保に失敗すると nullptr を返す。そのとき data の所有権は移らないため、
+    // 呼出側が解放する責任を負う（Issue #153）。
     BlockNode* AppendBlock(unsigned char* data, int capacity, int usedLen);
 
     // 指定ノードの直後／直前へ新ノードを挿入して返す
     //   （原 BlockList_InsertNodeAfter 0x0041dc90 / InsertNodeBefore 0x0041dba0）。
     // data/capacity/usedLen がすべて非ゼロのときのみデータを設定する（原挙動）。
+    // AppendBlock と同じく、ノード確保に失敗すると nullptr を返し data の所有権は移らない。
     BlockNode* InsertNodeAfter(BlockNode* at, unsigned char* data, int capacity, int usedLen);
     BlockNode* InsertNodeBefore(BlockNode* at, unsigned char* data, int capacity, int usedLen);
+
+    // AllocBlockNode で先に確保しておいた未連結ノードを連結する（Issue #153）。
+    // 確保を伴わないため失敗しない。複数ブロックの挿入をトランザクション化する際、
+    // 「全ノードを確保してから、失敗しない連結だけを行う」ために使う。
+    void LinkNodeAfter(BlockNode* at, BlockNode* node);
+    void LinkNodeBefore(BlockNode* at, BlockNode* node);
+    void AppendNode(BlockNode* node);
 
     // ノードをリストから除去し、保持していたブロックデータのポインタを返す
     //   （原 BlockList_RemoveNode 0x0041dd80。呼出側が data を解放する契約）。

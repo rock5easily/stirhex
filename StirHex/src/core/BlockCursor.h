@@ -46,10 +46,12 @@ public:
     FileOffset Read(FileOffset count, void* dst);
 
     // 絶対位置 pos へ count バイト挿入（原 BlockCursor_Insert 0x0041ccbd → Worker 0x0041cd40）。
+    // メモリ確保に失敗した場合は false を返し、リストは呼出前のまま変化しない（Issue #153）。
     bool Insert(FileOffset pos, const void* src, FileOffset count);
 
     // 絶対位置 pos へ1バイト挿入。ブロック満杯時は半分に分割して挿入
     //   （原 BlockCursor_InsertByte 0x0041c238）。
+    // Insert と同じく、確保失敗時は false を返しリストは無変更（Issue #153）。
     bool InsertByte(FileOffset pos, unsigned char b);
 
     // 絶対位置 pos の1バイトを削除。outByte に削除バイトを返す
@@ -75,6 +77,18 @@ public:
     //   pos は既存データ内(pos<総長)であること。成功で true。
     bool SetByteAt(FileOffset pos, unsigned char b);
 
+    // 絶対位置 pos から count バイトを、既存データ上へ一括で上書きする（Issue #154）。
+    //   実際に上書きできたバイト数を返す。ドキュメント長は変わらず、確保も発生しない
+    //   （＝メモリ不足で失敗しない）。データ末尾を越える分は書かずに打ち切る。
+    // SetByteAt を count 回呼ぶのと結果は同じだが、ブロックを 1 度だけ辿るため
+    //   （SetByteAt は 1 バイトごとに先頭から Seek し直す）長い範囲でも線形で済む。
+    FileOffset Write(FileOffset pos, const void* src, FileOffset count);
+
+    // 絶対位置 pos から count バイトを定数 value で埋める（範囲初期化。Issue #154）。
+    //   Write と同じく長さ不変・確保なし。呼出側で count バイトの一時バッファを
+    //   組み立てる必要が無いため、Win32 でも選択範囲の大きさに依存せず実行できる。
+    FileOffset FillRange(FileOffset pos, FileOffset count, unsigned char value);
+
     // Boyer-Moore-Horspool 検索（原 BlockCursor_SearchPattern 0x0041d2d5）。
     //   direction=kForward/kBackward, start=開始位置, end=終端(0で全長, 前方時のみ自動補完)。
     //   一致すれば *outPos に位置を格納し true。対話検索/BGREP の共通コア。
@@ -95,7 +109,8 @@ public:
 private:
     // 挿入の実体（原 BlockCursor_InsertWorker 0x0041cd40）。
     // curUsedLen/capacity はブロック内の値のため int。insertCount のみ 64bit。
-    void InsertWorker(int curUsedLen, int capacity, unsigned char* data,
+    // 必要なブロックを先に全て確保し、成功時のみリストを更新する（全か無か。Issue #153）。
+    bool InsertWorker(int curUsedLen, int capacity, unsigned char* data,
                       FileOffset insertCount, const unsigned char* src);
 
     BlockList* list_;

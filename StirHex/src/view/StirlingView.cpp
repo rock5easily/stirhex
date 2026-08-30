@@ -35,6 +35,7 @@
 #include "dialog/DiffListDlg.h"
 #include "dialog/SyncScrollDlg.h"
 #include "core/BlockCursor.h"
+#include "core/StreamFileWriter.h"   // 一時ファイル経由の逐次書込（Issue #155）
 #include "core/Cp932Text.h"   // IsCp932LeadByte（byte 層の CP932 先行バイト判定）
 
 #include <algorithm>
@@ -3165,9 +3166,17 @@ void CStirlingView::OnFillSelection() {
     if (dlg.DoModal() != IDOK) {
         return;
     }
-    // 範囲を定数バイトで上書き（長さ不変＝ReplaceRange で単一 kReplace レコード）。
-    const std::vector<unsigned char> bytes(static_cast<size_t>(hi - lo), dlg.Value());
-    if (!pDoc->ReplaceRange(lo, hi - lo, bytes)) {
+    // 範囲を定数バイトで上書き（長さ不変＝単一 kOverwrite レコード）。
+    //   Issue #154: 以前は選択長と同容量の一時 vector を組み立てて ReplaceRange へ渡していた。
+    //   Win32 では選択長を size_t へ落とす際の切り詰めと、確保失敗による未処理例外の恐れが
+    //   あったため、ドキュメント側でブロックへ直接 memset する経路へ置き換えた。
+    switch (pDoc->FillRange(lo, hi - lo, dlg.Value())) {
+    case CStirlingDoc::FillRangeResult::kOk:
+        break;
+    case CStirlingDoc::FillRangeResult::kOutOfMemory:
+        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_EDIT_OUT_OF_MEMORY);
+        return;   // ドキュメントは無変更。選択を維持する
+    default:
         return;   // 上限超過の確認で中止された等。選択を維持（Issue #30）
     }
 
@@ -3724,7 +3733,6 @@ void CStirlingView::OnSaveSelection() {
     }
     const stirling::FileOffset lo = SelLo();
     const stirling::FileOffset hi = SelHi();
-    const std::vector<unsigned char> bytes = pDoc->ReadRange(lo, hi - lo);
 
     // 名前を付けて保存（原 FUN_00487a35: 保存, OFN_HIDEREADONLY|OFN_OVERWRITEPROMPT）。
     // MBCS＋/utf-8 の CP932 化を避けるため、フィルタに日本語リテラルは使わない（NULL＝全ファイル）。
@@ -3735,17 +3743,58 @@ void CStirlingView::OnSaveSelection() {
     }
     const CString path = dlg.GetPathName();
 
-    // 生バイトをファイルへ書き出す（原 CMirrorFile modeCreate|modeWrite）。
-    CFile file;
-    CFileException ex;
-    if (!file.Open(path, CFile::modeCreate | CFile::modeWrite | CFile::shareExclusive, &ex)) {
+    // Issue #155: 以前は選択範囲全体を ReadRange で 1 つの vector へ読み、
+    //   CFile(modeCreate) で書いていた。modeCreate は開いた時点で出力先を切り詰めるため、
+    //   読取・確保に失敗すると既存ファイルがエラー表示なく空になり得た。
+    //   ここでは固定サイズのチャンクで読み書きし、書き終えてから出力先を置換する。
+    WriteRangeToFile(path, lo, hi);   // 失敗理由は内部で通知する（出力先は未変更）
+}
+
+// 選択範囲の生バイトを、固定サイズのチャンクでファイルへ書き出す（Issue #155）。
+//   範囲は [lo, hi) の半開区間。成功で true。失敗時はメッセージを表示し、
+//   出力先ファイルは元のまま（一時ファイル経由で書き、完了時にだけ置換する）。
+bool CStirlingView::WriteRangeToFile(const CString& path, stirling::FileOffset lo,
+                                     stirling::FileOffset hi) {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr) { return false; }
+
+    std::vector<unsigned char> chunk;
+    try {
+        chunk.resize(kSaveChunkBytes);
+    } catch (const std::bad_alloc&) {
+        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_EDIT_OUT_OF_MEMORY);
+        return false;
+    }
+
+    stirling::StreamFileWriter writer;
+    if (!writer.Open(path).Ok()) {
         ui::MsgBoxRes(GetSafeHwnd(), IDS_SAVE_BACKUP_FAILED);
-        return;
+        return false;
     }
-    if (!bytes.empty()) {
-        file.Write(bytes.data(), static_cast<UINT>(bytes.size()));
+    for (stirling::FileOffset pos = lo; pos < hi;) {
+        const stirling::FileOffset left = hi - pos;
+        const stirling::FileOffset want =
+            (left < static_cast<stirling::FileOffset>(chunk.size()))
+                ? left : static_cast<stirling::FileOffset>(chunk.size());
+        const stirling::FileOffset got = pDoc->ReadInto(pos, want, chunk.data());
+        if (got != want) {
+            // 読めなかった分を空データとして扱わない（原因を通知して出力先は残す）。
+            writer.Abort();
+            ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_RANGE_READ_FAILED);
+            return false;
+        }
+        if (!writer.Write(chunk.data(), static_cast<size_t>(got)).Ok()) {
+            writer.Abort();
+            ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+            return false;
+        }
+        pos += got;
     }
-    file.Close();
+    if (!writer.Commit().Ok()) {
+        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+        return false;
+    }
+    return true;
 }
 
 // ダンプイメージの保存（原 0x8060 FUN_0045c506→FUN_00446fc8→ダイアログ198→FUN_0045d3e2）。
@@ -4253,18 +4302,14 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
     const bool beBig = pDoc->IsByteOrderBig();
     const unsigned char* ebc = (cs == 4) ? EbcdicTable() : (cs == 5) ? EbcidkTable() : nullptr;
 
-    CFile file;
-    CFileException ex;
-    if (!file.Open(path, CFile::modeCreate | CFile::modeWrite | CFile::shareExclusive, &ex)) {
+    // Issue #155: 以前は範囲全体を 1 つの vector へ読み、出力テキスト全体を std::string へ
+    //   組み立ててから一括書込していた。どちらも範囲の大きさに比例して確保するため、
+    //   Win32 では大きな範囲で確保に失敗し、しかも出力先は既に切り詰められていた。
+    //   ここでは一定行数ごとに読み・組み立て・書込を行い、書き終えてから出力先を置換する。
+    stirling::StreamFileWriter writer;
+    if (!writer.Open(path).Ok()) {
         return false;   // 呼び元が原 1010 メッセージを表示
     }
-
-    // 指定範囲のみを読む。UTF-8 でも範囲外へ先読みしない: 先読みしたバイトは
-    //   BuildCharCellsUtf8 が消費して文字欄だけ範囲外の文字を描いてしまう（Issue #124）。
-    //   ダンプは範囲全体を1つのバッファへ読むため、ページ境界の先読みも要らない。
-    const stirling::FileOffset count = endPos - startPos + 1;
-    const std::vector<unsigned char> buf = pDoc->ReadRange(startPos, count);
-    const int nbuf = static_cast<int>(buf.size());
 
     const stirling::FileOffset rowStart = startPos - (startPos % bpr);
     int gi = 0;
@@ -4284,10 +4329,9 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
             pOldDumpFont = dumpDC.SelectObject(&m_fontUtf8);
         }
     }
-
-    std::string outAll;
-    outAll.reserve(static_cast<size_t>((endPos - rowStart) / bpr + 2) *
-                   (static_cast<size_t>(bpr) * 4 + 16));
+    // 文字欄が次に読むバイトの絶対位置。行末で次行のバイトを先読み・消費し得るため、
+    //   チャンクを跨いでもこの位置から続きを読む（範囲全体を 1 バッファに載せた場合と同じ）。
+    stirling::FileOffset consumedAbs = startPos + gi;
 
     static const char* const kHexDigits = "0123456789ABCDEF";
 
@@ -4309,74 +4353,127 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
         header += " \r\n";
         header.append(static_cast<size_t>(addrCols) + static_cast<size_t>(bpr) * 4 + 3, '-');
         header += "\r\n";
-        outAll += header;
+        if (!writer.Write(header.data(), header.size()).Ok()) {
+            if (pOldDumpFont != nullptr) { dumpDC.SelectObject(pOldDumpFont); }
+            writer.Abort();
+            ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+            return false;
+        }
     }
 
-    for (stirling::FileOffset rowAddr = rowStart; rowAddr <= endPos; rowAddr += bpr) {
-        std::string line;
-        // アドレス欄（既定 11 桁）: 16進 " XXXXXXXX  " / 10進 "DDDDDDDDDD "（原 FUN_0045dfb1）
-        char addr[32];
-        if (radix == 0) {
-            _snprintf_s(addr, sizeof(addr), _TRUNCATE, "%0*llu ",
-                        addrDigits, static_cast<long long>(rowAddr));
-        } else {
-            _snprintf_s(addr, sizeof(addr), _TRUNCATE, " %0*llX  ",
-                        addrDigits, static_cast<long long>(rowAddr));
-        }
-        line += addr;
+    std::vector<unsigned char> buf;
+    std::string out;
+    bool failed = false;
+    UINT failMsg = 0;
 
-        // 16進欄（bpr セル "XX "。範囲外の列は空白）
-        for (int col = 0; col < bpr; ++col) {
-            const stirling::FileOffset p = rowAddr + col;
-            if (p >= startPos && p <= endPos) {
-                const int bi = static_cast<int>(p - startPos);
-                const unsigned char b = (bi < nbuf) ? buf[bi] : 0;
-                char h[4] = { kHexDigits[(b >> 4) & 0xf], kHexDigits[b & 0xf], ' ', 0 };
-                line += h;
+    for (stirling::FileOffset chunkFirstRow = rowStart;
+         chunkFirstRow <= endPos && !failed;
+         chunkFirstRow += static_cast<stirling::FileOffset>(bpr) * kDumpChunkRows) {
+        const stirling::FileOffset chunkLastRow =
+            chunkFirstRow + static_cast<stirling::FileOffset>(bpr) * (kDumpChunkRows - 1);
+        // このチャンクで読むバイト範囲 [bufBase, bufEnd]（両端含む）。
+        //   行末の先読み分を含めるため kCharLookahead バイトだけ余分に読む（範囲内に限る）。
+        const stirling::FileOffset bufBase =
+            (chunkFirstRow < startPos) ? startPos : chunkFirstRow;
+        stirling::FileOffset bufEnd = chunkLastRow + bpr - 1 + kCharLookahead;
+        if (bufEnd > endPos) { bufEnd = endPos; }
+        const stirling::FileOffset bufLen = bufEnd - bufBase + 1;
+        try {
+            buf.resize(static_cast<size_t>(bufLen));
+        } catch (const std::bad_alloc&) {
+            failed = true; failMsg = IDS_ERR_EDIT_OUT_OF_MEMORY; break;
+        }
+        const stirling::FileOffset got = pDoc->ReadInto(bufBase, bufLen, buf.data());
+        if (got != bufLen) {
+            // 読めなかった分をゼロ値として整形しない（原因を通知して出力先は残す）。
+            failed = true; failMsg = IDS_ERR_RANGE_READ_FAILED; break;
+        }
+        const int nbuf = static_cast<int>(buf.size());
+        gi = static_cast<int>(consumedAbs - bufBase);   // チャンク内の続き位置
+
+        out.clear();
+        out.reserve(static_cast<size_t>(kDumpChunkRows) *
+                    (static_cast<size_t>(bpr) * 4 + 16));
+
+        for (stirling::FileOffset rowAddr = chunkFirstRow;
+             rowAddr <= chunkLastRow && rowAddr <= endPos; rowAddr += bpr) {
+            std::string line;
+            // アドレス欄（既定 11 桁）: 16進 " XXXXXXXX  " / 10進 "DDDDDDDDDD "（原 FUN_0045dfb1）
+            char addr[32];
+            if (radix == 0) {
+                _snprintf_s(addr, sizeof(addr), _TRUNCATE, "%0*llu ",
+                            addrDigits, static_cast<long long>(rowAddr));
             } else {
-                line += "   ";
+                _snprintf_s(addr, sizeof(addr), _TRUNCATE, " %0*llX  ",
+                            addrDigits, static_cast<long long>(rowAddr));
             }
-        }
-        line += "  ";   // 16進欄と文字欄の区切り 2 空白
+            line += addr;
 
-        // 文字欄（bpr セル + 末尾 1 空白 = bpr+1 幅。先頭の範囲外列は空白詰め）
-        const int lead = (rowAddr < startPos) ? static_cast<int>(startPos - rowAddr) : 0;
-        if (cs == 6) {   // UTF-8（Issue #98）
-            std::wstring wout;
-            std::vector<INT> wdx;
-            bool weof = false;
-            int wcells = 0;
-            BuildCharCellsUtf8(buf, gi, bpr - lead, carryCellsUtf8, dumpDC.GetSafeHdc(),
-                               m_charW, &utf8CellCache, wout, wdx, wcells, weof);
-            std::wstring wline(static_cast<size_t>(lead), L' ');
-            wline += wout;
-            // セル数で右端を揃える（全角グリフは 1 文字で 2 セルぶんの幅を占める）。
-            const int used = lead + wcells;
-            if (used < bpr + 1) { wline.append(static_cast<size_t>(bpr + 1 - used), L' '); }
-            line += Utf8BytesFromWide(wline);
-        } else {
-        std::string chars(static_cast<size_t>(lead), ' ');
-        bool eof = false;
-        chars += BuildCharCells(buf, gi, bpr - lead, cs, carry, beBig, ebc, eof);
-        if (static_cast<int>(chars.size()) < bpr + 1) {
-            chars.append(static_cast<size_t>(bpr + 1) - chars.size(), ' ');
-        } else if (static_cast<int>(chars.size()) > bpr + 1) {
-            chars.resize(static_cast<size_t>(bpr) + 1);   // DBCS 行末オーバーシュートを末尾空白位置に収める
-        }
-        line += chars;
-        }
-        line += "\r\n";
+            // 16進欄（bpr セル "XX "。範囲外の列は空白）
+            for (int col = 0; col < bpr; ++col) {
+                const stirling::FileOffset p = rowAddr + col;
+                if (p >= startPos && p <= endPos) {
+                    const stirling::FileOffset bi = p - bufBase;
+                    const unsigned char b =
+                        (bi >= 0 && bi < nbuf) ? buf[static_cast<size_t>(bi)] : 0;
+                    char h[4] = { kHexDigits[(b >> 4) & 0xf], kHexDigits[b & 0xf], ' ', 0 };
+                    line += h;
+                } else {
+                    line += "   ";
+                }
+            }
+            line += "  ";   // 16進欄と文字欄の区切り 2 空白
 
-        outAll += line;
+            // 文字欄（bpr セル + 末尾 1 空白 = bpr+1 幅。先頭の範囲外列は空白詰め）
+            const int lead = (rowAddr < startPos) ? static_cast<int>(startPos - rowAddr) : 0;
+            if (cs == 6) {   // UTF-8（Issue #98）
+                std::wstring wout;
+                std::vector<INT> wdx;
+                bool weof = false;
+                int wcells = 0;
+                BuildCharCellsUtf8(buf, gi, bpr - lead, carryCellsUtf8, dumpDC.GetSafeHdc(),
+                                   m_charW, &utf8CellCache, wout, wdx, wcells, weof);
+                std::wstring wline(static_cast<size_t>(lead), L' ');
+                wline += wout;
+                // セル数で右端を揃える（全角グリフは 1 文字で 2 セルぶんの幅を占める）。
+                const int used = lead + wcells;
+                if (used < bpr + 1) { wline.append(static_cast<size_t>(bpr + 1 - used), L' '); }
+                line += Utf8BytesFromWide(wline);
+            } else {
+            std::string chars(static_cast<size_t>(lead), ' ');
+            bool eof = false;
+            chars += BuildCharCells(buf, gi, bpr - lead, cs, carry, beBig, ebc, eof);
+            if (static_cast<int>(chars.size()) < bpr + 1) {
+                chars.append(static_cast<size_t>(bpr + 1) - chars.size(), ' ');
+            } else if (static_cast<int>(chars.size()) > bpr + 1) {
+                chars.resize(static_cast<size_t>(bpr) + 1);   // DBCS 行末オーバーシュートを末尾空白位置に収める
+            }
+            line += chars;
+            }
+            line += "\r\n";
+
+            out += line;
+        }
+        consumedAbs = bufBase + gi;   // 次チャンクの続き位置（先読み分を含む）
+
+        if (!writer.Write(out.data(), out.size()).Ok()) {
+            failed = true; failMsg = IDS_ERR_WRITE_FAILED; break;
+        }
     }
 
     if (pOldDumpFont != nullptr) { dumpDC.SelectObject(pOldDumpFont); }
 
-    file.Write(outAll.data(), static_cast<UINT>(outAll.size()));
-    file.Close();
+    if (failed) {
+        writer.Abort();   // 出力先ファイルは元のまま
+        ui::MsgBoxRes(GetSafeHwnd(), failMsg);
+        return false;
+    }
+    if (!writer.Commit().Ok()) {
+        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+        return false;
+    }
     return true;
 }
-
 // ===========================================================================
 // 検索（原 CSearchDlg→FindNextImpl→BlockCursor_SearchPattern）
 // ===========================================================================

@@ -25,6 +25,8 @@ $srcTest = Join-Path $root "core_test.cpp"
 $srcList = Join-Path $root "..\StirHex\src\core\BlockList.cpp"
 $srcCur  = Join-Path $root "..\StirHex\src\core\BlockCursor.cpp"
 $srcIO   = Join-Path $root "..\StirHex\src\core\BlockFileIO.cpp"
+# Temp-file-then-replace streaming writer for range/dump save (Issue #155)
+$srcStream = Join-Path $root "..\StirHex\src\core\StreamFileWriter.cpp"
 # MFC/Win32 non-dependent settings codec (64-bit setting value format, Issue #22)
 $srcCodec = Join-Path $root "..\StirHex\src\app\SettingsCodec.cpp"
 # MFC non-dependent encoding migration for MBCS-era settings (Issue #43)
@@ -48,7 +50,7 @@ $srcInc  = Join-Path $root "..\StirHex\src"
 # ClipboardUtil.h (header only, Issue #47) needs the clipboard APIs from user32.lib
 
 Write-Host "== build ($Arch) =="
-& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" /link user32.lib shell32.lib ole32.lib advapi32.lib
+& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DSTIRLING_TEST_ALLOC_HOOK /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcStream" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" /link user32.lib shell32.lib ole32.lib advapi32.lib
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
 Write-Host "== run =="
@@ -56,3 +58,4 @@ Write-Host "== run =="
 $runExit = $LASTEXITCODE
 Write-Host "== exit code: $runExit =="
 exit $runExit
+

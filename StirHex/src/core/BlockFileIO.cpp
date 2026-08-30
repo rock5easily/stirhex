@@ -95,11 +95,15 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
 
     if (fileSize == 0) {
         // 空ファイル: 空の 16KB ブロック 1 個（原挙動）。
-        unsigned char* buf = new (std::nothrow) unsigned char[kBlockCapacity];
+        unsigned char* buf = AllocBlockData();
         if (buf == nullptr) {
             return MakeResult(FileIoStatus::kOutOfMemory, 0, 0);
         }
-        list.AppendBlock(buf, kBlockCapacity, 0);
+        // ノード確保に失敗すると所有権は移らない（Issue #153）。バッファを解放して報告する。
+        if (list.AppendBlock(buf, kBlockCapacity, 0) == nullptr) {
+            delete[] buf;
+            return MakeResult(FileIoStatus::kOutOfMemory, 0, 0);
+        }
         if (outKeepHandle != nullptr) { *outKeepHandle = h.Release(); }
         return MakeResult(FileIoStatus::kOk, 0, 0);
     }
@@ -136,13 +140,17 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
         while (left > 0) {
             const int n = (left < static_cast<DWORD>(kBlockCapacity))
                               ? static_cast<int>(left) : kBlockCapacity;
-            unsigned char* blk = new (std::nothrow) unsigned char[kBlockCapacity];
+            unsigned char* blk = AllocBlockData();
             if (blk == nullptr) {
                 list.Clear();
                 return MakeResult(FileIoStatus::kOutOfMemory, 0, fileSize);
             }
             std::memcpy(blk, p, static_cast<size_t>(n));   // 端数は usedLen で境界を持つ
-            list.AppendBlock(blk, kBlockCapacity, n);
+            if (list.AppendBlock(blk, kBlockCapacity, n) == nullptr) {
+                delete[] blk;   // 所有権は移っていない（Issue #153）
+                list.Clear();
+                return MakeResult(FileIoStatus::kOutOfMemory, 0, fileSize);
+            }
             p += n;
             left -= static_cast<DWORD>(n);
         }
@@ -155,11 +163,14 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
     // 1 個も積まれないことがある。ドキュメントは「常に 1 個以上のブロックを持つ」
     //（空なら空の 16KB ブロック 1 個）が不変条件のため、ここで補う。
     if (list.IsEmpty()) {
-        unsigned char* buf = new (std::nothrow) unsigned char[kBlockCapacity];
+        unsigned char* buf = AllocBlockData();
         if (buf == nullptr) {
             return MakeResult(FileIoStatus::kOutOfMemory, 0, fileSize);
         }
-        list.AppendBlock(buf, kBlockCapacity, 0);
+        if (list.AppendBlock(buf, kBlockCapacity, 0) == nullptr) {
+            delete[] buf;   // 所有権は移っていない（Issue #153）
+            return MakeResult(FileIoStatus::kOutOfMemory, 0, fileSize);
+        }
     }
     // 実際に読み込めたバイト数を返す（縮小されていた場合はサイズより少ない）。
     // 排他制御が有効なら、共有モードを保ったままハンドルを呼出側へ渡す（Issue #120）。

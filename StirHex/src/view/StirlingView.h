@@ -322,9 +322,22 @@ protected:
     void DrawCharColumnUtf8(CDC* pDC, stirling::FileOffset start, int rows, int bpr,
                             const std::vector<unsigned char>& buf, int x);
     // 範囲[startPos,endPos]（両端含む）を整形テキストダンプでファイルへ（原 FUN_0045d3e2）。
-    //   成功で true。開けなければ false（呼び元がメッセージ表示）。
+    //   Issue #155: 入力・出力とも一定行数ごとのチャンクで処理し、範囲全体や出力テキスト
+    //   全体をメモリへ載せない。失敗時はメッセージを表示し、出力先ファイルは変更しない。
     bool WriteDumpImage(const CString& path, stirling::FileOffset startPos,
                         stirling::FileOffset endPos);
+    // 範囲[lo,hi) の生バイトを固定サイズのチャンクでファイルへ書き出す（Issue #155）。
+    //   成功で true。失敗時はメッセージを表示し、出力先ファイルは変更しない。
+    bool WriteRangeToFile(const CString& path, stirling::FileOffset lo,
+                          stirling::FileOffset hi);
+    // 範囲保存の読み書きチャンク長（選択範囲の大きさに依存しない固定サイズ。Issue #155）。
+    static const size_t kSaveChunkBytes = 64u * 1024u;
+    // ダンプ保存で 1 回に処理する行数（Issue #155）。
+    static const int kDumpChunkRows = 256;
+    // 文字欄が行末で次行から先読み・消費し得るバイト数の上限（UTF-8 の 4 バイト文字）。
+    //   チャンクの末尾にこの分だけ余分に読み、範囲全体を 1 バッファに載せた場合と
+    //   1 バイトも差が出ないようにする。
+    static const int kCharLookahead = 3;
 
     // --- 印刷の内部状態／補助（原 view+0x338=印刷範囲, view+0x44=印刷フォント） ---
     CFont m_printFont;              // 印刷用フォント（ＭＳ明朝 h100 SHIFTJIS。OnBeginPrinting で生成）
