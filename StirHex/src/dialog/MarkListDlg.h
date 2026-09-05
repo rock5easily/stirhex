@@ -11,7 +11,7 @@
 class CStirlingView;
 
 // マーク一覧リストボックス（原 dlg+0x5c のオーナードロー CListBox）。
-//   各行: [種別番号スウォッチ(マーク色)] 8桁16進アドレス。ItemData=種別(0/1/2)。
+//   各行: [種別番号スウォッチ(マーク色)] 最低8桁の16進アドレス。ItemData=種別(0/1/2)。
 //   末尾「新規登録」行は ItemData=-1（スウォッチ無し）。
 class CMarkListBox : public CListBox {
 public:

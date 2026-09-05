@@ -407,6 +407,27 @@ def settings_value(root_key_path: str, name: str, value: Any,
             _write_reg_values(root_key_path, {name: previous})
 
 
+@contextmanager
+def deleted_settings_values(root_key_path: str, names: list[str]):
+    """Temporarily remove values from a settings root, restoring them afterwards.
+
+    The counterpart of settings_value() for "this key must not be present": use it to
+    exercise the code path an absent key takes, without wiping the whole section the way
+    registry_section() does.
+    """
+    previous = {n: v for n, v in _read_reg_values(root_key_path).items() if n in names}
+    _delete_reg_values(root_key_path, list(previous.keys()))
+    try:
+        yield
+    finally:
+        current = _read_reg_values(root_key_path)
+        leftover = [n for n in names if n in current]
+        if leftover:
+            _delete_reg_values(root_key_path, leftover)
+        if previous:
+            _write_reg_values(root_key_path, previous)
+
+
 # Caret auto-restore store of StirHex (Issue #22).
 #   the [CaretPositions] section of the settings file
 #     Count  number of entries (max 16)

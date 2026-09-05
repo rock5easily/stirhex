@@ -110,11 +110,12 @@ protected:
 
     // --- フォント/メトリクス（原 view+0xa8/0xac 相当） ---
     CFont m_font;
-    // UTF-8 文字欄用フォント（DEFAULT_CHARSET。GDI のフォントリンクで CP932 外の
+    // ワイド描画の文字欄用フォント（DEFAULT_CHARSET。GDI のフォントリンクで CP932 外の
     //   グリフを補わせる。桁幅・行高は m_font のものを使うのでレイアウトは変わらない）。
-    CFont m_fontUtf8;
+    //   UTF-8（charset 6。Issue #98）と Unicode（charset 3。Issue #173）で共用する。
+    CFont m_fontUnicode;
     // コードポイント → 表示セル数（0=未測定 / 1 / 2）。フォント変更時に破棄する。
-    std::vector<unsigned char> m_utf8CellWidth;
+    std::vector<unsigned char> m_unicodeCellWidth;
     int   m_charW;       // 文字幅(px)
     int   m_rowH;        // 行高(px)
 
@@ -304,22 +305,30 @@ protected:
                                const unsigned char* ebc, bool& eof) const;
     // 行頭 abs が多バイト文字の途中（＝先頭に空白を出す繰越し）か判定（行跨ぎDBCS用）。
     int  InitialCarry(int charset, stirling::FileOffset startAbs, stirling::FileOffset total);
-    // --- UTF-8 文字欄（charset 6。移植で追加。Issue #98） ---
+    // --- ワイド描画の文字欄（UTF-8=charset 6 / Unicode=charset 3。移植で追加） ---
     //   CP932 に無い文字も表示するためワイド描画にする。不変条件は他と同じで
     //   1 ソースバイト = 1 表示セル。多バイト文字はバイト数ぶんのセルを占め、
     //   グリフが使い切らなかったセルは空白で埋める。
     //   out へ描画するワイド文字列、dx へその各文字の送り幅を積む（ExtTextOutW 用）。
     //   cellsOut は消費した表示セル数（out の文字数とは一致しない）。
-    void BuildCharCellsUtf8(const std::vector<unsigned char>& buf, int& gi, int cols,
-                            int& carryCells, HDC hdc, int charW,
+    //   charset 6 は Issue #98、charset 3 は Issue #173。
+    static bool IsWideCharset(int charset) { return charset == 3 || charset == 6; }
+    void BuildCharCellsWide(const std::vector<unsigned char>& buf, int& gi, int cols,
+                            int charset, bool beBig, int& carryCells, HDC hdc, int charW,
                             std::vector<unsigned char>* cache,
                             std::wstring& out, std::vector<INT>& dx,
                             int& cellsOut, bool& eof) const;
-    // 窓の先頭 startAbs が UTF-8 の多バイト文字の途中なら、読み飛ばすバイト数（0..3）。
+    // 窓の先頭 startAbs が多バイト文字の途中なら、読み飛ばすバイト数
+    //   （UTF-8 は 0..3 / Unicode は 0..3＝奇数整列 1 ＋ サロゲートペア 2）。
     //   そのバイトは窓の中にあるので、同じ数だけ行頭に空白セルを置く。
-    int  InitialCarryUtf8(stirling::FileOffset startAbs);
-    // UTF-8 文字欄の描画（DEFAULT_CHARSET フォントでワイド描画）。
-    void DrawCharColumnUtf8(CDC* pDC, stirling::FileOffset start, int rows, int bpr,
+    int  InitialCarryWide(int charset, stirling::FileOffset startAbs);
+    // 窓の末尾で文字が途切れないよう余分に読むバイト数。ダンプ保存が使う
+    //   kCharLookahead と同じ値にして、画面・印刷・ダンプで先読み量が食い違わない
+    //   ようにする（値の意味は kCharLookahead の宣言を参照）。
+    static int WideReadAhead(int /*charset*/) { return kCharLookahead; }
+    // ワイド文字欄の描画（DEFAULT_CHARSET フォントで ExtTextOutW）。
+    void DrawCharColumnWide(CDC* pDC, stirling::FileOffset start, int rows, int bpr,
+                            int charset, bool beBig,
                             const std::vector<unsigned char>& buf, int x);
     // 範囲[startPos,endPos]（両端含む）を整形テキストダンプでファイルへ（原 FUN_0045d3e2）。
     //   Issue #155: 入力・出力とも一定行数ごとのチャンクで処理し、範囲全体や出力テキスト
@@ -334,14 +343,18 @@ protected:
     static const size_t kSaveChunkBytes = 64u * 1024u;
     // ダンプ保存で 1 回に処理する行数（Issue #155）。
     static const int kDumpChunkRows = 256;
-    // 文字欄が行末で次行から先読み・消費し得るバイト数の上限（UTF-8 の 4 バイト文字）。
-    //   チャンクの末尾にこの分だけ余分に読み、範囲全体を 1 バッファに載せた場合と
+    // 文字欄が行末で次行から先読み・消費し得るバイト数の上限。1 文字の最大長は
+    //   UTF-8 が 4 バイト、Unicode（サロゲートペア）も 4 バイトなので、3 バイトあれば
+    //   最後の 1 文字を必ず読み切れる。Unicode で 2 バイトでは足りないのは、1 行
+    //   バイト数（2..256。奇数も設定できる）が奇数だと窓の末尾がコード単位の途中に
+    //   なり、ペアの相方まで 3 バイト必要になる場合があるため（Issue #173）。
+    //   チャンク／窓の末尾にこの分だけ余分に読み、範囲全体を 1 バッファに載せた場合と
     //   1 バイトも差が出ないようにする。
     static const int kCharLookahead = 3;
 
     // --- 印刷の内部状態／補助（原 view+0x338=印刷範囲, view+0x44=印刷フォント） ---
     CFont m_printFont;              // 印刷用フォント（ＭＳ明朝 h100 SHIFTJIS。OnBeginPrinting で生成）
-    CFont m_printFontUtf8;          // 印刷用 UTF-8 フォント（同寸法・DEFAULT_CHARSET）
+    CFont m_printFontUnicode;       // 印刷用ワイド描画フォント（同寸法・DEFAULT_CHARSET）
     // 全画面プレビュー中、ビューを一時的にメインフレームへ付け替える際の復帰用子フレーム。
     CFrameWnd* m_pPreviewChildFrame = nullptr;
     bool  m_printRangeActive = false;  // 印刷範囲を指定中か（原 view+0x338 != 0）
@@ -481,7 +494,7 @@ protected:
     afx_msg void OnDeleteSelection();                   // 選択範囲の削除（0x802a）
     afx_msg void OnFillSelection();                     // 選択範囲の初期化（0x802b, IDD 165）
     afx_msg void OnSaveSelection();                     // 選択範囲を生バイナリで保存（0x802c）
-    afx_msg void OnUpdateSelectionCmd(CCmdUI* pCmdUI);  // 選択あり時のみ活性（削除/初期化/保存 共通）
+    afx_msg void OnUpdateSelectionCmd(CCmdUI* pCmdUI);  // 選択あり時のみ活性（選択範囲の保存用）
     afx_msg void OnSaveDump();                          // ダンプイメージの保存（0x8060, IDD 198）
     afx_msg void OnPrintRange();                        // 範囲を指定して印刷（0x8064, IDD 201）
     afx_msg void OnSelectRange();                       // 範囲を指定して選択（0x8065, IDD 202）
@@ -497,13 +510,13 @@ protected:
     afx_msg void OnUpdateRevertFile(CCmdUI* pCmdUI);    // CanEdit && 変更あり && パスあり
     afx_msg void OnUpdateEditSelectionCmd(CCmdUI* pCmdUI);  // 削除/初期化: CanEdit && 選択あり
     // ステータスバー各ペインの更新（原 FUN_00424xxx 相当。アイドル時に呼ばれる）
-    afx_msg void OnUpdateIndicatorAddress(CCmdUI* pCmdUI);   // 0x%08X キャレット位置16進
+    afx_msg void OnUpdateIndicatorAddress(CCmdUI* pCmdUI);   // キャレット位置16進（最低8桁、必要時拡張）
     afx_msg void OnUpdateIndicatorAddrDec(CCmdUI* pCmdUI);   // キャレット位置10進
     afx_msg void OnUpdateIndicatorModified(CCmdUI* pCmdUI);  // 「更新」変更あり時
     afx_msg void OnUpdateIndicatorEditLock(CCmdUI* pCmdUI);  // 「編禁」編集禁止時
     afx_msg void OnUpdateIndicatorMode(CCmdUI* pCmdUI);      // 「上書」/「挿入」
-    afx_msg void OnUpdateIndicatorSize(CCmdUI* pCmdUI);      // 「%d Bytes」総サイズ10進
-    afx_msg void OnUpdateIndicatorSizeHex(CCmdUI* pCmdUI);   // 「0x%08X Bytes」総サイズ16進
+    afx_msg void OnUpdateIndicatorSize(CCmdUI* pCmdUI);      // 総サイズ10進（64bit）
+    afx_msg void OnUpdateIndicatorSizeHex(CCmdUI* pCmdUI);   // 総サイズ16進（最低8桁、必要時拡張）
     afx_msg void OnUpdateIndicatorCharset(CCmdUI* pCmdUI);   // 文字セット名
     afx_msg void OnUpdateIndicatorByteOrder(CCmdUI* pCmdUI); // 「Little/Big Endian」
     afx_msg void OnUpdateIndicatorByteDec(CCmdUI* pCmdUI);   // 「B : %d」BYTE値10進

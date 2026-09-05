@@ -156,7 +156,7 @@ bool ForwardToExistingInstance(const CStirlingCommandLineInfo& cmdInfo) {
 CString RecSection(int i) { CString s; s.Format(_T("Rec%d"), i); return s; }
 }
 
-// 拡張子レコードをレジストリから読み込む（無ければ既定 "*.*" 1件のまま）。
+// 拡張子レコードを設定ストアから読み込む（無ければ既定 "*.*" 1件のまま）。
 void CStirlingApp::LoadSettings() {
     const int count = GetProfileInt(_T("Extensions"), _T("Count"), 0);
     if (count <= 0) {
@@ -181,7 +181,7 @@ void CStirlingApp::LoadSettings() {
     }
 }
 
-// 拡張子レコードをレジストリへ保存する。
+// 拡張子レコードを設定ストアへ保存する。
 void CStirlingApp::SaveSettings() {
     const int count = (int)m_extRecords.size();
     WriteProfileInt(_T("Extensions"), _T("Count"), count);
@@ -446,7 +446,8 @@ BOOL CStirlingApp::InitInstance() {
     }
 
     // ファイル履歴（MRU）を有効化。数は環境設定 fileHistoryCount（原 +0xaac, 範囲外→5）。
-    //   LoadStdProfileSettings が m_pRecentFileList を生成しレジストリから履歴を読み込む。
+    //   LoadStdProfileSettings が m_pRecentFileList を生成し、差し替え済み Profile API 経由で
+    //   設定ストアから履歴を読み込む。初回起動時は旧レジストリから取り込んだ値も含む。
     {
         int mru = m_appSettings.fileHistoryCount;
         if (mru < 2 || mru > 16) { mru = 5; }   // 原 FUN_0041f2a5 のクランプに合わせる
@@ -594,7 +595,7 @@ void CStirlingApp::ApplyFileHistoryCount() {
         }
     }
     delete m_pRecentFileList;
-    // MFC 既定のレジストリ節・値名（_afxFileSection / _afxFileEntry）に合わせる。
+    // MFC 既定のプロファイル節・値名（_afxFileSection / _afxFileEntry）に合わせる。
     m_pRecentFileList = new CRecentFileList(0, _T("Recent File List"), _T("File%d"), n);
     // 退避分を末尾側から Add（Add は先頭挿入のため逆順で元の並びを復元）。上限超過分は自然に脱落。
     for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
@@ -604,7 +605,7 @@ void CStirlingApp::ApplyFileHistoryCount() {
 
 // --- キャレット位置の自動復元ストア（原 caretAutoRestore。近代レイアウト: セクション
 //     "CaretPositions" に Count / Path%d(SJIS) / Addr%d を最大16件保持） ---
-//   Addr%d は 64bit アドレスの16進文字列（REG_SZ。形式は app/SettingsCodec.h の共通規約）。
+//   Addr%d は設定ストアに保存する64bitアドレスの16進文字列（app/SettingsCodec.h の共通規約）。
 //   Pos%d は 32bit 版が使っていた旧形式（REG_DWORD）で、読み込み時の移行専用。
 
 void CStirlingApp::LoadCaretStore() {

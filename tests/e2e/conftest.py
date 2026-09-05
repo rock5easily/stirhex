@@ -11,6 +11,7 @@ from drivers.process_guard import (
     stop_command,
     terminate_processes,
 )
+from drivers.settings_context import settings_value
 from drivers.stirling_driver import StirlingDriver
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -83,6 +84,21 @@ def _processes_since(baseline: set[tuple[int, int]],
         if not extra or time.time() >= deadline:
             return extra
         time.sleep(0.2)
+
+
+# The port restores the bit image window's visibility and placement on start (Issue #121).
+# The suite shares %APPDATA%\StirHex\StirHex.ini with whatever else drives StirHex on this
+# machine, so a session that was left with the pane open would otherwise start every test
+# with a floating window on screen - covering dialogs the tests click. Pin it hidden and
+# restore the previous value afterwards; a test that needs it shown sets its own value,
+# which is written later and therefore wins.
+PORT_ENV_ROOT = r"Software\StirHex\StirHex\Env"
+
+
+@pytest.fixture(autouse=True)
+def hidden_bit_image_by_default():
+    with settings_value(PORT_ENV_ROOT, "BitImageShow", 0):
+        yield
 
 
 @pytest.fixture(autouse=True)

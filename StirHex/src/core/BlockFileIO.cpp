@@ -5,6 +5,7 @@
 // 置き換えた。ブロック分割の手順（1.6MB チャンク読み→16KB ブロック列）は原と同一。
 #include "BlockFileIO.h"
 
+#include "StreamFileWriter.h"   // 保存は temp→置換で行う（Issue #170）
 #include "util/ScopedHandle.h"
 
 #include <windows.h>
@@ -179,39 +180,22 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
 }
 
 FileIoResult SaveBlocksToFile(const BlockList& list, const wchar_t* path) {
-    if (path == nullptr || *path == L'\0') {
-        return MakeResult(FileIoStatus::kOpenFailed, ERROR_INVALID_NAME, 0);
-    }
-    ScopedHandle h(::CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!h.Valid()) {
-        return MakeResult(FileIoStatus::kOpenFailed, ::GetLastError(), 0);
-    }
+    // 原 CMirrorFile と同じ temp→置換の安全保存（Issue #170）。以前は出力先を
+    // CREATE_ALWAYS で直接開いていたため、書込・フラッシュに失敗すると出力先が中途状態で
+    // 残った。StreamFileWriter を介すことで、Commit に到達しない限り出力先は変わらない。
+    StreamFileWriter writer;
+    const FileIoResult opened = writer.Open(path);
+    if (!opened.Ok()) { return opened; }
 
-    FileOffset written = 0;   // 総書込量は 2GB を超え得るため FileOffset
     for (BlockNode* n = list.GetHead(); n != nullptr; n = list.GetNext(n)) {
-        const unsigned char* p = n->data;
-        int left = n->usedLen;
-        while (left > 0) {
-            DWORD wrote = 0;
-            if (!::WriteFile(h.Get(), p, static_cast<DWORD>(left), &wrote, nullptr)) {
-                return MakeResult(FileIoStatus::kWriteFailed, ::GetLastError(), written);
-            }
-            if (wrote == 0) {   // ディスク不足等で進まない
-                return MakeResult(FileIoStatus::kWriteFailed, ERROR_WRITE_FAULT, written);
-            }
-            p += wrote;
-            left -= static_cast<int>(wrote);
-            written += wrote;
+        if (n->usedLen <= 0) { continue; }
+        const FileIoResult wrote = writer.Write(n->data, static_cast<size_t>(n->usedLen));
+        if (!wrote.Ok()) {
+            writer.Abort();   // 一時ファイルを破棄（出力先は元のまま）
+            return wrote;
         }
     }
-
-    // 原は CMirrorFile::Close(temp→置換)。ここでは通常 close だが、
-    // 遅延書込エラーを取りこぼさないよう戻り値を確認する。
-    if (!h.Close()) {
-        return MakeResult(FileIoStatus::kWriteFailed, ::GetLastError(), written);
-    }
-    return MakeResult(FileIoStatus::kOk, 0, written);
+    return writer.Commit();   // 明示フラッシュ → 置換
 }
 
 FileOffset RecalcTotalLength(const BlockList& list) {

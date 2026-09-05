@@ -1,5 +1,5 @@
-// CStirlingSettings のレジストリ永続化。近代レイアウト（原の値名/バイナリ構造は再現しない）。
-//   CWinApp の Profile API（SetRegistryKey 済なら HKCU\Software\<key>\<app>\<section>）を使用。
+// CStirlingSettings の設定ストア永続化。近代レイアウト（原の値名/バイナリ構造は再現しない）。
+//   CWinApp の Profile API を介し、CStirlingApp の SettingsStore へ読み書きする。
 #include "pch.h"
 #include "app/StirlingSettings.h"
 

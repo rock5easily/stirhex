@@ -173,6 +173,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\core\Utf8Text.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\core\Utf16Text.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="src\frame\StructBar.cpp" />
     <ClCompile Include="src\frame\OutputBar.cpp" />
     <ClCompile Include="src\frame\BitImageBar.cpp" />
@@ -236,6 +239,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\core\Cp932Text.h" />
     <ClInclude Include="src\core\HexText.h" />
     <ClInclude Include="src\core\Utf8Text.h" />
+    <ClInclude Include="src\core\Utf16Text.h" />
     <ClInclude Include="src\core\UndoBudget.h" />
     <ClInclude Include="src\frame\StructBar.h" />
     <ClInclude Include="src\frame\OutputBar.h" />

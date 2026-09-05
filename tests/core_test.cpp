@@ -18,6 +18,7 @@
 #include "../StirHex/src/core/UndoBudget.h"
 #include "../StirHex/src/core/HexText.h"
 #include "../StirHex/src/core/Utf8Text.h"
+#include "../StirHex/src/core/Utf16Text.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1508,6 +1509,33 @@ static void TestFileIoStatus() {
         CheckEqual(list, data, "load content");
         fs::remove(p);
     }
+
+    // 明示フラッシュ（Issue #166）を挟んだ後の保存正常系の回帰。既存の大きいファイルへ
+    //   小さい内容を保存し、報告サイズ・実サイズ・内容が一致することを見る。
+    //   フラッシュ呼出の有無そのものは検証できない（ローカル FS ではキャッシュ経由でも
+    //   直後の読み出しは一致するため）。失敗パスの検証には障害注入が必要で、そのための
+    //   I/O モック層は過剰なため入れていない。
+    {
+        const fs::path out = TempFile("flush_save");
+        WriteFile(out, std::vector<unsigned char>(70000, 0xEE));
+
+        BlockList list;
+        NewEmptyDoc(list);
+        const std::string body = "flushed-and-truncated";
+        {
+            BlockCursor c(&list);
+            CHECK(c.Insert(0, body.data(), static_cast<FileOffset>(body.size())),
+                  "seed for the flush check");
+        }
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "save reports success after the explicit flush");
+        CHECK(r.fileSize == static_cast<FileOffset>(body.size()), "save reports the written size");
+        CHECK(fs::file_size(out) == body.size(), "the file on disk matches the reported size");
+        const std::vector<unsigned char> saved = ReadFileBytes(out);
+        CHECK(saved == std::vector<unsigned char>(body.begin(), body.end()),
+              "the flushed content replaces the larger original");
+        fs::remove(out);
+    }
 }
 
 // 2GB 超の実ファイルを開き、編集して保存し、内容が一致することを確認する（オプトイン）。
@@ -2592,15 +2620,16 @@ static void TestFormatStructCharArrayW() {
     using stirling::FormatStructCharArrayW;
     using stirling::WideFromCp932;
 
-    // --- 0..5 は CP932 版をワイド化したものと同じ（非退行の担保） ---
+    // --- 0..2 / 4..5 は CP932 版をワイド化したものと同じ（非退行の担保） ---
+    //   charset 3 は Issue #173 でワイド直接構築へ移行したため、CP932 で表せる範囲だけ
+    //   従来と一致する（表せない文字は下の charset 3 の節で個別に確かめる）。
     struct Sample { int charset; std::vector<unsigned char> bytes; const char* what; };
     const Sample samples[] = {
         { 0, { 'A', 0x00, 'B', 0x7f, 'C' },        "ASCII" },
         { 1, { 0x82, 0xa0, 'A' },                  "SJIS" },
         { 2, { 0xa4, 0xa2 },                       "EUC main plane" },
         { 2, { 0x8e, 0xb1 },                       "EUC single shift" },
-        { 3, { 0x42, 0x30, 'A', 0x00 },            "UTF-16LE" },
-        { 3, { 0xac, 0x20 },                       "UTF-16LE unmappable" },
+        { 3, { 0x42, 0x30, 'A', 0x00 },            "UTF-16LE within CP932" },
         { 4, { 0xc1, 0xc2, 0x40 },                 "EBCDIC" },
         { 5, { 0xc1, 0xc2, 0x40 },                 "EBCIDK" },
     };
@@ -2609,6 +2638,39 @@ static void TestFormatStructCharArrayW() {
         const std::string mb = FormatStructCharArrayCp932(sm.charset, sm.bytes.data(), n);
         const std::wstring expect = WideFromCp932(mb.c_str(), static_cast<int>(mb.size()));
         CHECK(FormatStructCharArrayW(sm.charset, sm.bytes.data(), n) == expect, sm.what);
+    }
+
+    // --- charset 3 (Unicode / UTF-16LE。Issue #173) ---
+    {   // CP932 に無い文字がそのまま残る（この Issue の主眼）
+        const unsigned char hangul[] = { 0x5c, 0xd5 };            // U+D55C "한"
+        CHECK(FormatStructCharArrayW(3, hangul, 2) == std::wstring(L"한"),
+              "UTF-16 keeps characters outside CP932");
+        // 参考: CP932 経由だと '.' に潰れていた
+        const std::string mb = FormatStructCharArrayCp932(3, hangul, 2);
+        CHECK(WideFromCp932(mb.c_str(), (int)mb.size()) != std::wstring(L"한"),
+              "the CP932 route cannot represent it");
+    }
+    {   // ユーロ記号（従来の「変換不可」サンプル）も表示できる
+        const unsigned char euro[] = { 0xac, 0x20 };              // U+20AC
+        CHECK(FormatStructCharArrayW(3, euro, 2) == std::wstring(L"€"),
+              "UTF-16 keeps the euro sign");
+    }
+    {   // サロゲートペアは 1 文字（2 コード単位）として復号される
+        const unsigned char emoji[] = { 0x3d, 0xd8, 0x00, 0xde }; // U+1F600
+        const std::wstring w = FormatStructCharArrayW(3, emoji, 4);
+        CHECK(w.size() == 2, "surrogate pair stays a pair");
+        CHECK(w[0] == 0xD83D && w[1] == 0xDE00, "surrogate pair values");
+    }
+    {   // ペアになっていないサロゲートと端数バイトは '.'
+        const unsigned char lone[] = { 0x3d, 0xd8, 'A', 0x00 };   // 上位サロゲート + "A"
+        CHECK(FormatStructCharArrayW(3, lone, 4) == std::wstring(L".A"),
+              "unpaired high surrogate becomes a dot");
+        const unsigned char lowOnly[] = { 0x00, 0xde };           // 下位サロゲート単独
+        CHECK(FormatStructCharArrayW(3, lowOnly, 2) == std::wstring(L"."),
+              "unpaired low surrogate becomes a dot");
+        const unsigned char odd[] = { 0x41, 0x00, 0x42 };         // 末尾に端数 1 バイト
+        CHECK(FormatStructCharArrayW(3, odd, 3) == std::wstring(L"A."),
+              "odd trailing byte becomes a dot");
     }
 
     // --- charset 6 (UTF-8) ---
@@ -2814,6 +2876,107 @@ static void TestHexTextParse() {
         CHECK(ParseHexText(text, out).Ok(), "long token parses");
         CHECK(out.size() == 4096, "long token yields every byte");
         CHECK(out.front() == 0x7F && out.back() == 0x7F, "long token values are correct");
+    }
+}
+
+// UTF-16 の復号・符号化と持ち越し判定（Issue #173。キャラクターセット Unicode で
+//   CP932 外の文字を表示するための土台）。文字欄の不変条件（1 ソースバイト = 1 表示
+//   セル）を保つため、サロゲートペアと不正な単独サロゲートの扱いを重点的に確認する。
+static void TestUtf16Text() {
+    std::printf("[TestUtf16Text]\n");
+    using stirling::DecodeUtf16;
+    using stirling::EncodeUtf16;
+    using stirling::Utf16CarryBytesAt;
+    using stirling::Utf16FromWide;
+
+    // --- BMP の 1 コード単位 ---
+    {
+        const unsigned char le[] = { 0x42, 0x30 };   // U+3042 "あ"（リトルエンディアン）
+        const stirling::Utf16Decoded d = DecodeUtf16(le, 2, false);
+        CHECK(d.ok && d.codePoint == 0x3042 && d.length == 2, "decodes little endian BMP");
+        const unsigned char be[] = { 0x30, 0x42 };   // ビッグエンディアン
+        const stirling::Utf16Decoded b = DecodeUtf16(be, 2, true);
+        CHECK(b.ok && b.codePoint == 0x3042 && b.length == 2, "decodes big endian BMP");
+    }
+    {   // CP932 に無い文字も素通しする（この Issue の主眼）
+        const unsigned char hangul[] = { 0x5c, 0xd5 };   // U+D55C
+        const stirling::Utf16Decoded d = DecodeUtf16(hangul, 2, false);
+        CHECK(d.ok && d.codePoint == 0xD55C, "decodes a character outside CP932");
+    }
+
+    // --- サロゲートペア ---
+    {
+        const unsigned char le[] = { 0x3d, 0xd8, 0x00, 0xde };   // U+1F600
+        const stirling::Utf16Decoded d = DecodeUtf16(le, 4, false);
+        CHECK(d.ok && d.codePoint == 0x1F600 && d.length == 4, "decodes a surrogate pair");
+        const unsigned char be[] = { 0xd8, 0x3d, 0xde, 0x00 };
+        const stirling::Utf16Decoded b = DecodeUtf16(be, 4, true);
+        CHECK(b.ok && b.codePoint == 0x1F600 && b.length == 4, "decodes a big endian pair");
+    }
+    {   // 相方が無い上位サロゲートは不正（2 バイト消費）
+        const unsigned char lone[] = { 0x3d, 0xd8, 0x41, 0x00 };
+        const stirling::Utf16Decoded d = DecodeUtf16(lone, 4, false);
+        CHECK(!d.ok && d.length == 2, "unpaired high surrogate is invalid");
+    }
+    {   // 下位サロゲート単独も不正
+        const unsigned char low[] = { 0x00, 0xde };
+        const stirling::Utf16Decoded d = DecodeUtf16(low, 2, false);
+        CHECK(!d.ok && d.length == 2, "unpaired low surrogate is invalid");
+    }
+    {   // 上位サロゲートの直後でバッファが尽きたら truncated
+        const unsigned char cut[] = { 0x3d, 0xd8 };
+        const stirling::Utf16Decoded d = DecodeUtf16(cut, 2, false);
+        CHECK(!d.ok && d.truncated && d.length == 2, "high surrogate at buffer end is truncated");
+    }
+    {   // 端数 1 バイトは 1 セルの不正
+        const unsigned char odd[] = { 0x41 };
+        const stirling::Utf16Decoded d = DecodeUtf16(odd, 1, false);
+        CHECK(!d.ok && d.length == 1, "a single trailing byte is invalid");
+        CHECK(!DecodeUtf16(nullptr, 0, false).ok, "nullptr is invalid");
+    }
+
+    // --- 符号化 ---
+    {
+        std::vector<unsigned char> out;
+        CHECK(EncodeUtf16(0x3042, false, out) && out.size() == 2 &&
+              out[0] == 0x42 && out[1] == 0x30, "encodes BMP little endian");
+        out.clear();
+        CHECK(EncodeUtf16(0x3042, true, out) && out[0] == 0x30 && out[1] == 0x42,
+              "encodes BMP big endian");
+        out.clear();
+        CHECK(EncodeUtf16(0x1F600, false, out) && out.size() == 4 &&
+              out[0] == 0x3d && out[1] == 0xd8 && out[2] == 0x00 && out[3] == 0xde,
+              "encodes a surrogate pair");
+        out.clear();
+        CHECK(!EncodeUtf16(0xD800, false, out) && out.empty(), "refuses a lone surrogate");
+        CHECK(!EncodeUtf16(0x110000, false, out), "refuses beyond U+10FFFF");
+    }
+
+    // --- ワイド文字列からの変換 ---
+    {
+        const wchar_t w[] = L"Aあ";
+        const std::vector<unsigned char> b = Utf16FromWide(w, 2, false);
+        CHECK(b.size() == 4 && b[0] == 'A' && b[1] == 0x00 && b[2] == 0x42 && b[3] == 0x30,
+              "converts wide to little endian bytes");
+        const wchar_t pair[] = { 0xD83D, 0xDE00, 0 };
+        CHECK(Utf16FromWide(pair, 2, false).size() == 4, "keeps a surrogate pair");
+        const wchar_t broken[] = { 0xD83D, L'A', 0 };
+        const std::vector<unsigned char> bb = Utf16FromWide(broken, 2, false);
+        CHECK(bb.size() == 2 && bb[0] == 'A', "drops an unpaired surrogate");
+    }
+
+    // --- 窓の先頭がサロゲートペアの途中か ---
+    {
+        // 手前 2 バイトが上位サロゲート、先頭 2 バイトが下位サロゲート → 2 バイト読み飛ばす
+        const unsigned char win[] = { 0x3d, 0xd8, 0x00, 0xde };
+        CHECK(Utf16CarryBytesAt(win, 4, 2, false) == 2, "carries over a split surrogate pair");
+        // 手前が普通の文字なら持ち越さない
+        const unsigned char plain[] = { 0x41, 0x00, 0x00, 0xde };
+        CHECK(Utf16CarryBytesAt(plain, 4, 2, false) == 0, "no carry when the pair is broken");
+        // 先頭が下位サロゲートでなければ持ち越さない
+        const unsigned char normal[] = { 0x3d, 0xd8, 0x42, 0x30 };
+        CHECK(Utf16CarryBytesAt(normal, 4, 2, false) == 0, "no carry for a normal unit");
+        CHECK(Utf16CarryBytesAt(win, 4, 0, false) == 0, "no carry at the very start");
     }
 }
 
@@ -3757,6 +3920,253 @@ static void TestStreamFileWriter() {
         CHECK(!w.Open(L"").Ok(), "empty path fails");
         CHECK(!w.Open(nullptr).Ok(), "null path fails");
     }
+
+    // 8) 明示フラッシュ（Issue #166）を挟んだ後の Commit 正常系の回帰。成功を返した直後に
+    //    報告サイズ・実サイズ・内容が一致し、一時ファイルも残らないことを確認する。
+    //    フラッシュ呼出の有無・失敗パスは障害注入なしでは検証できない（上の flush_save 参照）。
+    {
+        const fs::path out = TempFile("sfw_flush");
+        const std::vector<unsigned char> orig(30000, 0xAB);
+        WriteFile(out, orig);
+        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
+                                            fs::directory_iterator());
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the flush check");
+        const std::string body = "committed-after-flush";
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write before commit");
+        const stirling::FileIoResult r = w.Commit();
+        CHECK(r.Ok(), "commit reports success after the explicit flush");
+        CHECK(r.fileSize == static_cast<FileOffset>(body.size()), "commit reports the written size");
+        CHECK(fs::file_size(out) == body.size(), "the file on disk matches the reported size");
+        CHECK(ReadFileBytes(out) == std::vector<unsigned char>(body.begin(), body.end()),
+              "the flushed content replaces the original");
+        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
+                                           fs::directory_iterator());
+        CHECK(after == before, "committing leaves no temporary file behind");
+        fs::remove(out);
+    }
+}
+
+// ---- 安全保存: temp→置換（Issue #170） ----
+// SaveBlocksToFile は出力先を直接切り詰めて書いていたため、書込・フラッシュに失敗すると
+// 出力先が中途状態で残った。StreamFileWriter 経由（原 CMirrorFile と同じ temp→置換）に
+// なったことで、成功しない限り出力先が変わらないこと、および ReplaceFileW によって
+// 出力先の同一性（ファイル ID・代替データストリーム）が保たれることを確認する。
+static void TestAtomicSave() {
+    std::printf("TestAtomicSave\n");
+    using stirling::BlockList;
+    using stirling::BlockCursor;
+    using stirling::FileIoResult;
+    using stirling::FileIoStatus;
+
+    // 保存対象のブロック列を用意する（内容は body）。
+    const std::string body = "atomic-save-body";
+    auto seedList = [&body](BlockList& list) {
+        NewEmptyDoc(list);
+        BlockCursor c(&list);
+        CHECK(c.Insert(0, body.data(), static_cast<FileOffset>(body.size())), "seed for atomic save");
+    };
+
+    // 一時ファイルの取り残しを数える検証は、%TEMP% 直下ではなく専用ディレクトリで行う
+    //   （他プロセスが %TEMP% へファイルを作ると件数比較が揺れるため）。
+    auto makeCaseDir = [](const char* tag) {
+        const fs::path dir = TempFile(tag);
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        CHECK(fs::is_directory(dir), "create a private directory for the case");
+        return dir;
+    };
+    auto entryCount = [](const fs::path& dir) {
+        return static_cast<size_t>(std::distance(fs::directory_iterator(dir),
+                                                 fs::directory_iterator()));
+    };
+
+    // 1) 既存ファイルへの保存は、作成日時と代替データストリームを保つ（ReplaceFileW）。
+    //    MoveFileExW で置き換えると、どちらも一時ファイル側の状態になってしまう。
+    {
+        const fs::path out = TempFile("atomic_ads");
+        WriteFile(out, std::vector<unsigned char>(4096, 0x31));
+
+        // 代替データストリーム（NTFS のみ）。付随情報を持つファイルの保存で失われないこと。
+        //   ストリームを持てないファイルシステム（FAT32・ネットワーク）では検証を飛ばす。
+        const std::wstring adsPath = out.wstring() + L":stirhex_meta";
+        bool adsReady = false;
+        {
+            HANDLE ads = ::CreateFileW(adsPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (ads != INVALID_HANDLE_VALUE) {
+                DWORD wrote = 0;
+                adsReady = (::WriteFile(ads, "meta", 4, &wrote, nullptr) != FALSE) && (wrote == 4);
+                ::CloseHandle(ads);
+            } else {
+                std::printf("  (alternate data streams unsupported here; skipping that check)\n");
+            }
+        }
+        // 置換前の作成日時（ReplaceFileW は置換先の作成日時を引き継ぐ。MoveFileExW は
+        //   一時ファイルの作成日時になるため、ここが元の値のままなら置換方式を確認できる）。
+        auto creationTimeOf = [](const fs::path& p) -> unsigned long long {
+            HANDLE h = ::CreateFileW(p.wstring().c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) { return 0; }
+            FILETIME created = {};
+            const BOOL ok = ::GetFileTime(h, &created, nullptr, nullptr);
+            ::CloseHandle(h);
+            if (ok == FALSE) { return 0; }
+            return (static_cast<unsigned long long>(created.dwHighDateTime) << 32) |
+                   created.dwLowDateTime;
+        };
+        const unsigned long long createdBefore = creationTimeOf(out);
+        CHECK(createdBefore != 0, "the creation time is available before saving");
+
+        BlockList list;
+        seedList(list);
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "atomic save succeeds over an existing file");
+        CHECK(ReadFileBytes(out) == std::vector<unsigned char>(body.begin(), body.end()),
+              "the saved content replaces the original");
+        CHECK(creationTimeOf(out) == createdBefore,
+              "the target keeps its creation time (ReplaceFileW)");
+        if (adsReady) {
+            HANDLE ads = ::CreateFileW(adsPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            CHECK(ads != INVALID_HANDLE_VALUE, "the alternate data stream survives the save");
+            if (ads != INVALID_HANDLE_VALUE) {
+                char buf[8] = {0};
+                DWORD got = 0;
+                const BOOL ok = ::ReadFile(ads, buf, 4, &got, nullptr);
+                ::CloseHandle(ads);
+                CHECK(ok != FALSE && got == 4 && std::memcmp(buf, "meta", 4) == 0,
+                      "the stream content survives the save");
+            }
+        }
+        fs::remove(out);
+    }
+
+    // 2) 置換に失敗すると、出力先は元の内容のまま残る。
+    //    Open の後に別ハンドルが出力先を書込拒否で掴むと、ReplaceFileW/MoveFileExW の
+    //    どちらも共有違反で失敗する（＝書き終えた後で置換だけが失敗する経路）。
+    {
+        const fs::path dir = makeCaseDir("atomic_locked_commit");
+        const fs::path out = dir / L"target.bin";
+        const std::vector<unsigned char> orig(2048, 0x5C);
+        WriteFile(out, orig);
+        const size_t before = entryCount(dir);
+
+        stirling::StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open while the target is free");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write the replacement");
+
+        // 読み取りのみ許可＝書込・削除を拒否するハンドル。
+        HANDLE hold = ::CreateFileW(out.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(hold != INVALID_HANDLE_VALUE, "hold the target against replacement");
+        if (hold != INVALID_HANDLE_VALUE) {
+            const FileIoResult r = w.Commit();
+            ::CloseHandle(hold);
+
+            CHECK(!r.Ok(), "commit fails when the target cannot be replaced");
+            CHECK(r.status == FileIoStatus::kWriteFailed, "replacement failure status");
+            CHECK(r.systemError != 0, "replacement failure reports a system error");
+            CHECK(ReadFileBytes(out) == orig, "the target keeps its original content");
+            CHECK(w.KeptTempPath().empty(), "the target survived, so no temporary file is kept");
+            CHECK(entryCount(dir) == before,
+                  "a failed replacement leaves no temporary file behind");
+        } else {
+            w.Abort();
+        }
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+
+    // 3) 使用中（書込拒否）のファイルへの保存は、書き始める前に kOpenFailed。
+    //    以前は CREATE_ALWAYS のオープンで弾かれていた。置換方式でも、書き終えてから
+    //    権限で失敗するのではなく Open の時点で理由を返す。
+    {
+        const fs::path out = TempFile("atomic_locked_open");
+        const std::vector<unsigned char> orig(1024, 0x2D);
+        WriteFile(out, orig);
+        HANDLE hold = ::CreateFileW(out.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(hold != INVALID_HANDLE_VALUE, "hold the target before saving");
+        if (hold != INVALID_HANDLE_VALUE) {
+            BlockList list;
+            seedList(list);
+            const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+            ::CloseHandle(hold);
+
+            CHECK(!r.Ok(), "saving to a file held against writing fails");
+            CHECK(r.status == FileIoStatus::kOpenFailed, "in-use save status");
+            CHECK(r.systemError != 0, "in-use save reports a system error");
+            CHECK(ReadFileBytes(out) == orig,
+                  "the target is untouched when it cannot be replaced");
+        }
+        fs::remove(out);
+    }
+
+    // 4) ディレクトリを保存先に指定しても、出力先（ディレクトリ）に触れずに失敗する。
+    {
+        const fs::path dir = fs::temp_directory_path();
+        BlockList list;
+        seedList(list);
+        const FileIoResult r = stirling::SaveBlocksToFile(list, dir.wstring().c_str());
+        CHECK(!r.Ok(), "saving onto a directory fails");
+        CHECK(r.status == FileIoStatus::kOpenFailed, "directory save status");
+        CHECK(fs::is_directory(dir), "the directory is left alone");
+    }
+
+    // 5) 空のブロック列（0 バイト）でも置換は成立し、出力先は 0 バイトになる。
+    {
+        const fs::path out = TempFile("atomic_empty");
+        WriteFile(out, std::vector<unsigned char>(300, 0x77));
+        BlockList list;
+        NewEmptyDoc(list);   // 空の 16KB ブロック 1 個（usedLen == 0）
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "saving an empty document succeeds");
+        CHECK(r.fileSize == 0, "an empty save reports zero bytes");
+        CHECK(fs::file_size(out) == 0, "the target becomes empty");
+        fs::remove(out);
+    }
+
+    // 6) 新規作成（出力先が無い）は MoveFileExW 経路。保存後に一時ファイルを残さない。
+    {
+        const fs::path dir = makeCaseDir("atomic_new");
+        const fs::path out = dir / L"created.bin";
+        BlockList list;
+        seedList(list);
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "saving to a new path succeeds");
+        CHECK(r.fileSize == static_cast<FileOffset>(body.size()), "new save reports the size");
+        CHECK(ReadFileBytes(out) == std::vector<unsigned char>(body.begin(), body.end()),
+              "new save content");
+        CHECK(entryCount(dir) == 1, "only the saved file remains in the directory");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+
+    // 7) 複数ブロック（16KB 超）でも、ブロック境界をまたいで内容が連結される。
+    {
+        const fs::path out = TempFile("atomic_multiblock");
+        WriteFile(out, std::vector<unsigned char>(10, 0x00));   // 既存ファイルを置換する経路
+        std::vector<unsigned char> data(static_cast<size_t>(kBlockCapacity) * 2 + 777);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<unsigned char>((i * 37 + 11) & 0xFF);
+        }
+        BlockList list;
+        NewEmptyDoc(list);
+        {
+            BlockCursor c(&list);
+            CHECK(c.Insert(0, data.data(), static_cast<FileOffset>(data.size())),
+                  "seed multiple blocks");
+        }
+        CHECK(list.Count() >= 3, "the document spans several blocks");
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "multi-block save succeeds");
+        CHECK(r.fileSize == static_cast<FileOffset>(data.size()), "multi-block save size");
+        CHECK(ReadFileBytes(out) == data, "multi-block save content");
+        fs::remove(out);
+    }
 }
 
 // ---- BGREP 通知（Issue #156） ----
@@ -3872,11 +4282,13 @@ int main() {
     TestStructDefParse();
     TestHexTextParse();
     TestUtf8Text();
+    TestUtf16Text();
     TestClipboardUtil();
     TestUndoBudget();
     TestDeleteRange();
     TestWriteAndFillRange();
     TestStreamFileWriter();
+    TestAtomicSave();
     TestBgrepNotify();
 #ifdef STIRLING_TEST_ALLOC_HOOK
     TestAllocFailureRollback();

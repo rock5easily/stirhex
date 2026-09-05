@@ -143,8 +143,8 @@ void CStirlingDoc::ResolveSettings() {
     m_settings = theApp.SettingsForPath(CStringW(GetPathName()));
 }
 
-// オープン時の既定を設定から適用（原 表示状態ページ 158: 文字セット/バイトオーダ/
-//   挿入モード/編集禁止）。fileOpen=true のときのみ「編集禁止」既定を適用する。
+// 文書作成／オープン時の既定を設定から適用（原 表示状態ページ 158: 文字セット/
+//   バイトオーダ/挿入モード/編集禁止）。新規文書の編集可否は newDocEditable も考慮する。
 void CStirlingDoc::ApplyOpenDefaults(bool fileOpen) {
     const CStirlingSettings& s = m_settings;   // この文書の解決済み設定
     if (s.defCharset >= 0 && s.defCharset <= 6) { m_charset = s.defCharset; }
@@ -190,13 +190,14 @@ void CStirlingDoc::AcquireLock(LPCTSTR path) {
 
 // 保存前バックアップ（原 FUN_004340bf）。命名 dir\name.bak（最新）＋ name.bk1..bk{世代-1}（古い）。
 //   name は拡張子込みのファイル名。backupFolderSpecify 時は backupFolder を dir に用いる。
-void CStirlingDoc::CreateBackup(LPCTSTR path) {
+//   最新世代（.bak）のコピー失敗だけ false を返す（Issue #170。呼出側が続行を確認する）。
+bool CStirlingDoc::CreateBackup(LPCTSTR path) {
     const CAppSettings& s = theApp.AppSettings();
-    if (!s.backupCreate) { return; }
-    if (::GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) { return; }   // 既存ファイル無し→不要
+    if (!s.backupCreate) { return true; }
+    if (::GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) { return true; }   // 既存ファイル無し→不要
     CString full(path);
     const int sep = full.ReverseFind(_T('\\'));
-    if (sep < 0) { return; }
+    if (sep < 0) { return true; }   // ファイル名だけの指定はバックアップ先を決められない（原も何もしない）
     CString dir  = full.Left(sep);
     CString name = full.Mid(sep + 1);
     if (s.backupFolderSpecify && !s.backupFolder.IsEmpty()) {
@@ -207,8 +208,8 @@ void CStirlingDoc::CreateBackup(LPCTSTR path) {
     CString bak;
     bak.Format(_T("%s\\%s.bak"), (LPCTSTR)dir, (LPCTSTR)name);
     if (gen == 1) {
-        ::CopyFile(path, bak, FALSE);   // 上書きコピー（原 CopyFileA(...,FALSE)）
-        return;
+        // 上書きコピー（原 CopyFileA(...,FALSE)）。原は戻り値を見ないが、失敗を伝える。
+        return ::CopyFile(path, bak, FALSE) != FALSE;
     }
     // 世代ローテーション: 最古 .bk{gen-1} を削除→ .bk{k}→.bk{k+1} 繰り下げ→ .bak→.bk1→ 現ファイル→.bak。
     CString oldest;
@@ -223,14 +224,14 @@ void CStirlingDoc::CreateBackup(LPCTSTR path) {
     CString bk1;
     bk1.Format(_T("%s\\%s.bk1"), (LPCTSTR)dir, (LPCTSTR)name);
     ::MoveFile(bak, bk1);           // .bak → .bk1
-    ::CopyFile(path, bak, FALSE);   // 現ファイル → .bak
+    return ::CopyFile(path, bak, FALSE) != FALSE;   // 現ファイル → .bak
 }
 
 BOOL CStirlingDoc::OnNewDocument() {
     if (!CDocument::OnNewDocument()) {  // 内部で DeleteContents を呼ぶ
         return FALSE;
     }
-    // 原 OnNewDocument: 空の16KBブロック1個（新規は常に編集可能）
+    // 原 OnNewDocument: 空の16KBブロック1個。
     // 確保できなければ空文書を作らず失敗させる（例外を投げない。Issue #153）。
     unsigned char* buf = stirling::AllocBlockData();
     if (buf == nullptr) {
@@ -241,7 +242,7 @@ BOOL CStirlingDoc::OnNewDocument() {
         return FALSE;
     }
     m_settings = theApp.SettingsForPath(nullptr);   // 新規は既定 "*" レコード
-    ApplyOpenDefaults(false);   // 新規は編集可のまま（文字セット/バイトオーダ/挿入既定のみ）
+    ApplyOpenDefaults(false);   // newDocEditable と既定表示設定を新規文書用に適用
     return TRUE;
 }
 
@@ -343,8 +344,19 @@ BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
 }
 
 BOOL CStirlingDoc::OnSaveDocument(LPCTSTR lpszPathName) {
-    CreateBackup(lpszPathName);   // 保存前バックアップ（backupCreate 時。既存ファイルを世代保存）
-    ReleaseLock();                // 排他ハンドルを一旦解放（保持中は書込オープンが失敗するため）
+    // 排他ハンドルを先に解放する（保持中は書込オープンも置換も失敗するため）。
+    //   バックアップより前に解放するのは、排他モード（exclusiveControl==2）では共有なしで
+    //   掴んでいるため、自分のロックのせいで CopyFile が読み取れず必ず失敗するため（#170）。
+    ReleaseLock();
+    // 保存前バックアップ（backupCreate 時。既存ファイルを世代保存）。
+    //   .bak を作成できなかったときは、上書きすると直前の内容が残らないため続行を確認する。
+    if (!CreateBackup(lpszPathName)) {
+        if (ui::MsgBoxRes(MainWndHandle(), IDS_CONFIRM_BACKUP_FAILED,
+                          MB_YESNO | MB_ICONQUESTION) != IDYES) {
+            AcquireLock(lpszPathName);   // 中止するのでロックを復帰させる
+            return FALSE;   // 保存を中止（ドキュメントも出力先も変更しない）
+        }
+    }
     const stirling::FileIoResult saved = stirling::SaveBlocksToFile(m_blocks, CStringW(lpszPathName));
     if (!saved.Ok()) {
         AcquireLock(lpszPathName);   // 書込失敗時もロックを復帰

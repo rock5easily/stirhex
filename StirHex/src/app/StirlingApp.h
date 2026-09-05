@@ -57,7 +57,7 @@ public:
     // 既定レコードの設定（E-1では全ビューがこれを参照）。
     CStirlingSettings& Settings() { return m_extRecords[0].s; }
     std::vector<CExtRecord>& ExtRecords() { return m_extRecords; }
-    // 拡張子レコードのレジストリ Load/Save（近代レイアウト）。
+    // 拡張子レコードの設定ストア Load/Save（近代レイアウト）。
     void LoadSettings();
     void SaveSettings();
     // 既定レコード "*" のコメントが空なら既定文字列で補う。theApp は静的初期化で構築され
@@ -78,10 +78,10 @@ public:
     void ApplyFileHistoryCount();
 
     // キャレット位置の自動復元（原ヘルプ caretAutoRestore, 原 CMainFrame+0xab0）。
-    //   原は MRU 並列の配列＋独自永続化。本移植は近代レイアウト方針に合わせ、レジストリ
+    //   原は MRU 並列の配列＋独自永続化。本移植は近代レイアウト方針に合わせ、設定ストアの
     //   セクション "CaretPositions" にパス→位置を最大16件保持する。
-    void LoadCaretStore();                       // 起動時にレジストリから読み込む
-    void SaveCaretStore();                       // 終了時にレジストリへ保存する
+    void LoadCaretStore();                       // 起動時に設定ストアから読み込む
+    void SaveCaretStore();                       // 終了時に設定ストアへ保存する
     // 文書クローズ時: 先頭へ upsert（上限16）
     void RecordCaretPos(LPCTSTR path, stirling::FileOffset pos);
     // 復元時: 位置を返す（無ければ -1）

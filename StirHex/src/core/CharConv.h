@@ -20,10 +20,10 @@ std::string FormatStructCharArrayCp932(int charset, const unsigned char* p, int 
 // bytes（先頭 n バイト）を文字セット charset に従い表示用のワイド文字列へ変換する。
 //   charset: 0=ASCII / 1=SJIS / 2=EUC-JP / 3=Unicode(UTF-16LE) / 4=EBCDIC / 5=EBCIDK /
 //            6=UTF-8（移植で追加。Issue #98）。
-//   0..5 は FormatStructCharArrayCp932 の結果をワイドへ変換するだけなので、表示結果は
-//   従来（表示直前に StructBar が WideFromCp932 していた頃）と同じ。
-//   6 は UTF-8 を復号してワイドを直接組み立てるため、CP932 に無い文字も残る
-//   （Issue #107）。不正・不完全な列は 1 バイト = 1 文字の '.'。
+//   0..2 / 4..5 は FormatStructCharArrayCp932 の結果をワイドへ変換するだけなので、表示
+//   結果は従来（表示直前に StructBar が WideFromCp932 していた頃）と同じ。
+//   6 は UTF-8 を、3 は UTF-16 を復号してワイドを直接組み立てるため、CP932 に無い文字も
+//   残る（Issue #107 / #173）。不正・不完全な列は '.'。
 //   文字欄（CStirlingView）と違いセル整列の制約が無いので、空白詰めはしない。
 std::wstring FormatStructCharArrayW(int charset, const unsigned char* p, int n);
 

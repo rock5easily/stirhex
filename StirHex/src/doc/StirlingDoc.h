@@ -146,7 +146,8 @@ public:
     // ダイナミックマーク（原 StirlingDoc_AdjustMarksAfterEdit FUN_00436e84）:
     //   環境設定 dynamicMark が有効なとき、pos で delCount バイト削除し insCount バイト挿入した
     //   編集に追従してマーク位置を移動する。[pos,pos+delCount) 内のマークは消滅、それ以降は
-    //   (insCount-delCount) だけ後方移動。全編集プリミティブ／Undo・Redo から呼ぶ。
+    //   (insCount-delCount) だけ後方移動。データ長が変わる編集プリミティブと、対応する
+    //   Undo・Redo から呼ぶ。長さ不変の上書きではマークを残すため呼ばない。
     void AdjustMarksForSplice(stirling::FileOffset pos, stirling::FileOffset delCount,
                               stirling::FileOffset insCount);
 
@@ -206,14 +207,18 @@ public:
     void ResolveSettings();
 
 protected:
-    // オープン時の既定（文字セット/バイトオーダ/挿入モード/編集禁止）を設定から適用する。
-    //   fileOpen=true（ファイルを開いた時）のみ「編集禁止」既定を適用（新規文書は編集可のまま）。
+    // 文書作成／オープン時の既定（文字セット/バイトオーダ/挿入モード/編集禁止）を設定から適用する。
+    //   fileOpen=true は openReadOnly を直接適用する。新規文書は newDocEditable が ON なら常に
+    //   編集可能、OFF なら openReadOnly を適用する。
     void ApplyOpenDefaults(bool fileOpen);
 
     // 保存前バックアップ（原 FUN_004340bf）。backupCreate 時、既存ファイルを世代保存する。
     //   命名: dir\name.bak（最新）＋ name.bk1..bk{世代-1}（古い）。name は拡張子込みのファイル名。
     //   backupFolderSpecify 時は backupFolder を dir に用いる。
-    void CreateBackup(LPCTSTR path);
+    //   最新世代（.bak）のコピーに失敗したときだけ false（原はコピーの成否を見ていない。
+    //   バックアップが無いまま上書きすると直前の内容が残らないため、呼出側で確認する。#170）。
+    //   バックアップ不要（backupCreate が OFF・既存ファイル無し）のときは true。
+    bool CreateBackup(LPCTSTR path);
     // ディスク上の更新日時を取得する（modeRead|shareDenyNone で開いて GetStatus。原 FUN_00436450）。
     //   開けない場合は false（削除・排他中）。
     static bool ReadDiskTime(LPCTSTR path, CTime& out);

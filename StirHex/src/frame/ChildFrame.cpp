@@ -48,7 +48,8 @@ BOOL CChildFrame::PreCreateWindow(CREATESTRUCT& cs) {
         }
     }
 
-    // 実レイアウト幅（ビュー ContentWidthPx と同式。右余白2セル）。アドレス欄桁数=16進8桁/10進10桁。
+    // 文書読込前の既定レイアウト幅（右余白2セル）。アドレス欄は原と同じ16進8桁/10進10桁で
+    //   算出する。4GB以上でビューのアドレス欄が広がる分は横スクロールで表示する。
     //   必要クライアント幅 = charW*(addrDigits + bpr*4 + 7) + 縦SB を AdjustWindowRectEx でウィンドウ幅へ。
     const int addrDigits = s.addressBase ? 8 : 10;
     CRect rc(0, 0, charW * (addrDigits + bpr * 4 + 7) + ::GetSystemMetrics(SM_CXVSCROLL), 0);

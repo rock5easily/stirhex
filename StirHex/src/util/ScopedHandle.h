@@ -44,8 +44,8 @@ public:
         h_ = h;
     }
 
-    // 明示クローズ。書込側は close の失敗（遅延書込エラー）も検出したいため戻り値を見る
-    //   （原は fclose の戻り値を確認していた）。
+    // 明示クローズ。クローズ自体の成否（無効ハンドル等）を返すのみで、遅延書込エラーの
+    //   検出は保証しない。書込側は成功を返す前に FlushFileBuffers を呼ぶこと（Issue #166）。
     bool Close() {
         if (!Valid()) {
             h_ = INVALID_HANDLE_VALUE;

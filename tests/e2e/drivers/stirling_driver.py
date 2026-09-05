@@ -100,6 +100,28 @@ ID_STRUCT_RADIX_ALL_H = 33013
 ID_BITIMAGE = 33003
 ID_BITIMAGE_RELOAD = 33004
 
+# Output pane (issue #148)
+ID_OUTPUT_PANE = 33000       # 0x80E8 toggle the output pane
+# Control id of the output control bar. The port and the original picked different ids
+# out of the AFX_IDW_* range, and the two overlap: 0xE821 is the output bar in the
+# original but the bit image bar in the port. So the id alone cannot identify the bar -
+# the caption has to match as well.
+IDW_OUTPUT_BAR = 0xE820           # port
+IDW_OUTPUT_BAR_ORIGINAL = 0xE821  # original Stirling 1.31
+OUTPUT_BAR_IDS = (IDW_OUTPUT_BAR, IDW_OUTPUT_BAR_ORIGINAL)
+OUTPUT_BAR_CAPTION = "アウトプット"
+
+# Control id and caption of the bit image control bar of the port (Issue #121).
+# The original has no equivalent bar - its bit image is a plain child window - so the
+# id is only meaningful for StirHex. As with the output bar, the caption is matched
+# too: 0xE821 is the output bar in the original.
+IDW_BITIMAGE_BAR = 0xE821
+BITIMAGE_BAR_CAPTION = "ビットイメージ"
+
+# Captions of bars that become top-level windows once floating. The main-window
+# lookup must never mistake one of these for the frame.
+FLOATING_BAR_CAPTIONS = (BITIMAGE_BAR_CAPTION, OUTPUT_BAR_CAPTION, "構造体編集")
+
 # Top Address Dialog Control IDs
 IDC_TOPADDR_MODE_ADDRESS = 1016
 IDC_TOPADDR_MODE_MARK = 1017
@@ -356,6 +378,28 @@ def _control_text(hwnd: int) -> str:
     return buf.value
 
 
+def _top_level_of(hwnd: int) -> int:
+    """Walk up to the top-level window owning hwnd (GetAncestor GA_ROOT)."""
+    return win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
+
+
+def _has_mdi_client(hwnd: int) -> bool:
+    """Return whether a top-level window owns an MDIClient child (i.e. is the MDI frame)."""
+    found = []
+
+    def _enum(child, _):
+        if win32gui.GetClassName(child) == "MDIClient":
+            found.append(child)
+            return False
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _enum, None)
+    except Exception:
+        pass
+    return bool(found)
+
+
 def _is_mdi_document_child(hwnd: int, mdi_hwnd: int) -> bool:
     """Return whether hwnd is a visible native MDI document child."""
     if (win32gui.GetParent(hwnd) != mdi_hwnd
@@ -608,8 +652,18 @@ class StirlingDriver:
         # Wait for main window or dialog to appear
         def _find_main():
             wins = self._get_process_windows()
+            # The MDI frame is identified by its MDIClient child, not by being the first
+            # top-level window: a floating control bar (the bit image window restored on
+            # start, Issue #121) is a top-level window of the process too, and enumerates
+            # ahead of the frame. Commands posted to it are silently dropped.
             for h, cls, title in wins:
-                if cls != "#32770" and not cls.startswith("UAC"):
+                if cls != "#32770" and not cls.startswith("UAC") and _has_mdi_client(h):
+                    return h
+            # Fallback for a frame whose MDIClient is not up yet. Floating control bars
+            # are excluded by caption so this cannot hand back a bar again.
+            for h, cls, title in wins:
+                if (cls != "#32770" and not cls.startswith("UAC")
+                        and title not in FLOATING_BAR_CAPTIONS):
                     return h
             for h, cls, title in wins:
                 if cls == "#32770":
@@ -2284,6 +2338,141 @@ class StirlingDriver:
                         return h
             time.sleep(0.1)
         return None
+
+    def find_output_bar(self) -> int | None:
+        """Find the output control bar by its control id.
+
+        The bar is reparented as it docks: under a CDockBar of the main frame while
+        docked, and into a floating mini frame - a top-level window of the process,
+        not a child of the frame - once dragged out. Walk every top-level window of
+        the process so both states are found.
+        """
+        found: list[int] = []
+
+        def _enum_child(h, _):
+            try:
+                if (win32gui.GetDlgCtrlID(h) in OUTPUT_BAR_IDS
+                        and _control_text(h) == OUTPUT_BAR_CAPTION):
+                    found.append(h)
+            except Exception:
+                pass
+            return True
+
+        def _enum_top(h, _):
+            try:
+                _, p = win32process.GetWindowThreadProcessId(h)
+                if p == self.pid:
+                    win32gui.EnumChildWindows(h, _enum_child, None)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_top, None)
+        except Exception:
+            pass
+        return found[0] if found else None
+
+    def find_bit_image_bar(self) -> int | None:
+        """Find the bit image control bar of the port by control id and caption.
+
+        Like the output bar it is reparented as it docks - under a CDockBar of the main
+        frame while docked, into a floating mini frame once dragged out - so every
+        top-level window of the process is walked.
+        """
+        found: list[int] = []
+
+        def _enum_child(h, _):
+            try:
+                if (win32gui.GetDlgCtrlID(h) == IDW_BITIMAGE_BAR
+                        and _control_text(h) == BITIMAGE_BAR_CAPTION):
+                    found.append(h)
+            except Exception:
+                pass
+            return True
+
+        def _enum_top(h, _):
+            try:
+                _, p = win32process.GetWindowThreadProcessId(h)
+                if p == self.pid:
+                    win32gui.EnumChildWindows(h, _enum_child, None)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_enum_top, None)
+        except Exception:
+            pass
+        return found[0] if found else None
+
+    def _require_bit_image_bar(self) -> int:
+        bar = self.find_bit_image_bar()
+        if not bar:
+            raise AssertionError(
+                "bit image control bar (id 0x%04X, caption %r) not found"
+                % (IDW_BITIMAGE_BAR, BITIMAGE_BAR_CAPTION)
+            )
+        return bar
+
+    def is_bit_image_visible(self) -> bool:
+        """Whether the bit image pane is currently shown.
+
+        Raises when the bar cannot be found at all, so a caller asserting on a hidden
+        pane cannot pass just because the lookup broke.
+        """
+        return bool(win32gui.IsWindowVisible(self._require_bit_image_bar()))
+
+    def is_bit_image_floating(self) -> bool:
+        """Whether the bit image bar sits in a floating mini frame rather than a dock bar."""
+        bar = self._require_bit_image_bar()
+        return not _has_mdi_client(_top_level_of(bar))
+
+    def bit_image_frame_hwnd(self) -> int:
+        """Top-level window holding the bar: the mini frame while floating."""
+        return _top_level_of(self._require_bit_image_bar())
+
+    def bit_image_frame_rect(self) -> tuple[int, int, int, int]:
+        """Screen rect of the floating mini frame (raises when the bar is docked)."""
+        if not self.is_bit_image_floating():
+            raise AssertionError("bit image bar is docked, it has no floating frame")
+        return win32gui.GetWindowRect(self.bit_image_frame_hwnd())
+
+    def move_bit_image_window(self, x: int, y: int, timeout: float = 2.0):
+        """Move the floating bit image window to a screen position and wait for it to land."""
+        frame = self.bit_image_frame_hwnd()
+        win32gui.SetWindowPos(frame, 0, x, y, 0, 0,
+                              win32con.SWP_NOZORDER | win32con.SWP_NOSIZE
+                              | win32con.SWP_NOACTIVATE)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            rect = win32gui.GetWindowRect(frame)
+            if rect[0] == x and rect[1] == y:
+                return
+            time.sleep(0.05)
+        raise AssertionError(
+            "bit image window did not move to (%d, %d): %s"
+            % (x, y, win32gui.GetWindowRect(frame))
+        )
+
+    def is_output_pane_visible(self) -> bool:
+        """Whether the output pane is currently shown.
+
+        Raises when the bar cannot be found at all, so a caller asserting on a hidden
+        pane cannot pass just because the lookup broke.
+        """
+        bar = self.find_output_bar()
+        if not bar:
+            raise AssertionError(
+                "output control bar (id %s, caption %r) not found"
+                % (", ".join("0x%04X" % i for i in OUTPUT_BAR_IDS), OUTPUT_BAR_CAPTION)
+            )
+        return bool(win32gui.IsWindowVisible(bar))
+
+    def toggle_output_pane(self):
+        """Toggle the output pane (0x80E8)."""
+        self.post_command(ID_OUTPUT_PANE)
+        time.sleep(0.3)
 
     # ------------------------------------------------------------------
     # Environment Settings "User Menu" page / accelerator dialog (Issue #27)

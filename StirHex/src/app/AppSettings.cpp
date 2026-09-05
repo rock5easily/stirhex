@@ -1,4 +1,4 @@
-// CAppSettings 実装。theApp（CWinApp）のプロファイルAPI経由でレジストリと往復する。
+// CAppSettings 実装。theApp（CWinApp）のプロファイルAPI経由で設定ストアと往復する。
 #include "pch.h"
 #include "app/AppSettings.h"
 
@@ -100,8 +100,16 @@ void CAppSettings::Load() {
     docFullPath     = GetBool(_T("DocFullPath"), docFullPath);
     showToolbar     = GetBool(_T("ShowToolbar"), showToolbar);
     showStatusbar   = GetBool(_T("ShowStatusbar"), showStatusbar);
+    showOutputPane  = GetBool(_T("ShowOutput"), showOutputPane);
     allowMultipleInstances = GetBool(_T("AllowMultipleInstances"), allowMultipleInstances);
     bitImageDockable = GetBool(_T("BitImageDockable"), bitImageDockable);
+    bitImageShow      = GetBool(_T("BitImageShow"), bitImageShow);
+    bitImagePlacement = GetInt(_T("BitImagePlacement"), bitImagePlacement);
+    bitImageLeft      = GetInt(_T("BitImageLeft"), bitImageLeft);
+    bitImageTop       = GetInt(_T("BitImageTop"), bitImageTop);
+    // 想定外の値は既定（フローティング）へ寄せる。手書き編集された設定ファイルでも
+    //   起動できなくならないようにする。
+    if (bitImagePlacement < 0 || bitImagePlacement > 2) { bitImagePlacement = 0; }
     structBarPos       = GetInt(_T("StructBarPos"), structBarPos);
     structBarNoDock    = GetBool(_T("StructBarNoDock"), structBarNoDock);
     structBarStatusPos = GetInt(_T("StructBarStatusPos"), structBarStatusPos);
@@ -210,8 +218,18 @@ void CAppSettings::Save() const {
     PutBool(_T("DocFullPath"), docFullPath);
     PutBool(_T("ShowToolbar"), showToolbar);
     PutBool(_T("ShowStatusbar"), showStatusbar);
+    PutBool(_T("ShowOutput"), showOutputPane);
     PutBool(_T("AllowMultipleInstances"), allowMultipleInstances);
     PutBool(_T("BitImageDockable"), bitImageDockable);
+    PutBool(_T("BitImageShow"), bitImageShow);
+    PutInt(_T("BitImagePlacement"), bitImagePlacement);
+    // 未保存（kBitImagePosUnset）のまま書き出すと、設定ファイルへ内部の番兵値
+    //   -2147483648 がそのまま現れる。一度もフローティングしていない場合は
+    //   キー自体を書かず、読み込み時の既定値に任せる。
+    if (bitImageLeft != kBitImagePosUnset && bitImageTop != kBitImagePosUnset) {
+        PutInt(_T("BitImageLeft"), bitImageLeft);
+        PutInt(_T("BitImageTop"), bitImageTop);
+    }
     PutInt(_T("StructBarPos"), structBarPos);
     PutBool(_T("StructBarNoDock"), structBarNoDock);
     PutInt(_T("StructBarStatusPos"), structBarStatusPos);

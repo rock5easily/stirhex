@@ -76,6 +76,11 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
 
 // list の各ブロックの usedLen バイトを先頭から順次ファイルへ書き出す
 //   （原 SaveFile_WriteLoop の本質: 全ブロックを head→tail で Write）。
+//   書込先は StreamFileWriter 経由の一時ファイルで、明示フラッシュ後に出力先へ置換する
+//   （原 CMirrorFile と同じ安全保存。Issue #166 / #170）。したがって成功しない限り出力先は
+//   変更されない。既存の出力先へ置換できない場合（読み取り専用・権限・使用中）は、書き
+//   始める前に kOpenFailed を返す。一時ファイルは出力先と同じディレクトリに作るため、
+//   保存中は「元のファイル + 新しい内容」の分のディスク容量が必要になる。
 FileIoResult SaveBlocksToFile(const BlockList& list, const wchar_t* path);
 
 // 全ブロックの usedLen 合計（原 RecalcTotalLength = doc+0x84 更新）。

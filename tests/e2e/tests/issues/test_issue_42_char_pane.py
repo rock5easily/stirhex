@@ -98,7 +98,11 @@ class TestIssue42CharPane:
             pytest.param(32851, id="ascii"),
             pytest.param(32852, id="sjis"),
             pytest.param(32853, id="euc"),
-            pytest.param(32854, id="unicode"),
+            # Unicode (32854) is intentionally not golden any more: since Issue #173 the
+            #   port renders UTF-16 without going through CP932, so characters the
+            #   original prints as '.' now show their real glyph. The port's own output
+            #   for the very same data is pinned by
+            #   test_issue_173_charset_unicode.py::test_dump_matches_char_pane_sample.
             pytest.param(ID_CHARSET_EBCDIC, id="ebcdic"),
             pytest.param(ID_CHARSET_EBCIDK, id="ebcidk"),
         ],
@@ -147,8 +151,9 @@ class TestIssue42CharPane:
             pytest.param(32852, "04", id="sjis-mid-row-trail"),
             # 0x21 is the trail byte of the EUC-JP pair at 0x20.
             pytest.param(32853, "21", id="euc-trail"),
-            # 0x31 is odd, i.e. the second byte of a UTF-16 code unit.
-            pytest.param(32854, "31", id="unicode-odd-offset"),
+            # The Unicode odd-offset case (0x31) left this golden list with Issue #173
+            #   for the same reason as above. The alignment it checked is pinned by
+            #   test_issue_173_charset_unicode.py::test_dump_range_from_odd_offset.
         ],
     )
     def test_golden_dump_range_starting_mid_character(

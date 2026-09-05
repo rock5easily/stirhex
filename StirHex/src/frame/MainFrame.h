@@ -65,6 +65,16 @@ protected:
     // bitImageDockable を現在位置を変えずにドッキング可否へ反映する。
     void ApplyBitImageBarSettings();
 
+    // アウトプットペインの現在の表示状態を設定へ取り込む（Issue #148）。
+    void SyncOutputPaneSetting();
+
+    // ビットイメージ窓の現在の表示状態と配置を設定へ取り込む（Issue #121）。
+    void SyncBitImageSetting();
+
+    // ビットイメージ窓のフローティング位置（既定＝本体左隣 / 設定からの復元）。
+    CPoint DefaultBitImageFloatPoint() const;
+    CPoint RestoredBitImageFloatPoint() const;
+
     // 相違一覧のアプリ内最小化プロキシを、MDIクライアント領域の変化へ追従させる（Issue #123）。
     virtual void RecalcLayout(BOOL bNotify = TRUE) override;
 
@@ -74,6 +84,9 @@ protected:
     afx_msg void OnSize(UINT nType, int cx, int cy);
     // 終了時、winPlacement=1(前回終了時)なら現在の通常配置を設定へ保存する（原ヘルプ準拠）。
     afx_msg void OnClose();
+    afx_msg void OnEndSession(BOOL bEnding);
+    // 終了時に画面の状態を設定へ書き戻す（OnClose / OnEndSession の共通処理）。
+    void SaveWindowStateToSettings();
     afx_msg void OnDropFiles(HDROP hDropInfo);   // D&Dでオープン（リンク解決しない。原ヘルプ準拠）
     // 構造体編集バーの表示トグル（原 FUN_004268c1）。編集/設定 両メニューから同一動作。
     afx_msg void OnStructBarToggle();

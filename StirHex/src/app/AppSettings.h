@@ -1,12 +1,13 @@
 // CAppSettings — アプリ全体（全ドキュメント/ビュー共通）の動作環境設定モデル。
 //   原は CMainFrame が保持し 環境設定ダイアログ(0x8050) が編集する（設定読込 FUN_0041f2a5）。
 //   拡張子別の表示設定（CStirlingSettings）とは別レイヤで、theApp が単一インスタンスを保持する。
-//   永続化は StirHex 専用レイアウト（HKCU\Software\StirHex\StirHex\Env）。原の値名/バイナリ構造は
+//   永続化は設定ファイルの StirHex 専用レイアウト（[Env] セクション）。原の値名/バイナリ構造は
 //   再現しない。既定値は原の設定既定に沿う（未確定分は原挙動に沿う最善値。領域C確定時に精緻化）。
 #pragma once
 
 #include <windows.h>
 
+#include <climits>
 #include <vector>
 
 class CAppSettings {
@@ -73,10 +74,23 @@ public:
     bool docFullPath   = false;    // ドキュメントのフルパス表示（1015）
     bool showToolbar   = true;     // ツールバーの表示（1020）
     bool showStatusbar = true;     // ステータスバーの表示（1025）
+    // アウトプットペインの表示（原値名 ShowOutput）。原版は保存のみで起動時に復元しない
+    //   （CMainFrame::OnCreate が参照しないデッド設定）。移植版では復元まで行う（Issue #148）。
+    bool showOutputPane = false;
     // UI未公開。0=名前付きMutexで多重起動を禁止（既定）/ 1=複数プロセスを許可。
-    // レジストリ Env\AllowMultipleInstances で変更する。
+    // 設定ファイルの [Env] AllowMultipleInstances で変更する。
     bool allowMultipleInstances = false;
     bool bitImageDockable = false; // ビットイメージをドッキング可能にする（1066）
+    // ビットイメージ窓の表示状態と配置（移植独自。Issue #121）。原版は値名自体を持たず、
+    //   起動のたびに非表示・本体左隣のフローティングへ初期化される。移植版では前回の
+    //   状態を引き継ぐ。サイズは原版・移植版ともユーザーが変更できないため保存しない。
+    bool bitImageShow = false;         // 表示状態
+    int  bitImagePlacement = 0;        // 0=フローティング / 1=左ドッキング / 2=右ドッキング
+    // フローティング位置（スクリーン座標）。kBitImagePosUnset は「未保存」で、
+    //   復元時は原版と同じ既定位置（本体ウィンドウの左隣）に置く。
+    static const int kBitImagePosUnset = INT_MIN;
+    int  bitImageLeft = kBitImagePosUnset;
+    int  bitImageTop  = kBitImagePosUnset;
     int  structBarPos       = 2;   // 構造体編集バーの位置（1044..1046。0=下/1=上/2=フローティング）
     bool structBarNoDock    = true;  // ドッキング不能とする（1069）
     int  structBarStatusPos = 2;   // 構造体編集バーのステータス表示（1147/1148/1049。0=下/1=上/2=非表示）
@@ -158,7 +172,7 @@ public:
     static std::vector<UINT> BuildDefaultKeymap();   // 原 FUN_0041972b の既定割当
     void ResetKeymapToDefault() { keymap = BuildDefaultKeymap(); }
 
-    // --- レジストリ永続化（セクション "Env"） ---
+    // --- 設定ファイルへの永続化（セクション "Env"） ---
     void Load();
     void Save() const;
 };
