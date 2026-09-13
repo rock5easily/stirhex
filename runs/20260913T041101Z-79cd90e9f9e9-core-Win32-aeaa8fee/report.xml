@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites><testsuite name="StirHex core" tests="69" failures="0" errors="0" skipped="3" time="9.353516"><properties><property name="arch" value="x86"/><property name="checks" value="5047"/></properties>
+<testcase classname="StirHex.core" name="TestBlockListBasics" time="0.000031"><system-out>TestBlockListBasics
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMultiByteInsert" time="0.000340"><system-out>TestMultiByteInsert
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestRead" time="0.000282"><system-out>TestRead
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSeek" time="0.000200"><system-out>TestSeek
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestInsertByteSplit" time="0.000679"><system-out>TestInsertByteSplit
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestInsertByteFullBlockLastPos" time="0.000104"><system-out>TestInsertByteFullBlockLastPos
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestInsertOverflowAtLastByte" time="0.001518"><system-out>TestInsertOverflowAtLastByte
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestDelete" time="0.000039"><system-out>TestDelete
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestDeleteLastByteSingleBlock" time="0.000006"><system-out>TestDeleteLastByteSingleBlock
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFuzz" time="2.522395"><system-out>TestFuzz
+  fuzz grew to 47812 bytes, 4 blocks
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFileRoundTrip" time="0.138263"><system-out>TestFileRoundTrip
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLoadEditSave" time="0.016402"><system-out>TestLoadEditSave
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchBasic" time="0.000026"><system-out>TestSearchBasic
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchEofBounds" time="0.000003"><system-out>TestSearchEofBounds
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchMismatch" time="0.000014"><system-out>TestSearchMismatch
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchAcrossBlocks" time="0.000298"><system-out>TestSearchAcrossBlocks
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchFuzz" time="0.155256"><system-out>TestSearchFuzz
+  search fuzz: fwd 2400 cases / 0 mismatches, bwd 2400 cases / 1823 found / 0 mismatches
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchBackwardMissedMatch" time="0.000016"><system-out>TestSearchBackwardMissedMatch
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSetByteAt" time="0.000274"><system-out>TestSetByteAt
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLargeOffsetSeek" time="0.085955"><system-out>TestLargeOffsetSeek
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLargeOffsetDataOps" time="0.117009"><system-out>TestLargeOffsetDataOps
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLargeOffsetBulkOps" time="0.100284"><system-out>TestLargeOffsetBulkOps
+  boundary 2GB
+  boundary 4GB
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLargeRealData" time="0.000118"><skipped message="set STIRLING_CORE_TEST_LARGE=1 to run"/><system-out>TestLargeRealData
+  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFileIoStatus" time="0.027806"><system-out>TestFileIoStatus
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestLargeFileRoundTrip" time="0.000030"><skipped message="set STIRLING_CORE_TEST_LARGE=1 to run"/><system-out>TestLargeFileRoundTrip
+  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsCodec" time="0.000025"><system-out>TestSettingsCodec
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsCodecWide" time="0.000025"><system-out>TestSettingsCodecWide
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsMigration" time="0.000323"><system-out>TestSettingsMigration
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsStoreUtf8" time="0.000023"><system-out>TestSettingsStoreUtf8
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsStoreValueEscape" time="0.000029"><system-out>TestSettingsStoreValueEscape
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkFileRoundTrip" time="0.000083"><system-out>[TestMarkFileRoundTrip]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkFileEmptyAndComments" time="0.000041"><system-out>[TestMarkFileEmptyAndComments]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkFileRejects" time="0.000046"><system-out>[TestMarkFileRejects]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkFileHugeDecimals" time="0.000071"><system-out>[TestMarkFileHugeDecimals]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkListRoundTrip" time="0.000025"><system-out>[TestMarkListRoundTrip]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestMarkListLimitAndRejects" time="0.000575"><system-out>[TestMarkListLimitAndRejects]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsStoreIni" time="0.000080"><system-out>TestSettingsStoreIni
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsStoreChangeLog" time="0.000036"><system-out>TestSettingsStoreChangeLog
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsFileMergedSave" time="0.076565"><system-out>TestSettingsFileMergedSave
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsFileConcurrentSave" time="0.537057"><system-out>TestSettingsFileConcurrentSave
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsFileErrors" time="0.178500"><system-out>TestSettingsFileErrors
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFolderToReveal" time="0.000029"><system-out>[TestFolderToReveal]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSettingsStoreBinary" time="0.000093"><system-out>TestSettingsStoreBinary
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestCp932Text" time="0.000029"><system-out>TestCp932Text
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestCp932LeadByte" time="0.000017"><system-out>TestCp932LeadByte
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFormatStructCharArrayCp932" time="0.000023"><system-out>[TestFormatStructCharArrayCp932]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestFormatStructCharArrayW" time="0.000052"><system-out>[TestFormatStructCharArrayW]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStructDefParse" time="0.000085"><system-out>[TestStructDefParse]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStructScalarFormat" time="0.000113"><system-out>[TestStructScalarFormat]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStructScalarEncode" time="0.000094"><system-out>[TestStructScalarEncode]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStructTree" time="0.000143"><system-out>[TestStructTree]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestHexTextParse" time="0.000319"><system-out>[TestHexTextParse]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestChecksum" time="0.001091"></testcase>
+<testcase classname="StirHex.core" name="TestUtf8Text" time="0.000025"><system-out>[TestUtf8Text]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestUtf16Text" time="0.000019"><system-out>[TestUtf16Text]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestClipboardUtil" time="0.000021"><system-out>[TestClipboardUtil]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestClipboardTransferOs" time="0.000020"><skipped message="set STIRLING_CORE_TEST_OS=1 to run (it replaces the clipboard)"/><system-out>[TestClipboardTransferOs]
+  skipped (set STIRLING_CORE_TEST_OS=1 to run (it replaces the clipboard))
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestUndoBudget" time="0.000005"><system-out>[TestUndoBudget]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestDeleteRange" time="4.344440"><system-out>[TestDeleteRange]
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestWriteAndFillRange" time="0.000545"><system-out>TestWriteAndFillRange
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestSearchForwardRange" time="0.000309"><system-out>TestSearchForwardRange
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestEditFuzzMixed" time="0.505713"><system-out>TestEditFuzzMixed
+  mixed fuzz: 696719 bytes, 115 blocks, ops ib=1013 in=1014 db=963 dr=1001 wr=992 fi=1017
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestCursorAbsCacheAfterEdit" time="0.001175"><system-out>TestCursorAbsCacheAfterEdit
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStreamFileWriter" time="0.158176"><system-out>TestStreamFileWriter
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestStreamFileWriterFaults" time="0.095256"><system-out>TestStreamFileWriterFaults
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestBlockFileIoReadFaults" time="0.057313"><system-out>TestBlockFileIoReadFaults
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestAtomicSave" time="0.217319"><system-out>TestAtomicSave
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestBgrepNotify" time="0.000005"><system-out>TestBgrepNotify
+</system-out></testcase>
+<testcase classname="StirHex.core" name="TestAllocFailureRollback" time="0.010236"><system-out>TestAllocFailureRollback
+</system-out></testcase>
+</testsuite></testsuites>
