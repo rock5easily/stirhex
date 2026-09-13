@@ -45,6 +45,31 @@ def pytest_addoption(parser):
              "terminates them and continues. The default does not kill, because a process "
              "found here may be an editor you have open with unsaved edits.",
     )
+    # The stability tests repeat one operation dozens of times, so they run for minutes
+    # rather than seconds. They stay out of the default regression run and are asked for
+    # explicitly (Issue #224).
+    parser.addoption(
+        "--stability",
+        action="store_true",
+        default=False,
+        help="Run the resource leak tests under tests/stability. They are skipped "
+             "otherwise, because each one repeats an operation dozens of times.",
+    )
+    parser.addoption(
+        "--stability-iterations",
+        action="store",
+        type=int,
+        default=30,
+        help="Measured iterations per stability test (default: 30). More iterations make "
+             "a small per-operation leak easier to separate from noise.",
+    )
+    parser.addoption(
+        "--stability-warmup",
+        action="store",
+        type=int,
+        default=5,
+        help="Warm-up iterations run before the baseline sample (default: 5).",
+    )
 
 
 def pytest_sessionstart(session):
@@ -234,8 +259,14 @@ def run_both_stirling(original_exe_path, ported_exe_path, tmp_path):
             drv_port.start(port_in)
             action_fn(drv_port, port_out)
 
-        orig_result = orig_out.read_bytes() if orig_out.exists() else b""
-        port_result = port_out.read_bytes() if port_out.exists() else b""
-        return orig_result, port_result
+        # Both sides must really have produced their output. Returning b"" for a missing
+        # file made "nothing was written" indistinguishable from "an empty file was
+        # written", so two failed runs could compare equal and pass (Issue #203).
+        missing = [str(path) for path in (orig_out, port_out) if not path.exists()]
+        if missing:
+            raise AssertionError(
+                "golden run produced no output file: " + ", ".join(missing)
+            )
+        return orig_out.read_bytes(), port_out.read_bytes()
 
     return _runner

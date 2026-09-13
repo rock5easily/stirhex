@@ -7,8 +7,6 @@ class TestGoldenClipboard:
     """Golden comparison tests for Copy, Paste, Undo, and Redo operations."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_copy_paste_all(self, run_both_stirling):
         """Select all, copy to clipboard, delete content, paste, and verify perfect restoration."""
         test_data = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0] * 4)
@@ -31,8 +29,6 @@ class TestGoldenClipboard:
         assert orig_out == test_data, f"Data was not restored identically: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_cut_paste_all(self, run_both_stirling):
         """Select all, cut to clipboard, paste back, and verify identical data restoration."""
         test_data = bytes(range(32))
@@ -53,8 +49,6 @@ class TestGoldenClipboard:
         assert orig_out == test_data, f"Data was not restored identically: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_undo_single_and_multiple(self, run_both_stirling):
         """Perform multiple byte edits, execute Undo, and verify exact byte restoration."""
         test_data = bytes([0xFF] * 16)

@@ -21,7 +21,7 @@
 // 「マーク1/2/3」に合わせるのは、手で読み書きする人にとってそれが自然なため。
 // [Mark] の File / Size は情報。File の不一致は問題としない（共有が目的のため）。
 //
-// この単位は MFC / Win32 に依存しない（単体テストは porting/tests/core_test.cpp）。
+// この単位は MFC / Win32 に依存しない（単体テストは porting/tests/core/core_test.cpp）。
 #pragma once
 
 #include <map>

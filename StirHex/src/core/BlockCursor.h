@@ -71,6 +71,8 @@ public:
 
     // 絶対位置 pos のバイトを取得（原 BlockCursor_GetByteAt 0x0041b949）。
     //   前回位置(curAbs_)からの増分移動でブロック内アクセスを高速化する。成功で true。
+    // 編集でカーソルが動いてキャッシュが無効になっている場合は先頭から解決し直すため、
+    //   任意の順序で呼んでも結果は Seek+Read と一致する（Issue #182）。
     bool GetByteAt(FileOffset pos, unsigned char* out);
 
     // 絶対位置 pos のバイトを in-place で書換える（原 上書き編集 OverwriteByteAtCaret 相当）。
@@ -117,6 +119,12 @@ private:
     BlockNode* curNode_;
     int        curOffset_;  // ノード内オフセット（0..capacity, 16KB 上限のため int）
     FileOffset curAbs_;     // 原 +0xc: 直近アクセスの絶対位置キャッシュ(GetByteAt/Search で使用)
+    // curAbs_ が curNode_/curOffset_ と整合しているか（Issue #182）。
+    //   原は絶対位置キャッシュの有効性を管理しておらず、編集で curNode_/curOffset_ だけが
+    //   動くと GetByteAt の増分移動が誤った位置を読んでいた。移植では無効化フラグを持ち、
+    //   無効なら GetByteAt が先頭から解決し直す。検索の内側ループは走査開始時の
+    //   Seek(kBegin) で有効化されるため、増分アクセスの速度は保たれる。
+    bool       curAbsValid_;
 };
 
 }  // namespace stirling

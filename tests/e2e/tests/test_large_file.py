@@ -22,6 +22,7 @@ import win32event
 import win32gui
 from pywinauto import timings
 
+from drivers import bgrep
 from drivers.stirling_driver import (
     ID_JUMP,
     ID_REVERT_FILE,
@@ -53,21 +54,22 @@ ID_EDIT_FIND = 57636
 IDYES = 6
 
 
-def _build_large_file(path) -> None:
-    """0x00..0xFF を繰り返すパターンで埋め、MARKER_POS に一意な印を置く。
+def _build_large_file(path, size: int = LARGE_SIZE, marker_pos: int = MARKER_POS) -> None:
+    """0x00..0xFF を繰り返すパターンで埋め、marker_pos に一意な印を置く。
 
     位置ごとに値を計算すると 2GB 分の Python ループで数十分かかるため、
     周期 256 のブロックを一度だけ作って書き出しを繰り返す。位置の検証は
     MARKER と、元ファイルとの直接比較で行うため周期性は問題にならない。
+    size / marker_pos は 4GiB 側のフィクスチャが差し替える（Issue #205）。
     """
     block = bytes(range(256)) * (CHUNK // 256)
     with open(path, "wb") as fp:
         written = 0
-        while written < LARGE_SIZE:
-            n = min(CHUNK, LARGE_SIZE - written)
+        while written < size:
+            n = min(CHUNK, size - written)
             fp.write(block[:n])
             written += n
-        fp.seek(MARKER_POS)
+        fp.seek(marker_pos)
         fp.write(MARKER)
 
 
@@ -381,3 +383,94 @@ class TestLargeFile:
             )
 
             assert _close_and_wait(drv), "終了しなかった"
+
+
+# --- 4 GiB 境界（Issue #205） ---
+#
+# 2GB 系より更に重い（ファイル生成に数 GB の書き込み、読み込みも長い）ため、専用の
+# オプトインにする。STIRLING_E2E_LARGE とは別に STIRLING_E2E_LARGE_4G=1 を要求する。
+#
+# ここで見るのは 32bit へ落ちると壊れる値だけに絞る。
+#   - 4 GiB を跨ぐ位置のジャンプとステータスバーのサイズ表示
+#   - 4 GiB 超のヒット位置（BGREP の通知は WPARAM へ入れると 4GB の倍数が 0 に化ける）
+#   - 4 GiB を跨ぐ範囲保存のサイズと境界のバイト
+
+LARGE4G_SIZE = (4 << 30) + (1 << 20)          # 4 GiB + 1 MiB
+MARKER4G_POS = (4 << 30) + 4096               # 4 GiB 超のマーカー位置
+RANGE4G_START = (4 << 30) - (64 << 10)        # 範囲保存の開始（4GiB の手前）
+RANGE4G_END = (4 << 30) + (64 << 10)          # 同終了（4GiB の先）
+
+
+@pytest.fixture(scope="module")
+def large_file_4g(tmp_path_factory):
+    if os.environ.get("STIRLING_E2E_LARGE_4G") != "1":
+        pytest.skip("set STIRLING_E2E_LARGE_4G=1 to run the 4GiB scenarios")
+    path = tmp_path_factory.mktemp("large4g") / "large4g.bin"
+    _build_large_file(path, size=LARGE4G_SIZE, marker_pos=MARKER4G_POS)
+    assert path.stat().st_size == LARGE4G_SIZE
+    return path
+
+
+@pytest.mark.ported
+class TestLargeFile4Gib:
+    """4 GiB 境界。32bit へ落ちる実装だとここで必ず壊れる。"""
+
+    def test_size_and_jump_across_4gib(self, ported_exe_path, large_file_4g):
+        """4 GiB を跨ぐ位置へジャンプでき、文書サイズが 32bit へ丸まらない。"""
+        with StirlingDriver(ported_exe_path) as drv:
+            _open_large_file(drv, large_file_4g)
+
+            drv.jump_to_address(f"{MARKER4G_POS:X}", is_hex=True)
+            assert _current_address(drv) == MARKER4G_POS, "4GiB 超の位置へジャンプできていない"
+
+            drv.jump_to_address(f"{LARGE4G_SIZE:X}", is_hex=True)
+            assert _current_address(drv) == LARGE4G_SIZE, "末尾へジャンプできていない"
+
+            # サイズ表示。桁落ちすると 4GiB を引いた値（1 MiB 相当）になる。
+            sizes = [t for t in drv.get_all_statusbar_text() if "Bytes" in t]
+            assert sizes, f"サイズ表示のペインが無い: {drv.get_all_statusbar_text()}"
+            digits = re.sub(r"[^0-9]", "", sizes[0])
+            assert digits == str(LARGE4G_SIZE), f"サイズ表示が違う: {sizes[0]}"
+
+            assert _close_and_wait(drv), "終了しなかった"
+
+    def test_bgrep_reports_hit_beyond_4gib(self, ported_exe_path, large_file_4g):
+        """BGREP のヒット位置が 4 GiB を超えても欠けない（通知経路の 64bit 化。#156）。
+
+        コア側の TestBgrepNotify は通知構造体の型だけを固定しており、ワーカから
+        アウトプットペインへ実際に届く値までは通らない。
+        """
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start()
+            time.sleep(0.5)
+            lines, applied = bgrep.run(
+                drv,
+                large_file_4g.parent,
+                " ".join(f"{b:02X}" for b in MARKER),
+                file_mask="*.bin",
+                scan_timeout=900.0,   # 4GiB を走査するので既定の 60 秒では足りない
+            )
+
+        assert lines, f"BGREP が結果を返していない（実効値: {applied}）"
+        offsets = [line.rsplit(":", 1)[-1].strip().lower() for line in lines if ":" in line]
+        assert f"{MARKER4G_POS:08x}" in offsets, (
+            f"4GiB 超のヒット位置が正しく報告されない: {offsets}"
+        )
+
+    def test_range_save_across_4gib(self, ported_exe_path, large_file_4g, tmp_path):
+        """4 GiB を跨ぐ範囲の保存で、サイズと境界のバイトが保たれる。"""
+        out = tmp_path / "range_4g.bin"
+        with StirlingDriver(ported_exe_path) as drv:
+            _open_large_file(drv, large_file_4g)
+            drv.select_range_dialog(f"{RANGE4G_START:X}", f"{RANGE4G_END:X}", is_hex=True)
+            time.sleep(0.5)
+            drv.save_selection_via_dialog(out)
+            assert _close_and_wait(drv), "終了しなかった"
+
+        # 範囲指定は終端を含む（開始 0x… 〜 終了 0x… の両端が選択に入る）。
+        expected = RANGE4G_END - RANGE4G_START + 1
+        assert out.stat().st_size == expected, f"保存サイズが違う: {out.stat().st_size}"
+        assert _read_at(out, 0, 16) == _read_at(large_file_4g, RANGE4G_START, 16), "先頭が違う"
+        assert _read_at(out, expected - 16, 16) == _read_at(
+            large_file_4g, RANGE4G_END - 15, 16
+        ), "末尾が違う"

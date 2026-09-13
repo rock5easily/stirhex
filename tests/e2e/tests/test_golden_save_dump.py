@@ -7,8 +7,6 @@ class TestGoldenSaveDump:
     """Golden comparison tests for Save Dump (Text Dump Output) functionality."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_save_dump_whole(self, run_both_stirling):
         """Save formatted text dump of the entire binary document and compare original vs ported."""
         test_data = bytes(range(64)) + b"HELLO_STIRLING_TEXT_DUMP_GOLDEN_TEST"

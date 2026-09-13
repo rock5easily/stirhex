@@ -6,6 +6,7 @@
 #include "BlockFileIO.h"
 
 #include "StreamFileWriter.h"   // 保存は temp→置換で行う（Issue #170）
+#include "Win32FileHooks.h"     // I/O 故障注入のための薄いラッパ（Issue #180）
 #include "util/ScopedHandle.h"
 
 #include <windows.h>
@@ -126,7 +127,7 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
         DWORD filled = 0;
         while (filled < want) {
             DWORD got = 0;
-            if (!::ReadFile(h.Get(), big.data() + filled, want - filled, &got, nullptr)) {
+            if (!io::Read(h.Get(), big.data() + filled, want - filled, &got)) {
                 const DWORD err = ::GetLastError();
                 list.Clear();   // 中途半端なブロック列を残さない
                 return MakeResult(FileIoStatus::kReadFailed, err, fileSize);

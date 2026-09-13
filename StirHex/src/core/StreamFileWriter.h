@@ -62,6 +62,8 @@ public:
     //   ReplaceFileW が ERROR_UNABLE_TO_MOVE_REPLACEMENT で失敗し、続く MoveFileExW も
     //   失敗した場合に限る。この一時ファイルは書き込んだ内容の唯一の実体なので削除せず、
     //   呼出側が利用者へ知らせられるようにパスを残す（それ以外の失敗では空。Issue #170）。
+    //   同じ値は Commit() の戻り値 FileIoResult::keptTempPath にも載るので、結果しか
+    //   受け取らない呼出側（SaveBlocksToFile 経由など）でも参照できる（Issue #186）。
     const std::wstring& KeptTempPath() const { return keptTempPath_; }
 
 private:

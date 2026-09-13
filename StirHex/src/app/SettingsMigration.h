@@ -23,7 +23,7 @@
 // 復元できない場合は書き換えない:
 //   RepairCp932ViaAcp は「ACP バイト列への巻き戻しが可逆であること」と「得られたバイト列が
 //   CP932 として妥当であること」を検証し、どちらかが崩れたら false を返す。呼び出し側は
-//   値を温存する。実測した ACP 別の挙動は次のとおり（porting/tests/core_test.cpp）。
+//   値を温存する。実測した ACP 別の挙動は次のとおり（porting/tests/core/core_test.cpp）。
 //
 //   - 932            : 変換が恒等。移行不要（false を返す）
 //   - 1252 / 1250 等 : SBCS は全バイトが可逆に写るため完全に復元できる
@@ -35,7 +35,7 @@
 //                      ないと判定されて結局拒否されるが、意図を暗黙の挙動に頼らない）
 //
 // この単位は MFC に依存しない（Win32 の文字コード変換のみ）。単体テストは
-// porting/tests/core_test.cpp。
+// porting/tests/core/core_test.cpp。
 #pragma once
 
 #include <string>

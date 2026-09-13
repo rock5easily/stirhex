@@ -1,6 +1,8 @@
 // StreamFileWriter 実装（Issue #155）。
 #include "StreamFileWriter.h"
 
+#include "Win32FileHooks.h"   // I/O 故障注入のための薄いラッパ（Issue #180）
+
 #include <windows.h>
 
 namespace stirling {
@@ -78,8 +80,7 @@ bool ReplaceTargetWithTemp(const std::wstring& temp, const std::wstring& target,
     err = 0;
     if (exists) {
         for (int i = 0; i < kAttempts; ++i) {
-            if (::ReplaceFileW(target.c_str(), temp.c_str(), nullptr,
-                               REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) {
+            if (io::Replace(target.c_str(), temp.c_str())) {
                 return true;
             }
             const DWORD code = ::GetLastError();
@@ -93,8 +94,7 @@ bool ReplaceTargetWithTemp(const std::wstring& temp, const std::wstring& target,
     //   削除され一時ファイルだけが残る（lpBackupFileName を渡していないため）。その状態を
     //   救えるのはこの移動だけなので、共有違反はここでも数回再試行する。
     for (int i = 0; i < kAttempts; ++i) {
-        if (::MoveFileExW(temp.c_str(), target.c_str(),
-                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+        if (io::Move(temp.c_str(), target.c_str())) {
             return true;
         }
         const DWORD code = ::GetLastError();
@@ -160,7 +160,7 @@ FileIoResult StreamFileWriter::Write(const void* data, size_t size) {
         const DWORD want = (left < static_cast<size_t>(kWriteChunk))
                                ? static_cast<DWORD>(left) : kWriteChunk;
         DWORD wrote = 0;
-        if (!::WriteFile(handle_, p, want, &wrote, nullptr)) {
+        if (!io::Write(handle_, p, want, &wrote)) {
             return MakeResult(FileIoStatus::kWriteFailed, ::GetLastError(), written_);
         }
         if (wrote == 0) {   // ディスク不足等で進まない
@@ -181,7 +181,7 @@ FileIoResult StreamFileWriter::Commit() {
     //   実デバイスへ書き出す時点で初めて表面化する。CloseHandle の戻り値では検出できない
     //   ため、置換の前に明示フラッシュして成否を確認する（Issue #166）。
     //   ここで失敗しても Abort() が一時ファイルを削除するだけで、出力先は元のまま。
-    if (!::FlushFileBuffers(handle_)) {
+    if (!io::Flush(handle_)) {
         const DWORD err = ::GetLastError();
         Abort();   // handle_ もここで閉じる
         return MakeResult(FileIoStatus::kWriteFailed, err, written_);
@@ -209,7 +209,9 @@ FileIoResult StreamFileWriter::Commit() {
             tempPath_.clear();   // Abort() に削除させない
         }
         Abort();   // 置換できなければ出力先は元のまま
-        return MakeResult(FileIoStatus::kWriteFailed, replaceErr, written_);
+        FileIoResult failed = MakeResult(FileIoStatus::kWriteFailed, replaceErr, written_);
+        failed.keptTempPath = keptTempPath_;   // 呼出側が利用者へ知らせられるよう結果へ載せる
+        return failed;
     }
     const FileOffset total = written_;
     tempPath_.clear();

@@ -13,8 +13,6 @@ class TestGoldenSelectionFill:
     """Golden comparison tests for Range Selection, Fill Selection, and Save Selection."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_select_all_and_fill(self, run_both_stirling):
         """Select all data and fill with 0xFF byte."""
         test_data = bytes(range(64))  # 64 bytes varying 0x00 .. 0x3F
@@ -33,8 +31,6 @@ class TestGoldenSelectionFill:
         assert orig_out == expected, f"Original fill selection mismatch: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_select_all_and_delete(self, run_both_stirling):
         """Select all data and delete the entire selection."""
         test_data = b"DATA_TO_BE_DELETED_COMPLETELY"
@@ -53,8 +49,6 @@ class TestGoldenSelectionFill:
         assert orig_out == expected, f"Original delete selection mismatch: {orig_out}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_save_selection(self, run_both_stirling, tmp_path):
         """Select all data and save selection to a separate binary file."""
         test_data = b"SELECTED_RANGE_PRESERVATION_TEST_2026"

@@ -7,8 +7,6 @@ class TestGoldenRevert:
     """Golden comparison tests for Revert File functionality (ID_REVERT_FILE = 32813)."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_revert_after_edit(self, run_both_stirling):
         """Perform modifications, execute Revert File, type new byte, and verify clean state reset."""
         test_data = b"PRE_EDIT_ORIGINAL_DATA_BLOCK_1234567890"

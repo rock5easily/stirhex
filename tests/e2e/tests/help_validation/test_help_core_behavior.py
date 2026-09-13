@@ -22,6 +22,21 @@ ID_WINDOW_TILE_HORZ = 0xE133
 ID_WINDOW_TILE_VERT = 0xE134
 
 
+PE_MACHINE_AMD64 = 0x8664
+PE_MACHINE_I386 = 0x14C
+_PE_MACHINE_NAMES = {PE_MACHINE_AMD64: "AMD64", PE_MACHINE_I386: "i386"}
+
+
+def _expected_pe_machine(exe_path: Path) -> int:
+    """ビルド出力先から期待する PE マシン種別を返す。
+
+    x64 ビルドは ``StirHex/x64/<Config>/bin``、Win32 ビルドは ``StirHex/<Config>/bin``
+    に出力される。STIRLING_PLATFORM の既定解決は conftest 側にあるため、
+    ここでは実際に解決された exe のパスから判定する。
+    """
+    return PE_MACHINE_AMD64 if "x64" in exe_path.parts else PE_MACHINE_I386
+
+
 def _window_texts(root_hwnd: int) -> list[str]:
     texts: list[str] = []
 
@@ -126,7 +141,11 @@ class TestHelpCoreBehavior:
         pe_offset = struct.unpack_from("<I", image, 0x3C)[0]
         assert image[pe_offset : pe_offset + 4] == b"PE\0\0"
         machine = struct.unpack_from("<H", image, pe_offset + 4)[0]
-        assert machine == 0x8664, f"expected AMD64 PE, got {machine:#x}"
+        expected_machine = _expected_pe_machine(exe)
+        assert machine == expected_machine, (
+            f"expected {_PE_MACHINE_NAMES[expected_machine]} PE for {exe}, "
+            f"got {machine:#x}"
+        )
 
         with StirlingDriver(exe) as drv:
             drv.start()
@@ -185,7 +204,7 @@ class TestHelpCoreBehavior:
 
             menu = win32gui.GetMenu(drv.hwnd)
             assert menu
-            assert win32gui.GetMenuItemCount(menu) == 6
+            assert win32gui.GetMenuItemCount(menu) == 7  # Tools menu (Issue #226)
 
             visible_classes = _visible_child_classes(drv.hwnd)
             assert "ToolbarWindow32" in visible_classes

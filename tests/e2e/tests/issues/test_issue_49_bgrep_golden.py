@@ -1,35 +1,20 @@
-"""BGREP（フォルダ横断検索）の原版突き合わせ（Issue #49 / 親 #16）。
+"""BGREP（フォルダ横断検索）の原版突き合わせとオプション検証（Issue #49 / 親 #16、#205）。
 
 BGREP はダイアログ入力（検索データ・ファイル種別・フォルダ）と結果のアウトプット
 ペインという、Unicode 化（#41）とシェル系モダナイズ（#45）の両方が通る経路。
 原版と移植版へ同じ条件を与え、アウトプットペインの結果行が一致することを確認する。
 
 原・移植ともアウトプットペインは素の CListBox で、1 行は "フルパス : %08X"。
-原は ANSI ウィンドウなので、行の取得は _listbox_texts のネイティブ形式読みに任せる。
+ダイアログ操作と結果読み取りのヘルパは drivers/bgrep.py にある（4GiB のケースからも
+使うため。#205）。
 """
 import time
 from pathlib import Path
 
 import pytest
-import win32con
-import win32gui
 
-from drivers.stirling_driver import (
-    ID_BGREP,
-    StirlingDriver,
-    _control_text,
-    _listbox_texts,
-    _set_control_text,
-    safe_set_focus,
-)
-
-# BGREP ダイアログ（IDD_BGREP 172）のコントロール ID。原版と共通。
-IDC_BGREP_DATA_COMBO = 1026
-IDC_BGREP_TYPE_HEX = 1016
-IDC_BGREP_TYPE_TEXT = 1017
-IDC_BGREP_FILE_COMBO = 1027
-IDC_BGREP_FOLDER = 1007
-IDC_BGREP_RECURSE = 1011
+from drivers import bgrep
+from drivers.stirling_driver import StirlingDriver
 
 PATTERN = b"\xDE\xAD\xC0\xDE"
 # 原版の 16 進入力はバイトを空白で区切る（既定値 "AA BB CC" と同じ書式）。
@@ -56,138 +41,10 @@ def _make_corpus(root: Path) -> None:
     (root / "other.bin").write_bytes(bytes(other))
 
 
-def _find_dialog(drv: StirlingDriver, ctrl_id: int, timeout: float = 10.0) -> int:
-    """指定コントロールを持つ #32770 を待つ。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for hwnd, cls, _title in drv._get_process_windows():
-            if cls == "#32770" and win32gui.GetDlgItem(hwnd, ctrl_id):
-                return hwnd
-        time.sleep(0.2)
-    raise AssertionError(f"ダイアログ（ctrl {ctrl_id}）が出なかった")
-
-
-def _wait_dialogs_closed(drv: StirlingDriver, timeout: float = 60.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not [h for h, cls, _t in drv._get_process_windows() if cls == "#32770"]:
-            return
-        time.sleep(0.2)
-    raise AssertionError("BGREP のダイアログが閉じない")
-
-
-def _output_lines(drv: StirlingDriver, timeout: float = 30.0) -> list[str]:
-    """アウトプットペインのリストボックス行を取得する。"""
-    deadline = time.time() + timeout
-    last: list[str] = []
-    while time.time() < deadline:
-        boxes: list[int] = []
-
-        def _enum(hwnd, _):
-            if win32gui.GetClassName(hwnd) == "ListBox":
-                boxes.append(hwnd)
-            return True
-
-        win32gui.EnumChildWindows(drv.hwnd, _enum, None)
-        for box in boxes:
-            texts = _listbox_texts(box)
-            if texts:
-                last = texts
-                return last
-        time.sleep(0.3)
-    return last
-
-
-def _click_to_state(dlg: int, ctrl_id: int, checked: bool) -> None:
-    """ラジオ／チェックを目的の状態へ。既に目的の状態ならクリックしない。"""
-    hwnd = win32gui.GetDlgItem(dlg, ctrl_id)
-    assert hwnd, f"コントロール {ctrl_id} が見つからない"
-    want = 1 if checked else 0
-    if win32gui.SendMessage(hwnd, win32con.BM_GETCHECK, 0, 0) != want:
-        win32gui.SendMessage(hwnd, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.2)
-    state = win32gui.SendMessage(hwnd, win32con.BM_GETCHECK, 0, 0)
-    assert state == want, f"コントロール {ctrl_id} を {want} にできない（実際: {state}）"
-
-
-def _set_and_verify(dlg: int, ctrl_id: int, text: str, attempts: int = 10) -> None:
-    """コントロールへ値を入れ、実際に入ったことを読み返して確かめる。
-
-    ダイアログは前回値（検索データの既定 "AA BB CC" や前回のフォルダ）を
-    OnInitDialog の DDX で流し込む。コントロールが生成された直後に書くと
-    その初期化に上書きされ、既定値のまま検索してしまう。読み返して一致する
-    まで書き直すことで、値が確実に反映されてから OK を押す。
-    """
-    hwnd = win32gui.GetDlgItem(dlg, ctrl_id)
-    assert hwnd, f"コントロール {ctrl_id} が見つからない"
-    for _ in range(attempts):
-        _set_control_text(hwnd, text)
-        time.sleep(0.2)
-        if _control_text(hwnd) == text:
-            return
-    raise AssertionError(
-        f"コントロール {ctrl_id} に {text!r} を設定できない（実際: {_control_text(hwnd)!r}）"
-    )
-
-
-def _run_bgrep(drv: StirlingDriver, folder: Path) -> list[str]:
-    safe_set_focus(drv.hwnd)
-    time.sleep(0.3)
-    drv.post_command(ID_BGREP)
-
-    dlg = _find_dialog(drv, IDC_BGREP_FOLDER)
-    time.sleep(0.5)   # OnInitDialog の DDX が終わるのを待つ
-
-    # データ種別＝16進、サブフォルダ検索＝オフ。
-    #   BM_SETCHECK は見た目を変えるだけで BN_CLICKED を出さないため、アプリ側が
-    #   通知で状態を持つ実装だと前回値（文字列検索など）のまま検索してしまう。
-    #   利用者と同じ経路になるよう BM_CLICK で切り替える。
-    _click_to_state(dlg, IDC_BGREP_TYPE_HEX, True)
-    _click_to_state(dlg, IDC_BGREP_RECURSE, False)
-    _set_and_verify(dlg, IDC_BGREP_DATA_COMBO, PATTERN_HEX)
-    _set_and_verify(dlg, IDC_BGREP_FILE_COMBO, "*.dat")
-    _set_and_verify(dlg, IDC_BGREP_FOLDER, str(folder))
-
-    # OK を押す直前の実効値。食い違ったときに原因を特定できるよう記録する。
-    applied = {
-        "data": _control_text(win32gui.GetDlgItem(dlg, IDC_BGREP_DATA_COMBO)),
-        "filetype": _control_text(win32gui.GetDlgItem(dlg, IDC_BGREP_FILE_COMBO)),
-        "folder": _control_text(win32gui.GetDlgItem(dlg, IDC_BGREP_FOLDER)),
-        "hex_checked": win32gui.SendMessage(
-            win32gui.GetDlgItem(dlg, IDC_BGREP_TYPE_HEX), win32con.BM_GETCHECK, 0, 0),
-        "text_checked": win32gui.SendMessage(
-            win32gui.GetDlgItem(dlg, IDC_BGREP_TYPE_TEXT), win32con.BM_GETCHECK, 0, 0),
-        "recurse_checked": win32gui.SendMessage(
-            win32gui.GetDlgItem(dlg, IDC_BGREP_RECURSE), win32con.BM_GETCHECK, 0, 0),
-        "corpus": sorted(p.name for p in folder.iterdir()),
-    }
-
-    win32gui.PostMessage(dlg, win32con.WM_COMMAND, 1, 0)   # IDOK
-    _wait_dialogs_closed(drv)
-    return _output_lines(drv), applied
-
-
-def _normalize(lines: list[str], folder: Path) -> list[str]:
-    """比較用にフォルダ部分を除き、ファイル名とオフセットだけにして並べ替える。"""
-    out = []
-    for line in lines:
-        text = line.strip()
-        if not text:
-            continue
-        root = str(folder).lower()
-        lowered = text.lower()
-        if root in lowered:
-            text = text[lowered.index(root) + len(root):].lstrip(r"\\/")
-        out.append(text.lower())
-    return sorted(out)
-
-
 class TestIssue49BgrepGolden:
     """BGREP の検出結果が原版と一致することを確認する。"""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_bgrep_hits_match_original(self, original_exe_path, ported_exe_path, tmp_path):
         orig_dir = tmp_path / "orig"
         port_dir = tmp_path / "port"
@@ -199,15 +56,15 @@ class TestIssue49BgrepGolden:
         with StirlingDriver(original_exe_path) as drv:
             drv.start()
             time.sleep(0.5)
-            orig_lines, orig_applied = _run_bgrep(drv, orig_dir)
+            orig_lines, orig_applied = bgrep.run(drv, orig_dir, PATTERN_HEX)
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
             time.sleep(0.5)
-            port_lines, port_applied = _run_bgrep(drv, port_dir)
+            port_lines, port_applied = bgrep.run(drv, port_dir, PATTERN_HEX)
 
-        orig_norm = _normalize(orig_lines, orig_dir)
-        port_norm = _normalize(port_lines, port_dir)
+        orig_norm = bgrep.normalize(orig_lines, orig_dir)
+        port_norm = bgrep.normalize(port_lines, port_dir)
 
         assert orig_norm, f"原版が結果を返していない: {orig_lines}"
         assert port_norm == orig_norm, (
@@ -215,3 +72,118 @@ class TestIssue49BgrepGolden:
             f"原版 : {orig_norm}\n  実効値: {orig_applied}\n"
             f"移植版: {port_norm}\n  実効値: {port_applied}"
         )
+
+
+class TestIssue49BgrepOptions:
+    """再帰・拡張子・文字列検索・結果からのオープン（移植版。Issue #205）。
+
+    上のケースは 16進・再帰なし・`*.dat` に固定で、ダイアログの他の条件も、結果一覧を
+    使う操作も通っていなかった。
+    """
+
+    @pytest.mark.ported
+    def test_recurse_option_controls_subfolder_search(self, ported_exe_path, tmp_path):
+        """サブフォルダのヒットは、再帰オンのときだけ結果に出る。"""
+        root = tmp_path / "corpus"
+        root.mkdir()
+        _make_corpus(root)
+        deep = root / "sub" / "deeper"
+        deep.mkdir(parents=True)
+        nested = bytearray(bytes(range(256)))
+        nested[0x30:0x34] = PATTERN
+        (deep / "nested.dat").write_bytes(bytes(nested))
+
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start()
+            time.sleep(0.5)
+
+            off_lines, off_applied = bgrep.run(drv, root, PATTERN_HEX, recurse=False)
+            off = bgrep.normalize(off_lines, root)
+            assert off, f"再帰オフでも直下のヒットは出る: {off_lines} / {off_applied}"
+            assert not any("nested.dat" in line for line in off), (
+                f"再帰オフでサブフォルダを検索している: {off}"
+            )
+
+            on_lines, on_applied = bgrep.run(drv, root, PATTERN_HEX, recurse=True)
+            on = bgrep.normalize(on_lines, root)
+            assert any("nested.dat" in line for line in on), (
+                f"再帰オンでサブフォルダのヒットが出ない: {on} / {on_applied}"
+            )
+            assert len(on) > len(off), "再帰オンは直下のヒットも含む"
+
+    @pytest.mark.ported
+    def test_file_mask_selects_the_files_to_scan(self, ported_exe_path, tmp_path):
+        """対象拡張子の指定で走査対象が変わる（*.dat では other.bin を拾わない）。"""
+        root = tmp_path / "corpus_mask"
+        root.mkdir()
+        _make_corpus(root)   # other.bin にも PATTERN がある
+
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start()
+            time.sleep(0.5)
+
+            dat_only = bgrep.normalize(bgrep.run(drv, root, PATTERN_HEX, file_mask="*.dat")[0], root)
+            assert dat_only, "*.dat のヒットが無い"
+            assert not any("other.bin" in line for line in dat_only), (
+                f"対象外の拡張子まで走査している: {dat_only}"
+            )
+
+            bin_only = bgrep.normalize(bgrep.run(drv, root, PATTERN_HEX, file_mask="*.bin")[0], root)
+            assert any("other.bin" in line for line in bin_only), (
+                f"*.bin を指定しても other.bin のヒットが出ない: {bin_only}"
+            )
+            assert not any("hit_a.dat" in line for line in bin_only), (
+                f"*.bin の指定で .dat まで走査している: {bin_only}"
+            )
+
+    @pytest.mark.ported
+    def test_text_search_finds_japanese_string(self, ported_exe_path, tmp_path):
+        """文字列検索（CP932 の日本語）でヒット位置が返る。"""
+        root = tmp_path / "corpus_text"
+        root.mkdir()
+        needle = "検索対象"
+        body = b"HEAD" + needle.encode("cp932") + b"TAIL"
+        (root / "text_hit.dat").write_bytes(body)
+        (root / "text_miss.dat").write_bytes(b"NOTHING TO SEE HERE")
+
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start()
+            time.sleep(0.5)
+            lines, applied = bgrep.run(drv, root, needle, hex_mode=False)
+
+        found = bgrep.normalize(lines, root)
+        assert any("text_hit.dat" in line for line in found), (
+            f"文字列検索でヒットしない: {found} / 実効値: {applied}"
+        )
+        assert not any("text_miss.dat" in line for line in found), (
+            f"含まれないファイルまでヒットしている: {found}"
+        )
+        # 行は "フルパス : %08X"。ヒット位置は "HEAD" の直後。
+        hit = [line for line in found if "text_hit.dat" in line][0]
+        assert hit.endswith(f"{len(b'HEAD'):08x}"), f"ヒット位置が違う: {hit}"
+
+    @pytest.mark.ported
+    def test_result_line_opens_the_file_at_the_hit(self, ported_exe_path, tmp_path):
+        """結果行を実行すると、そのファイルがヒット位置で開く。"""
+        root = tmp_path / "corpus_open"
+        root.mkdir()
+        _make_corpus(root)
+
+        with StirlingDriver(ported_exe_path) as drv:
+            drv.start()
+            time.sleep(0.5)
+            lines, _applied = bgrep.run(drv, root, PATTERN_HEX)
+            assert lines, "結果が無いと開く操作を確認できない"
+
+            # hit_b.dat（0x00000004 の 1 件）の行を選んで実行する。
+            index = next(i for i, line in enumerate(lines) if "hit_b.dat" in line.lower())
+            bgrep.activate_output_line(drv, index)
+            time.sleep(1.0)
+
+            titles = drv.get_mdi_child_titles()
+            assert any("hit_b.dat" in title for title in titles), (
+                f"結果から対象ファイルが開かれない: {titles}"
+            )
+            assert drv.get_statusbar_pane_text(1) == "0x00000004", (
+                f"ヒット位置へ移動していない: {drv.get_all_statusbar_text()}"
+            )

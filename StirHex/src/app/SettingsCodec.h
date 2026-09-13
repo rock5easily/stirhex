@@ -10,7 +10,7 @@
 //   - 旧レジストリの REG_DWORD とは別の値名を使う（旧値名は移行読み込み専用とし、
 //     保存時に削除する）
 //
-// この codec は MFC / Win32 に依存しない（porting/tests/core_test.cpp で単体テストする）。
+// この codec は MFC / Win32 に依存しない（porting/tests/core/core_test.cpp で単体テストする）。
 //
 // ナロー版とワイド版:
 //   保存形式は 16進表記だけの ASCII 層（設計メモ 20_unicode_layering.md §2）であり、

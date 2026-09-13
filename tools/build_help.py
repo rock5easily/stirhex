@@ -298,7 +298,7 @@ def toc_for(chapter: Chapter) -> str:
     return f'<nav class="toc"><strong>このページの内容</strong><ul>{links}</ul></nav>'
 
 
-def build() -> int:
+def build(output_dir: Path = HELP_DIR) -> int:
     sources = sorted(p for p in SRC_DIR.glob("*.md") if not p.name.startswith("_"))
     if not sources:
         print(f"no markdown sources under {SRC_DIR}", file=sys.stderr)
@@ -314,6 +314,7 @@ def build() -> int:
             return 1
         chapters.append(chapter)
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     for pos, chapter in enumerate(chapters):
         prev_link = (
             f'<a href="{chapters[pos - 1].out_name}">&laquo; {html.escape(chapters[pos - 1].title)}</a>'
@@ -332,7 +333,7 @@ def build() -> int:
             body=toc_for(chapter) + chapter.body,
             nav=f'<nav class="chapters"><span>{prev_link}</span><span>{next_link}</span></nav>',
         )
-        (HELP_DIR / chapter.out_name).write_text(page, encoding="utf-8", newline="\n")
+        (output_dir / chapter.out_name).write_text(page, encoding="utf-8", newline="\n")
 
     items: list[str] = []
     for chapter in chapters:
@@ -353,9 +354,9 @@ def build() -> int:
         body='<h1>StirHex ヘルプ</h1><nav class="toc"><ul>' + "".join(items) + "</ul></nav>",
         nav="",
     )
-    (HELP_DIR / "index.html").write_text(index, encoding="utf-8", newline="\n")
+    (output_dir / "index.html").write_text(index, encoding="utf-8", newline="\n")
 
-    print(f"built {len(chapters)} chapter page(s) + index.html into {HELP_DIR}")
+    print(f"built {len(chapters)} chapter page(s) + index.html into {output_dir}")
     return 0
 
 

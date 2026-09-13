@@ -1,26 +1,27 @@
 // core 層（BlockList / BlockCursor）単体テスト。
 // 線形参照モデル（std::vector）と並行操作し、毎回バイト一致・構造不変条件を検証する。
-// ビルド: porting/tests/build_core_test.ps1（cl.exe）または任意の C++17 コンパイラ。
-#include "../StirHex/src/core/BlockCursor.h"
-#include "../StirHex/src/core/BlockFileIO.h"
-#include "../StirHex/src/core/StreamFileWriter.h"
-#include "../StirHex/src/core/BgrepNotify.h"
-#include "../StirHex/src/core/BlockList.h"
-#include "../StirHex/src/app/SettingsCodec.h"
-#include "../StirHex/src/app/SettingsMigration.h"
-#include "../StirHex/src/app/SettingsStore.h"
-#include "../StirHex/src/app/SettingsFile.h"
-#include "../StirHex/src/util/PathParts.h"
-#include "../StirHex/src/app/MarkFile.h"
-#include "../StirHex/src/core/Cp932Text.h"
-#include "../StirHex/src/core/CharConv.h"
-#include "../StirHex/src/core/StructDef.h"
-#include "../StirHex/src/core/UndoBudget.h"
-#include "../StirHex/src/core/HexText.h"
-#include "../StirHex/src/core/Utf8Text.h"
-#include "../StirHex/src/core/Utf16Text.h"
+// ビルド: porting/tests/core/build_core_test.ps1（cl.exe）または任意の C++17 コンパイラ。
+#include "../../StirHex/src/core/BlockCursor.h"
+#include "../../StirHex/src/core/BlockFileIO.h"
+#include "../../StirHex/src/core/StreamFileWriter.h"
+#include "../../StirHex/src/core/BgrepNotify.h"
+#include "../../StirHex/src/core/BlockList.h"
+#include "../../StirHex/src/app/SettingsCodec.h"
+#include "../../StirHex/src/app/SettingsMigration.h"
+#include "../../StirHex/src/app/SettingsStore.h"
+#include "../../StirHex/src/app/SettingsFile.h"
+#include "../../StirHex/src/util/PathParts.h"
+#include "../../StirHex/src/app/MarkFile.h"
+#include "../../StirHex/src/core/Cp932Text.h"
+#include "../../StirHex/src/core/CharConv.h"
+#include "../../StirHex/src/core/StructDef.h"
+#include "../../StirHex/src/core/UndoBudget.h"
+#include "../../StirHex/src/core/HexText.h"
+#include "../../StirHex/src/core/Utf8Text.h"
+#include "../../StirHex/src/core/Utf16Text.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -38,7 +39,10 @@
 #include <vector>
 
 // windows.h を NOMINMAX 付きで取り込んだ後に含める（このヘッダも windows.h に依存する）。
-#include "../StirHex/src/app/ClipboardUtil.h"   // クリップボード転送の RAII（Issue #47）
+#include "../../StirHex/src/app/ClipboardUtil.h"   // クリップボード転送の RAII（Issue #47）
+#include "../../StirHex/src/core/Win32FileHooks.h"   // I/O 故障注入の差込口（Issue #180）
+
+#include "core/Checksum.h"
 
 using stirling::BlockCursor;
 using stirling::BlockList;
@@ -47,15 +51,35 @@ using stirling::FileOffset;
 using stirling::kBlockCapacity;
 using stirling::kReadChunk;
 
+#include "CoreTestReport.h"
+
+static core_test::Report g_report;
+static int TestPrintf(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    const int result = g_report.Print(format, args);
+    va_end(args);
+    return result;
+}
+
 static int g_failures = 0;
 static int g_checks = 0;
+// スキップしたテストの記録。ALL PASS が「登録した全テストを実検証した」意味に
+//   読めてしまわないよう、末尾でスキップ件数と理由を集計して表示する。
+static std::vector<std::string> g_skipped;
+
+static void SkipTest(const char* name, const char* reason) {
+    g_report.Skip(name, reason);
+    g_skipped.push_back(std::string(name) + " (" + reason + ")");
+    TestPrintf("  skipped (%s)\n", reason);
+}
 
 #define CHECK(cond, msg)                                                      \
     do {                                                                      \
         ++g_checks;                                                           \
         if (!(cond)) {                                                        \
             ++g_failures;                                                     \
-            std::printf("  FAIL: %s (%s:%d)\n", (msg), __FILE__, __LINE__);   \
+            TestPrintf("  FAIL: %s (%s:%d)\n", (msg), __FILE__, __LINE__);   \
         }                                                                     \
     } while (0)
 
@@ -72,10 +96,10 @@ static std::vector<unsigned char> ReadAll(BlockList& list) {
     if (total > 0) {
         BlockCursor c(&list);
         bool ok = c.Seek(0, BlockCursor::kBegin, nullptr);
-        if (!ok) { std::printf("  FAIL: ReadAll seek failed\n"); ++g_failures; return buf; }
+        if (!ok) { TestPrintf("  FAIL: ReadAll seek failed\n"); ++g_failures; return buf; }
         const FileOffset n = c.Read(total, buf.data());
         if (n != total) {
-            std::printf("  FAIL: ReadAll short read %lld/%lld\n",
+            TestPrintf("  FAIL: ReadAll short read %lld/%lld\n",
                         static_cast<long long>(n), static_cast<long long>(total));
             ++g_failures;
         }
@@ -83,14 +107,40 @@ static std::vector<unsigned char> ReadAll(BlockList& list) {
     return buf;
 }
 
-// 構造不変条件: 各ノード capacity==kBlockCapacity, 0<=usedLen<=capacity, 合計==size。
+// 構造不変条件: 各ノード capacity==kBlockCapacity, 0<=usedLen<=capacity, 合計==size に加え、
+//   前後リンクの整合・Count と実走査数の一致・逆走査の同一性まで見る（Issue #178）。
+//   走査は Count() の 2 倍で打ち切る（リンクが輪になっても無限ループしない）。
 static void CheckInvariants(BlockList& list, size_t expectedLen, const char* where) {
+    const int declared = list.Count();
+    const int limit = (declared > 0 ? declared : 1) * 2 + 4;
+
     FileOffset sum = 0;
-    for (BlockNode* n = list.GetHead(); n != nullptr; n = list.GetNext(n)) {
+    int seen = 0;
+    bool linksOk = true;
+    std::vector<BlockNode*> forward;
+    BlockNode* prev = nullptr;
+    for (BlockNode* n = list.GetHead(); n != nullptr && seen < limit; n = list.GetNext(n)) {
         CHECK(n->capacity == kBlockCapacity, where);
         CHECK(n->usedLen >= 0 && n->usedLen <= n->capacity, where);
+        if (list.GetPrev(n) != prev) { linksOk = false; }
         sum += n->usedLen;
+        forward.push_back(n);
+        prev = n;
+        ++seen;
     }
+    CHECK(seen == declared, where);                 // Count() と実走査数
+    CHECK(list.GetTail() == prev, where);           // 末尾は最後に辿ったノード
+    CHECK(linksOk, where);                          // prev リンクの整合
+
+    // 逆走査が前方走査の逆順と一致する（片方向だけ壊れた破損を捕まえる）。
+    std::vector<BlockNode*> backward;
+    int back = 0;
+    for (BlockNode* n = list.GetTail(); n != nullptr && back < limit; n = list.GetPrev(n), ++back) {
+        backward.push_back(n);
+    }
+    std::reverse(backward.begin(), backward.end());
+    CHECK(backward == forward, where);
+
     CHECK(sum == static_cast<FileOffset>(expectedLen), where);
     CHECK(list.GetTotalLength() == static_cast<FileOffset>(expectedLen), where);
 }
@@ -101,11 +151,11 @@ static void CheckEqual(BlockList& list, const std::vector<unsigned char>& ref, c
               (ref.empty() || std::memcmp(got.data(), ref.data(), ref.size()) == 0);
     if (!eq) {
         ++g_failures;
-        std::printf("  FAIL: content mismatch at %s (got %zu bytes, ref %zu)\n",
+        TestPrintf("  FAIL: content mismatch at %s (got %zu bytes, ref %zu)\n",
                     where, got.size(), ref.size());
         size_t lim = got.size() < ref.size() ? got.size() : ref.size();
         for (size_t i = 0; i < lim; ++i) {
-            if (got[i] != ref[i]) { std::printf("    first diff at %zu: got %02X ref %02X\n",
+            if (got[i] != ref[i]) { TestPrintf("    first diff at %zu: got %02X ref %02X\n",
                                                 i, got[i], ref[i]); break; }
         }
     }
@@ -114,7 +164,7 @@ static void CheckEqual(BlockList& list, const std::vector<unsigned char>& ref, c
 
 // ---- BlockList 基本操作 ----
 static void TestBlockListBasics() {
-    std::printf("TestBlockListBasics\n");
+    TestPrintf("TestBlockListBasics\n");
     BlockList list;
     CHECK(list.IsEmpty(), "new list empty");
     CHECK(list.Count() == 0, "new list count 0");
@@ -153,7 +203,7 @@ static void TestBlockListBasics() {
 
 // ---- Insert(多バイト) の well-defined 経路 ----
 static void TestMultiByteInsert() {
-    std::printf("TestMultiByteInsert\n");
+    TestPrintf("TestMultiByteInsert\n");
     BlockList list;
     NewEmptyDoc(list);
     std::vector<unsigned char> ref;
@@ -199,7 +249,7 @@ static void TestMultiByteInsert() {
 
 // ---- Read の跨ぎ読取・部分読取 ----
 static void TestRead() {
-    std::printf("TestRead\n");
+    TestPrintf("TestRead\n");
     BlockList list;
     NewEmptyDoc(list);
     std::vector<unsigned char> ref;
@@ -234,7 +284,7 @@ static void TestRead() {
 
 // ---- Seek origin=0 の絶対位置解決 & origin=1(pos=0) の絶対位置算出 ----
 static void TestSeek() {
-    std::printf("TestSeek\n");
+    TestPrintf("TestSeek\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
@@ -271,10 +321,12 @@ static void FillFullBlock(BlockList& list, BlockCursor& c, std::vector<unsigned 
 
 // ---- InsertByte のブロック分割（満杯ブロックの各位置への挿入）----
 static void TestInsertByteSplit() {
-    std::printf("TestInsertByteSplit\n");
+    TestPrintf("TestInsertByteSplit\n");
     // Issue #93 の修正で、最終バイト上(16383)と EOF 追記位置(16384)を含む
     // 全位置が素直な挿入と一致する。
-    for (int pos : {0, 1, 4000, 8191, 8192, 12000, 16382, 16383, 16384}) {
+    //   最終バイト上(16383)は名前付きの回帰ケース TestInsertByteFullBlockLastPos が
+    //   押し出し先まで含めて確認するため、ここでは重複させない（Issue #178）。
+    for (int pos : {0, 1, 4000, 8191, 8192, 12000, 16382, 16384}) {
         BlockList list;
         NewEmptyDoc(list);
         BlockCursor c(&list);
@@ -297,7 +349,7 @@ static void TestInsertByteSplit() {
 // 既存の最終バイトが入れ替わる（無警告のデータ破壊）。移植では特殊分岐を廃したため、
 // 通常の分割式どおり素直な挿入位置へ収まることを固定する。
 static void TestInsertByteFullBlockLastPos() {
-    std::printf("TestInsertByteFullBlockLastPos\n");
+    TestPrintf("TestInsertByteFullBlockLastPos\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
@@ -313,7 +365,16 @@ static void TestInsertByteFullBlockLastPos() {
     CheckEqual(list, expected, "InsertByte at used-1");
     CheckInvariants(list, expected.size(), "InsertByte at used-1");
     CHECK(list.Count() == 2, "InsertByte at used-1 splits into 2 blocks");
-    CHECK(expected[kBlockCapacity] == lastByte, "original last byte pushed right");
+
+    // 押し出しの確認はリスト側から読み出す（参照 vector を見るだけでは、
+    //   アプリの動作を一切通らないため回帰を検出できない。Issue #178）。
+    unsigned char at16383 = 0, at16384 = 0;
+    CHECK(c.Seek(kBlockCapacity - 1, BlockCursor::kBegin, nullptr) && c.Read(1, &at16383) == 1,
+          "read the inserted position");
+    CHECK(c.Seek(kBlockCapacity, BlockCursor::kBegin, nullptr) && c.Read(1, &at16384) == 1,
+          "read the pushed position");
+    CHECK(at16383 == 0xEE, "the inserted byte sits at the insert position");
+    CHECK(at16384 == lastByte, "original last byte pushed right");
 }
 
 // ---- 容量超過 Insert がブロック最終バイト上でも順序を保つ（Issue #93 回帰）----
@@ -321,7 +382,7 @@ static void TestInsertByteFullBlockLastPos() {
 // curOffset==usedLen-1 かつ現ブロックに収まらない挿入が分割にも空ブロック分岐にも入らず、
 // 最終バイトを右へずらさないまま後続ブロックへ追記していた（挿入内容が最終バイトの前に残る）。
 static void TestInsertOverflowAtLastByte() {
-    std::printf("TestInsertOverflowAtLastByte\n");
+    TestPrintf("TestInsertOverflowAtLastByte\n");
     // 満杯ブロック / 半端な末尾ブロックの双方で、収まらない量を最終バイト上へ挿入する。
     for (int used : {kBlockCapacity, kBlockCapacity - 1, 10000}) {
         for (int count : {1, 10, kBlockCapacity, kBlockCapacity * 2 + 7}) {
@@ -350,7 +411,7 @@ static void TestInsertOverflowAtLastByte() {
 
 // ---- DeleteByte（末尾ブロック除去含む）----
 static void TestDelete() {
-    std::printf("TestDelete\n");
+    TestPrintf("TestDelete\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
@@ -384,7 +445,7 @@ static void TestDelete() {
 
 // 単一ノードを1バイト削除で除去→空ブロック維持の確認（used==1 の relink=false 経路）。
 static void TestDeleteLastByteSingleBlock() {
-    std::printf("TestDeleteLastByteSingleBlock\n");
+    TestPrintf("TestDeleteLastByteSingleBlock\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
@@ -399,7 +460,7 @@ static void TestDeleteLastByteSingleBlock() {
 
 // ---- ファズ: InsertByte / DeleteByte を参照モデルと突合（全位置でクリーン動作）----
 static void TestFuzz() {
-    std::printf("TestFuzz\n");
+    TestPrintf("TestFuzz\n");
     BlockList list;
     NewEmptyDoc(list);
     BlockCursor c(&list);
@@ -416,14 +477,14 @@ static void TestFuzz() {
             int pos = static_cast<int>(rng() % (size + 1));
             unsigned char v = static_cast<unsigned char>(rng() & 0xFF);
             bool ok = c.InsertByte(pos, v);
-            if (!ok) { std::printf("  FAIL: fuzz InsertByte failed op=%d pos=%d\n", op, pos); ++g_failures; break; }
+            if (!ok) { TestPrintf("  FAIL: fuzz InsertByte failed op=%d pos=%d\n", op, pos); ++g_failures; break; }
             ref.insert(ref.begin() + pos, v);
         } else {
             int pos = static_cast<int>(rng() % size);
             unsigned char b;
             bool ok = c.DeleteByte(pos, &b);
-            if (!ok) { std::printf("  FAIL: fuzz DeleteByte failed op=%d pos=%d\n", op, pos); ++g_failures; break; }
-            if (b != ref[pos]) { std::printf("  FAIL: fuzz deleted byte mismatch op=%d\n", op); ++g_failures; break; }
+            if (!ok) { TestPrintf("  FAIL: fuzz DeleteByte failed op=%d pos=%d\n", op, pos); ++g_failures; break; }
+            if (b != ref[pos]) { TestPrintf("  FAIL: fuzz deleted byte mismatch op=%d\n", op); ++g_failures; break; }
             ref.erase(ref.begin() + pos);
         }
         // 全突合は高コストなので周期的に実施
@@ -441,23 +502,51 @@ static void TestFuzz() {
     CheckInvariants(list, ref.size(), "fuzz final");
     CHECK(mismatchAt == -1, "fuzz periodic compare");
     CHECK(list.Count() >= 3, "fuzz exercised multiple blocks");  // 跨ぎ読取・分割の網羅を担保
-    std::printf("  fuzz grew to %zu bytes, %d blocks\n", ref.size(), list.Count());
+    TestPrintf("  fuzz grew to %zu bytes, %d blocks\n", ref.size(), list.Count());
 }
 
 // ---- BlockFileIO: Load/Save ラウンドトリップ ----
 namespace fs = std::filesystem;
 
+// テスト実行ごとの専用一時ディレクトリ。%TEMP% 直下を共有すると、他プロセスや別の
+//   テスト実行が作るファイルで「一時ファイルを残さない」検証（ディレクトリ内容の前後比較）
+//   が揺れるため、実行単位で隔離する。
+static const fs::path& TestTempRoot() {
+    static const fs::path root = [] {
+        wchar_t name[128];
+        _snwprintf_s(name, _TRUNCATE, L"stirhex_core_test_%lu_%llu",
+                     static_cast<unsigned long>(::GetCurrentProcessId()),
+                     static_cast<unsigned long long>(::GetTickCount64()));
+        const fs::path p = fs::temp_directory_path() / name;
+        std::error_code ec;
+        fs::create_directories(p, ec);
+        return p;
+    }();
+    return root;
+}
+
 static fs::path TempFile(const char* tag) {
     static int counter = 0;
-    fs::path p = fs::temp_directory_path() /
-                 (std::string("stirling_core_test_") + tag + "_" + std::to_string(counter++) + ".bin");
-    return p;
+    return TestTempRoot() /
+           (std::string("stirling_core_test_") + tag + "_" + std::to_string(counter++) + ".bin");
+}
+
+// ディレクトリ直下のエントリ名（ソート済み）。件数ではなく集合で比較することで、
+//   「残骸が増えた」だけでなく「無関係なファイルが消えた」も検出できる。
+static std::vector<std::wstring> DirEntryNames(const fs::path& dir) {
+    std::vector<std::wstring> names;
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec); it != fs::directory_iterator(); it.increment(ec)) {
+        names.push_back(it->path().filename().wstring());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 // core の I/O はワイドパス（Issue #20）。テスト側のヘルパも _wfopen に揃える。
 static void WriteFile(const fs::path& p, const std::vector<unsigned char>& data) {
     std::FILE* f = _wfopen(p.wstring().c_str(), L"wb");
-    if (!f) { std::printf("  FAIL: cannot create temp %s\n", p.string().c_str()); ++g_failures; return; }
+    if (!f) { TestPrintf("  FAIL: cannot create temp %s\n", p.string().c_str()); ++g_failures; return; }
     if (!data.empty()) std::fwrite(data.data(), 1, data.size(), f);
     std::fclose(f);
 }
@@ -465,7 +554,7 @@ static void WriteFile(const fs::path& p, const std::vector<unsigned char>& data)
 static std::vector<unsigned char> ReadFileBytes(const fs::path& p) {
     std::vector<unsigned char> out;
     std::FILE* f = _wfopen(p.wstring().c_str(), L"rb");
-    if (!f) { std::printf("  FAIL: cannot open temp %s\n", p.string().c_str()); ++g_failures; return out; }
+    if (!f) { TestPrintf("  FAIL: cannot open temp %s\n", p.string().c_str()); ++g_failures; return out; }
     std::fseek(f, 0, SEEK_END);
     long n = std::ftell(f);
     std::rewind(f);
@@ -496,7 +585,7 @@ static void VerifyLoadedStructure(BlockList& list, size_t size, const char* wher
 }
 
 static void TestFileRoundTrip() {
-    std::printf("TestFileRoundTrip\n");
+    TestPrintf("TestFileRoundTrip\n");
     size_t sizes[] = {0, 1, 100, 16383, 16384, 16385, 40000,
                       static_cast<size_t>(kReadChunk),            // ちょうど1チャンク
                       static_cast<size_t>(kReadChunk) + 40000};   // マルチチャンク
@@ -528,7 +617,7 @@ static void TestFileRoundTrip() {
 
 // ロード→編集(挿入/削除)→保存 が参照モデルと一致するか。
 static void TestLoadEditSave() {
-    std::printf("TestLoadEditSave\n");
+    TestPrintf("TestLoadEditSave\n");
     std::vector<unsigned char> data(50000);
     for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 5 + 3);
     fs::path in = TempFile("edit");
@@ -597,7 +686,7 @@ static void BuildDoc(BlockList& list, const std::vector<unsigned char>& data) {
 }
 
 static void TestSearchBasic() {
-    std::printf("TestSearchBasic\n");
+    TestPrintf("TestSearchBasic\n");
     std::vector<unsigned char> data;
     const char* s = "abcXX abcYY abcZZ";  // "abc" が3箇所(0,6,12)
     for (const char* p = s; *p; ++p) data.push_back(static_cast<unsigned char>(*p));
@@ -634,7 +723,7 @@ static void TestSearchBasic() {
 // Issue #74: EOF は Seek では追記位置として有効だが、GetByteAt/SearchPattern の読取り範囲外。
 // 特に満杯ブロックの EOF を読むと確保領域外アクセスになるため、境界で失敗することを固定する。
 static void TestSearchEofBounds() {
-    std::printf("TestSearchEofBounds\n");
+    TestPrintf("TestSearchEofBounds\n");
     BlockList list;
     unsigned char* data = new unsigned char[kBlockCapacity];
     std::memset(data, 0x41, kBlockCapacity);
@@ -673,7 +762,7 @@ static void TestSearchEofBounds() {
 
 // 不一致検索（SearchMismatch）: 指定バイトに一致しない最初の位置を前方/後方で検出。
 static void TestSearchMismatch() {
-    std::printf("TestSearchMismatch\n");
+    TestPrintf("TestSearchMismatch\n");
     // 位置: 0..2='A', 3='B', 4..5='A', 6..7='C'
     std::vector<unsigned char> data;
     for (const char* p = "AAABAACC"; *p; ++p) data.push_back(static_cast<unsigned char>(*p));
@@ -714,7 +803,7 @@ static void TestSearchMismatch() {
 
 // ブロック境界(16KB)を跨ぐパターンの検出。
 static void TestSearchAcrossBlocks() {
-    std::printf("TestSearchAcrossBlocks\n");
+    TestPrintf("TestSearchAcrossBlocks\n");
     std::vector<unsigned char> data(40000);
     for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>((i * 91) & 0xFF);
     // ブロック境界(16384)を跨ぐ位置へ既知パターンを埋め込む
@@ -739,7 +828,7 @@ static void TestSearchAcrossBlocks() {
 // ※かつては後方を健全性（報告する一致が実在・範囲内か）だけで検証しており、
 //   取りこぼしを検出できなかった（Issue #71）。完全突合に置き換えてある。
 static void TestSearchFuzz() {
-    std::printf("TestSearchFuzz\n");
+    TestPrintf("TestSearchFuzz\n");
     std::mt19937 rng(0x5EA6C4);
     int fwdCases = 0, fwdMism = 0;
     int bwdCases = 0, bwdFound = 0, bwdMism = 0;
@@ -754,7 +843,9 @@ static void TestSearchFuzz() {
         BlockCursor c(&list);
 
         for (int t = 0; t < 6; ++t) {
+            // パターン長は 1..6 を中心に、たまにブロック長前後の長さも混ぜる（Issue #178）。
             int m = 1 + static_cast<int>(rng() % 6);
+            if ((rng() % 8) == 0) { m = 1 + static_cast<int>(rng() % (kBlockCapacity + 64)); }
             std::vector<unsigned char> pat(m);
             if ((rng() & 1) && size >= m) {
                 int src = static_cast<int>(rng() % (size - m + 1));  // 実在部分列（ヒット保証）
@@ -762,17 +853,29 @@ static void TestSearchFuzz() {
             } else {
                 for (int i = 0; i < m; ++i) pat[i] = static_cast<unsigned char>(rng() % alpha);
             }
-            // 前方: ナイーブ参照と完全一致
+            // 前方: ナイーブ参照と完全一致。範囲は全長（end=0）と有限の [start,end) の
+            //   2 通りを試す（以前は end=0 のみで、範囲指定の取りこぼしを見ていなかった。
+            //   Issue #178）。
             int start = static_cast<int>(rng() % (size + 1));
-            FileOffset got = -1;
-            bool f = c.SearchPattern(pat.data(), m, &got, BlockCursor::kForward, start, 0);
-            int exp = NaiveForward(data, pat, start, size);
-            ++fwdCases;
-            if ((f ? got : -1) != exp) {
-                ++fwdMism;
-                if (fwdMism <= 3) std::printf("  FAIL fwd: size=%d m=%d start=%d got=%lld exp=%d\n",
-                                              size, m, start,
-                                              static_cast<long long>(f ? got : -1), exp);
+            for (int rangeCase = 0; rangeCase < 2; ++rangeCase) {
+                int fend = 0;                       // 0 = 全長
+                int naiveEnd = size;
+                if (rangeCase == 1) {
+                    if (start >= size) continue;    // 有限 end を作れない
+                    fend = start + 1 + static_cast<int>(rng() % (size - start));   // (start, size]
+                    naiveEnd = fend;
+                }
+                FileOffset got = -1;
+                bool f = c.SearchPattern(pat.data(), m, &got, BlockCursor::kForward, start, fend);
+                int exp = NaiveForward(data, pat, start, naiveEnd);
+                ++fwdCases;
+                if ((f ? got : -1) != exp) {
+                    ++fwdMism;
+                    if (fwdMism <= 3)
+                        TestPrintf("  FAIL fwd: size=%d m=%d start=%d end=%d got=%lld exp=%d\n",
+                                    size, m, start, fend,
+                                    static_cast<long long>(f ? got : -1), exp);
+                }
             }
             // 後方: ナイーブ参照と完全一致（取りこぼしも検出する。Issue #71）
             //   範囲は末尾から全体（end=0）と、選択範囲内相当の [lo, hi) の 2 通りを試す。
@@ -794,7 +897,7 @@ static void TestSearchFuzz() {
                 if ((f2 ? got2 : -1) != exp2) {
                     ++bwdMism;
                     if (bwdMism <= 3)
-                        std::printf("  FAIL bwd: size=%d m=%d start=%d end=%d got=%lld exp=%d\n",
+                        TestPrintf("  FAIL bwd: size=%d m=%d start=%d end=%d got=%lld exp=%d\n",
                                     size, m, bstart, bend,
                                     static_cast<long long>(f2 ? got2 : -1), exp2);
                 }
@@ -803,7 +906,7 @@ static void TestSearchFuzz() {
     }
     CHECK(fwdMism == 0, "forward search matches naive reference");
     CHECK(bwdMism == 0, "backward search matches naive reference");
-    std::printf("  search fuzz: fwd %d cases / %d mismatches, bwd %d cases / %d found / %d mismatches\n",
+    TestPrintf("  search fuzz: fwd %d cases / %d mismatches, bwd %d cases / %d found / %d mismatches\n",
                 fwdCases, fwdMism, bwdCases, bwdFound, bwdMism);
 }
 
@@ -812,7 +915,7 @@ static void TestSearchFuzz() {
 //   シフトが過大になり、間にある一致を飛び越えて not-found を返していた。
 //   ここでは実際に取りこぼしていた具体例を固定ケースとして押さえる。
 static void TestSearchBackwardMissedMatch() {
-    std::printf("TestSearchBackwardMissedMatch\n");
+    TestPrintf("TestSearchBackwardMissedMatch\n");
     struct Case {
         const char* name;
         std::vector<unsigned char> data;
@@ -847,7 +950,7 @@ static void TestSearchBackwardMissedMatch() {
 
 // ---- SetByteAt(上書き in-place) ----
 static void TestSetByteAt() {
-    std::printf("TestSetByteAt\n");
+    TestPrintf("TestSetByteAt\n");
     BlockList list;
     NewEmptyDoc(list);
     std::vector<unsigned char> ref;
@@ -922,7 +1025,7 @@ static bool ReadByteAt(BlockList& list, FileOffset pos, unsigned char* out) {
 
 // 2GB 超のアドレス空間で GetTotalLength / Seek が正しく解決するか。
 static void TestLargeOffsetSeek() {
-    std::printf("TestLargeOffsetSeek\n");
+    TestPrintf("TestLargeOffsetSeek\n");
     BlockList list;
     AppendSparseBlocks(list, k2GB / kBlockCapacity);   // ちょうど 2GB
     const int kTailBlocks = 4;
@@ -1007,7 +1110,7 @@ static void TestLargeOffsetSeek() {
 // 先頭側は疎ブロックで埋め、実データ 128KB を 2GB 境界の前後 64KB ずつに配置する。
 // これにより走査・編集の各操作が 2GB をまたいで実行される。
 static void TestLargeOffsetDataOps() {
-    std::printf("TestLargeOffsetDataOps\n");
+    TestPrintf("TestLargeOffsetDataOps\n");
     const int kTailBlocks = 8;
     const size_t tailLen = static_cast<size_t>(kTailBlocks) * kBlockCapacity;
     const size_t kBnd = tailLen / 2;                                  // tail 内での 2GB 位置
@@ -1163,18 +1266,176 @@ static void TestLargeOffsetDataOps() {
     }
 }
 
+// ---- 64bit 境界での一括操作（Issue #183）----------------------------------
+// 一括操作（Issue #154 の Write / FillRange、Issue #62 の DeleteRange）は数万バイト
+//   規模でしか検証されておらず、TestLargeOffsetDataOps も通していなかった。
+//   疎ブロックモデル（data=nullptr の巨大ブロック + 境界をまたぐ実データ末尾）で
+//   2GB / 4GB 境界前後を安価に確認する。
+//
+// 疎な領域のノードは data==nullptr なので、実際に読み書きが走る操作を掛けると落ちる。
+//   - Write / FillRange は操作範囲を実データの末尾ブロック群へ限定する
+//   - DeleteRange は「ノードごと除去される」形（off==0 かつ 1 ノード全体）でのみ
+//     疎な領域へ掛ける。部分的に残す削除は memmove / memset が nullptr に対して走る
+static void TestLargeOffsetBulkOps() {
+    TestPrintf("TestLargeOffsetBulkOps\n");
+    // 疎ブロックは data 実体を持たないため確保量はノード分だけで済む。既存の
+    //   TestLargeOffsetSeek / TestLargeOffsetDataOps と同じく両アーキテクチャで実行する。
+    const int kTailBlocks = 8;
+    const size_t tailLen = static_cast<size_t>(kTailBlocks) * kBlockCapacity;   // 128KB
+    const size_t kBnd = tailLen / 2;                                           // 実データ内の境界位置
+
+    struct Boundary { FileOffset at; const char* name; };
+    const Boundary boundaries[] = {
+        { k2GB,     "2GB" },
+        { k2GB * 2, "4GB" },   // 下位 32bit が 0 に化ける境界
+    };
+
+    for (const Boundary& bnd : boundaries) {
+        TestPrintf("  boundary %s\n", bnd.name);
+        std::vector<unsigned char> tail(tailLen);
+        for (size_t i = 0; i < tailLen; ++i) {
+            tail[i] = static_cast<unsigned char>((i * 11 + 3) & 0xFF);
+        }
+
+        BlockList list;
+        const FileOffset tailBase = bnd.at - static_cast<FileOffset>(kBnd);
+        CHECK(tailBase % kBlockCapacity == 0, "the sparse prefix ends on a block boundary");
+        AppendSparseBlocks(list, tailBase / kBlockCapacity);
+        AppendRealBlocks(list, tail);
+        FileOffset total = tailBase + static_cast<FileOffset>(tailLen);
+        CHECK(list.GetTotalLength() == total, "the sparse document has the expected length");
+        if (bnd.at == k2GB * 2) {
+            // 下位 32bit だけを見ると 0 に化ける位置であることを明示しておく。
+            CHECK(static_cast<unsigned int>(bnd.at) == 0,
+                  "the 4GB boundary truncates to zero in 32 bits (regression anchor)");
+        }
+
+        // 実データ領域を丸ごと読み出して参照モデルと突き合わせる。
+        auto realTail = [&list](FileOffset base, size_t len) {
+            std::vector<unsigned char> got(len);
+            BlockCursor r(&list);
+            if (!r.Seek(base, BlockCursor::kBegin, nullptr)) {
+                CHECK(false, "seek to the real region");
+                return got;
+            }
+            const FileOffset n = r.Read(static_cast<FileOffset>(len), got.data());
+            CHECK(n == static_cast<FileOffset>(len), "read the whole real region");
+            return got;
+        };
+
+        // --- Write: 境界をまたぐ上書き（長さは変わらない）---
+        {
+            const FileOffset at = bnd.at - 100;
+            std::vector<unsigned char> src(200);
+            for (size_t i = 0; i < src.size(); ++i) {
+                src[i] = static_cast<unsigned char>(0xC0 | (i & 0x0F));
+            }
+            BlockCursor c(&list);
+            const FileOffset n = c.Write(at, src.data(), static_cast<FileOffset>(src.size()));
+            CHECK(n == static_cast<FileOffset>(src.size()), "Write across the boundary writes all");
+            std::copy(src.begin(), src.end(), tail.begin() + (kBnd - 100));
+            CHECK(list.GetTotalLength() == total, "Write does not change the length");
+            CHECK(realTail(tailBase, tail.size()) == tail, "Write content across the boundary");
+        }
+
+        // --- Write: 複数ブロックにまたがる長い上書き ---
+        {
+            const FileOffset at = bnd.at - 20000;
+            std::vector<unsigned char> src(40000);
+            for (size_t i = 0; i < src.size(); ++i) {
+                src[i] = static_cast<unsigned char>((i * 37 + 5) & 0xFF);
+            }
+            BlockCursor c(&list);
+            const FileOffset n = c.Write(at, src.data(), static_cast<FileOffset>(src.size()));
+            CHECK(n == static_cast<FileOffset>(src.size()), "a long Write across the boundary");
+            std::copy(src.begin(), src.end(), tail.begin() + (kBnd - 20000));
+            CHECK(realTail(tailBase, tail.size()) == tail, "long Write content across the boundary");
+        }
+
+        // --- FillRange: 境界をまたぐ範囲初期化と、末尾でのクランプ ---
+        {
+            const FileOffset at = bnd.at - 5000;
+            BlockCursor c(&list);
+            const FileOffset n = c.FillRange(at, 10000, 0x5A);
+            CHECK(n == 10000, "FillRange across the boundary fills all");
+            std::fill(tail.begin() + (kBnd - 5000), tail.begin() + (kBnd + 5000),
+                      static_cast<unsigned char>(0x5A));
+            CHECK(list.GetTotalLength() == total, "FillRange does not change the length");
+            CHECK(realTail(tailBase, tail.size()) == tail, "FillRange content across the boundary");
+
+            // 巨大な count は残り長さへ丸められる（32bit へ落ちない）。
+            BlockCursor e(&list);
+            const FileOffset filled = e.FillRange(total - 3, 8LL * 1024 * 1024 * 1024, 0x77);
+            CHECK(filled == 3, "FillRange clamps a huge count at the end of a large document");
+            tail[tailLen - 3] = tail[tailLen - 2] = tail[tailLen - 1] = 0x77;
+            CHECK(realTail(tailBase, tail.size()) == tail, "the clamped fill touched only the tail");
+        }
+
+        // --- DeleteRange: 境界をまたぐ削除（実データ内に限定）---
+        {
+            const FileOffset at = bnd.at - 50;
+            BlockCursor c(&list);
+            const FileOffset n = c.DeleteRange(at, 100);
+            CHECK(n == 100, "DeleteRange across the boundary removes every byte");
+            tail.erase(tail.begin() + (kBnd - 50), tail.begin() + (kBnd + 50));
+            total -= 100;
+            CHECK(list.GetTotalLength() == total, "the length drops by the deleted amount");
+            CHECK(realTail(tailBase, tail.size()) == tail, "DeleteRange content across the boundary");
+        }
+
+        // --- DeleteRange: 疎な領域をノードごと除去する（data=nullptr でも安全な経路）---
+        //     2GB / 4GB 超のリストからノードを外す 64bit 経路の確認でもある。
+        {
+            const FileOffset span = static_cast<FileOffset>(kBlockCapacity) * 2;
+            const int nodesBefore = list.Count();
+            BlockCursor c(&list);
+            const FileOffset n = c.DeleteRange(0, span);
+            CHECK(n == span, "two whole sparse nodes are deleted");
+            CHECK(list.Count() == nodesBefore - 2, "the two nodes left the list");
+            total -= span;
+            CHECK(list.GetTotalLength() == total, "the length drops by two blocks");
+            // 実データはそのぶん手前へ寄るが、内容は変わらない。
+            CHECK(realTail(tailBase - span, tail.size()) == tail,
+                  "the real tail moved down intact");
+
+            // 4GB 側だけ: 2GB を超える量を一括削除し、削除数の累積が 32bit へ
+            //   落ちないことを確かめる。上の 2 ノード分だけでは int へ変えても
+            //   桁溢れしないため、この経路がないと戻り値の幅を固定できない。
+            //   疎ノードの全体除去なので data==nullptr でも安全、かつ確保も伴わない。
+            if (bnd.at == k2GB * 2) {
+                const FileOffset huge = 3LL * 1024 * 1024 * 1024;   // 16KB の倍数
+                CHECK(huge % kBlockCapacity == 0, "the bulk delete stays on block boundaries");
+                BlockCursor big(&list);
+                const FileOffset removed = big.DeleteRange(0, huge);
+                CHECK(removed == huge, "DeleteRange returns a count above 2GB intact");
+                CHECK(removed > 0x7FFFFFFFLL,
+                      "the returned count really exceeds the signed 32bit range");
+                total -= huge;
+                CHECK(list.GetTotalLength() == total, "the length drops by the deleted amount");
+                CHECK(realTail(tailBase - span - huge, tail.size()) == tail,
+                      "the real tail survived the bulk delete");
+            }
+        }
+
+        // 注: Write の written と FillRange の filled が 32bit へ落ちる変異は、
+        //   1 回の呼び出しで 2GB 超を書く必要があり、疎ブロックモデルでは実データを
+        //   その量だけ用意しなければ再現できない（疎な領域は書き込み対象にできない）。
+        //   安価に押さえられないため、ここでは扱わない。
+    }
+}
+
 // 実データ 2GB 超の通し確認（オプトイン）。
 // 約 2.1GB のメモリを確保するため、既定ではスキップする。
 // 実行するには 64bit ビルドで環境変数 STIRLING_CORE_TEST_LARGE=1 を設定する。
 static void TestLargeRealData() {
-    std::printf("TestLargeRealData\n");
+    TestPrintf("TestLargeRealData\n");
     const char* env = std::getenv("STIRLING_CORE_TEST_LARGE");
     if (env == nullptr || std::strcmp(env, "1") != 0) {
-        std::printf("  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)\n");
+        SkipTest("TestLargeRealData", "set STIRLING_CORE_TEST_LARGE=1 to run");
         return;
     }
     if (sizeof(void*) < 8) {
-        std::printf("  skipped (needs a 64-bit build)\n");
+        SkipTest("TestLargeRealData", "needs a 64-bit build");
         return;
     }
 
@@ -1195,7 +1456,7 @@ static void TestLargeRealData() {
     }
     const FileOffset total = totalBlocks * kBlockCapacity;
     CHECK(list.GetTotalLength() == total, "real 2GB+ total length");
-    std::printf("  built %lld bytes of real data\n", static_cast<long long>(total));
+    TestPrintf("  built %lld bytes of real data\n", static_cast<long long>(total));
 
     // 2GB 境界の直前・直後を読取
     {
@@ -1268,7 +1529,7 @@ static bool WriteLargePatternFile(const fs::path& p, FileOffset total) {
 
 // QueryFileSize と失敗時の status（エラーを握りつぶさないことの検証）。
 static void TestFileIoStatus() {
-    std::printf("TestFileIoStatus\n");
+    TestPrintf("TestFileIoStatus\n");
     using stirling::FileIoResult;
     using stirling::FileIoStatus;
 
@@ -1455,7 +1716,7 @@ static void TestFileIoStatus() {
     {
         std::vector<unsigned char> data(5000);
         for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 11 + 5);
-        const fs::path jp = fs::temp_directory_path() / L"stirling_core_test_日本語パス.bin";
+        const fs::path jp = TestTempRoot() / L"stirling_core_test_日本語パス.bin";
         WriteFile(jp, data);
 
         FileOffset sz = 0;
@@ -1468,7 +1729,7 @@ static void TestFileIoStatus() {
               "load with a non-ASCII path");
         CheckEqual(list, data, "non-ASCII path content");
 
-        const fs::path jpOut = fs::temp_directory_path() / L"stirling_core_test_日本語出力.bin";
+        const fs::path jpOut = TestTempRoot() / L"stirling_core_test_日本語出力.bin";
         CHECK(stirling::SaveBlocksToFile(list, jpOut.wstring().c_str()).Ok(),
               "save with a non-ASCII path");
         const std::vector<unsigned char> saved = ReadFileBytes(jpOut);
@@ -1542,26 +1803,26 @@ static void TestFileIoStatus() {
 // ディスク約 4.3GB・メモリ約 2.1GB を消費するため、既定ではスキップする。
 // 実行するには 64bit ビルドで環境変数 STIRLING_CORE_TEST_LARGE=1 を設定する。
 static void TestLargeFileRoundTrip() {
-    std::printf("TestLargeFileRoundTrip\n");
+    TestPrintf("TestLargeFileRoundTrip\n");
     const char* env = std::getenv("STIRLING_CORE_TEST_LARGE");
     if (env == nullptr || std::strcmp(env, "1") != 0) {
-        std::printf("  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)\n");
+        SkipTest("TestLargeFileRoundTrip", "set STIRLING_CORE_TEST_LARGE=1 to run");
         return;
     }
     if (sizeof(void*) < 8) {
-        std::printf("  skipped (needs a 64-bit build)\n");
+        SkipTest("TestLargeFileRoundTrip", "needs a 64-bit build");
         return;
     }
 
     const FileOffset total = k2GB + 128 * 1024;   // 2GB + 128KB
     const fs::path in = TempFile("bigin");
     if (!WriteLargePatternFile(in, total)) {
-        std::printf("  FAIL: cannot create the 2GB+ source file (disk space?)\n");
+        TestPrintf("  FAIL: cannot create the 2GB+ source file (disk space?)\n");
         ++g_failures;
         fs::remove(in);
         return;
     }
-    std::printf("  wrote %lld bytes to disk\n", static_cast<long long>(total));
+    TestPrintf("  wrote %lld bytes to disk\n", static_cast<long long>(total));
 
     // fs::file_size は 64bit。ftell(long) では取得できないサイズであることの確認も兼ねる。
     CHECK(static_cast<FileOffset>(fs::file_size(in)) == total, "source file size beyond 2GB");
@@ -1570,7 +1831,7 @@ static void TestLargeFileRoundTrip() {
     const stirling::FileIoResult loaded = stirling::LoadFileIntoBlocks(list, in.wstring().c_str());
     fs::remove(in);   // 読み込み後は不要（ピーク時のディスク使用量を抑える）
     if (!loaded.Ok()) {
-        std::printf("  FAIL: load failed (status=%d, err=%lu)\n",
+        TestPrintf("  FAIL: load failed (status=%d, err=%lu)\n",
                     static_cast<int>(loaded.status), loaded.systemError);
         ++g_failures;
         return;
@@ -1599,7 +1860,7 @@ static void TestLargeFileRoundTrip() {
     const stirling::FileIoResult savedRes = stirling::SaveBlocksToFile(list, out.wstring().c_str());
     list.Clear();   // 保存後はメモリを解放してから照合する
     if (!savedRes.Ok()) {
-        std::printf("  FAIL: save failed (status=%d, err=%lu)\n",
+        TestPrintf("  FAIL: save failed (status=%d, err=%lu)\n",
                     static_cast<int>(savedRes.status), savedRes.systemError);
         ++g_failures;
         fs::remove(out);
@@ -1625,7 +1886,7 @@ static void TestLargeFileRoundTrip() {
 // ---- 設定永続化コーデック（app/SettingsCodec.h。Issue #22）----
 //   64bit アドレス設定値の 16進文字列往復・旧形式移行時の解釈・不正入力の拒否を検証する。
 static void TestSettingsCodec() {
-    std::printf("TestSettingsCodec\n");
+    TestPrintf("TestSettingsCodec\n");
     using stirling::settings::FormatOffsetHex;
     using stirling::settings::ParseOffsetHex;
 
@@ -1684,7 +1945,7 @@ static void TestSettingsCodec() {
 //   Unicode ビルドではレジストリ値がワイドで得られる。ナロー版と同じ結果になること
 //   （ASCII 層としての等価性）と、ワイド単体での往復・拒否を検証する。
 static void TestSettingsCodecWide() {
-    std::printf("TestSettingsCodecWide\n");
+    TestPrintf("TestSettingsCodecWide\n");
     using stirling::settings::FormatOffsetHex;
     using stirling::settings::FormatOffsetHexW;
     using stirling::settings::ParseOffsetHex;
@@ -1733,7 +1994,7 @@ static void TestSettingsCodecWide() {
 //   RegSetValueExA はそれを「システム ANSI コードページ」として UTF-16 化するため、
 //   ACP≠932 の環境では化けた値が格納されている。その巻き戻しを検証する。
 static void TestSettingsMigration() {
-    std::printf("TestSettingsMigration\n");
+    TestPrintf("TestSettingsMigration\n");
     using stirling::settings::RepairCp932ViaAcp;
 
     // MBCS 版の書き込みを再現する: CP932 バイト列を acp として UTF-16 化した結果を返す。
@@ -1830,7 +2091,7 @@ static void TestSettingsMigration() {
 
 // ---- 設定ストア（Issue #96: 設定ファイルの INI 形式と UTF-8 往復） ----
 static void TestSettingsStoreUtf8() {
-    std::printf("TestSettingsStoreUtf8\n");
+    TestPrintf("TestSettingsStoreUtf8\n");
     using stirling::settings::Utf8ToWide;
     using stirling::settings::WideToUtf8;
 
@@ -1862,7 +2123,7 @@ static void TestSettingsStoreUtf8() {
 }
 
 static void TestSettingsStoreValueEscape() {
-    std::printf("TestSettingsStoreValueEscape\n");
+    TestPrintf("TestSettingsStoreValueEscape\n");
     using stirling::settings::DecodeValue;
     using stirling::settings::EncodeValue;
 
@@ -1892,7 +2153,7 @@ static void TestSettingsStoreValueEscape() {
 // ---- マークファイル（Issue #99） ----
 
 static void TestMarkFileRoundTrip() {
-    std::printf("[TestMarkFileRoundTrip]\n");
+    TestPrintf("[TestMarkFileRoundTrip]\n");
     using stirling::marks::MarkFileData;
     using stirling::marks::ParseMarks;
     using stirling::marks::SerializeMarks;
@@ -1922,7 +2183,7 @@ static void TestMarkFileRoundTrip() {
 }
 
 static void TestMarkFileEmptyAndComments() {
-    std::printf("[TestMarkFileEmptyAndComments]\n");
+    TestPrintf("[TestMarkFileEmptyAndComments]\n");
     using stirling::marks::MarkFileData;
     using stirling::marks::ParseMarks;
     using stirling::marks::SerializeMarks;
@@ -1962,7 +2223,7 @@ static void TestMarkFileEmptyAndComments() {
 }
 
 static void TestMarkFileRejects() {
-    std::printf("[TestMarkFileRejects]\n");
+    TestPrintf("[TestMarkFileRejects]\n");
     using stirling::marks::MarkFileData;
     using stirling::marks::ParseMarks;
 
@@ -1994,7 +2255,7 @@ static void TestMarkFileRejects() {
 // 手編集された長大な10進値（Issue #132）。符号付き乗算があふれてラップすると、
 //   範囲検査をすり抜けて不正なファイルが受理されてしまう。
 static void TestMarkFileHugeDecimals() {
-    std::printf("[TestMarkFileHugeDecimals]\n");
+    TestPrintf("[TestMarkFileHugeDecimals]\n");
     using stirling::marks::MarkFileData;
     using stirling::marks::ParseMarks;
     using stirling::marks::DecodeMarkList;
@@ -2049,7 +2310,7 @@ static void TestMarkFileHugeDecimals() {
 // ---- マークの1行表現（自動保存／自動復元。Issue #100） ----
 
 static void TestMarkListRoundTrip() {
-    std::printf("[TestMarkListRoundTrip]\n");
+    TestPrintf("[TestMarkListRoundTrip]\n");
     using stirling::marks::DecodeMarkList;
     using stirling::marks::EncodeMarkList;
 
@@ -2082,7 +2343,7 @@ static void TestMarkListRoundTrip() {
 }
 
 static void TestMarkListLimitAndRejects() {
-    std::printf("[TestMarkListLimitAndRejects]\n");
+    TestPrintf("[TestMarkListLimitAndRejects]\n");
     using stirling::marks::DecodeMarkList;
     using stirling::marks::EncodeMarkList;
     using stirling::marks::kMaxStoredMarks;
@@ -2115,7 +2376,7 @@ static void TestMarkListLimitAndRejects() {
 }
 
 static void TestSettingsStoreIni() {
-    std::printf("TestSettingsStoreIni\n");
+    TestPrintf("TestSettingsStoreIni\n");
     using stirling::settings::SettingsStore;
 
     SettingsStore store;
@@ -2204,7 +2465,7 @@ static void TestSettingsStoreIni() {
 //   保存側は最新のファイル内容へその変更だけを適用する。
 
 static void TestSettingsStoreChangeLog() {
-    std::printf("TestSettingsStoreChangeLog\n");
+    TestPrintf("TestSettingsStoreChangeLog\n");
     using stirling::settings::SettingsStore;
 
     SettingsStore store;
@@ -2250,15 +2511,14 @@ static void TestSettingsStoreChangeLog() {
 }
 
 // テスト用の一時設定ファイルパス（実ファイルを触るためテンポラリへ置く）。
+//   %TEMP% 直下の固定名だと複数のテストプロセスが同じファイルを奪い合うため、
+//   実行ごとに一意な TestTempRoot() 配下へ置く。
 static std::wstring MergeTestIniPath(const wchar_t* name) {
-    wchar_t dir[MAX_PATH] = {0};
-    const DWORD n = ::GetTempPathW(MAX_PATH, dir);
-    CHECK(n > 0 && n < MAX_PATH, "temp path");
-    return std::wstring(dir) + name;
+    return (TestTempRoot() / name).wstring();
 }
 
 static void TestSettingsFileMergedSave() {
-    std::printf("TestSettingsFileMergedSave\n");
+    TestPrintf("TestSettingsFileMergedSave\n");
     using stirling::settings::SettingsStore;
     using stirling::settings::LoadSettingsFile;
     using stirling::settings::SaveSettingsFile;
@@ -2303,13 +2563,23 @@ static void TestSettingsFileMergedSave() {
     const std::wstring* untouched = merged.Find(L"Recent File List", L"File1");
     CHECK(untouched != nullptr && *untouched == L"D:\\data\\a.bin", "untouched keys survive");
 
-    // 変更が無ければ書きに行かない（ファイルの更新時刻も変えない）。
+    // 変更が無ければ書きに行かない（内容も更新時刻も変えず、一時ファイルも作らない）。
+    //   以前は戻り値が成功であることしか見ておらず、「書きに行かない」ことは未確認だった
+    //   （Issue #178）。
     SettingsStore clean;
     CHECK(LoadSettingsFile(path, clean, error), "clean snapshot");
     clean.ClearDirty();
+    const std::vector<unsigned char> beforeBytes = ReadFileBytes(fs::path(path));
+    std::error_code tec;
+    const fs::file_time_type beforeTime = fs::last_write_time(fs::path(path), tec);
+    CHECK(!tec, "the modification time is readable");
+    ::Sleep(50);   // 更新時刻の分解能（システムクロックの刻み）より長く待つ
     CHECK(SaveSettingsFileMerged(path, clean, error), "no-op save succeeds");
+    CHECK(ReadFileBytes(fs::path(path)) == beforeBytes, "a no-op save does not rewrite the file");
+    CHECK(fs::last_write_time(fs::path(path), tec) == beforeTime,
+          "a no-op save leaves the modification time alone");
 
-    // 一時ファイルを残さない。
+    // 一時ファイルを残さない（成功した保存でも、書きに行かなかった no-op でも）。
     const std::wstring temp = path + L"." + std::to_wstring(::GetCurrentProcessId()) + L".tmp";
     CHECK(::GetFileAttributesW(temp.c_str()) == INVALID_FILE_ATTRIBUTES,
           "the temp file is gone after saving");
@@ -2318,7 +2588,7 @@ static void TestSettingsFileMergedSave() {
 }
 
 static void TestSettingsFileConcurrentSave() {
-    std::printf("TestSettingsFileConcurrentSave\n");
+    TestPrintf("TestSettingsFileConcurrentSave\n");
     using stirling::settings::SettingsStore;
     using stirling::settings::LoadSettingsFile;
     using stirling::settings::SaveSettingsFile;
@@ -2334,42 +2604,274 @@ static void TestSettingsFileConcurrentSave() {
 
     // 同じ設定ファイルへ同時に書き込んでも壊れず、どちらの更新も残ること。
     //   （プロセス間ロックは同一プロセスのスレッド間でも効く）
+    //   スレッドは (1) 開始前に同じ時点のスナップショットを読み、(2) バリアで揃えてから
+    //   一斉に書き始める。同期が無いとスケジューリング次第で直列実行になり、ロックが
+    //   壊れていても競合しないまま通ってしまう（Issue #178）。
+    //   CHECK は スレッド安全ではないので、判定は join 後にまとめて行う。
     const int kRounds = 25;
-    auto writer = [&path](const wchar_t* section, int rounds) {
-        for (int i = 0; i < rounds; ++i) {
-            SettingsStore store;
-            std::wstring err;
-            if (!LoadSettingsFile(path, store, err)) { continue; }
-            store.ClearDirty();
+    struct WriterResult {
+        bool snapshotOk = false;
+        int  saved = 0;
+        int  saveFailures = 0;
+        std::wstring firstError;
+    };
+    WriterResult resultA, resultB;
+    std::atomic<int> ready(0);
+
+    auto writer = [&path, &ready, kRounds](const wchar_t* section, WriterResult* out) {
+        std::wstring err;
+        // 古いスナップショットを持ったまま書き続ける（マージ保存の本来の使われ方）。
+        SettingsStore store;
+        out->snapshotOk = LoadSettingsFile(path, store, err);
+        if (!out->snapshotOk) { out->firstError = err; }
+        store.ClearDirty();
+
+        ready.fetch_add(1);
+        while (ready.load() < 2) { std::this_thread::yield(); }   // 同時開始を揃える
+
+        for (int i = 0; i < kRounds; ++i) {
             store.Set(section, (L"Key" + std::to_wstring(i)).c_str(), std::to_wstring(i));
-            SaveSettingsFileMerged(path, store, err);
+            if (SaveSettingsFileMerged(path, store, err)) {
+                ++out->saved;
+            } else {
+                ++out->saveFailures;
+                if (out->firstError.empty()) { out->firstError = err; }
+            }
         }
     };
-    std::thread a(writer, L"WriterA", kRounds);
-    std::thread b(writer, L"WriterB", kRounds);
+    std::thread a(writer, L"WriterA", &resultA);
+    std::thread b(writer, L"WriterB", &resultB);
     a.join();
     b.join();
+
+    for (const WriterResult* r : { &resultA, &resultB }) {
+        CHECK(r->snapshotOk, "each writer could read its snapshot");
+        CHECK(r->saveFailures == 0, "no writer failed to save");
+        CHECK(r->saved == kRounds, "every save reported success");
+        if (!r->firstError.empty()) {
+            TestPrintf("  first writer error: %ls\n", r->firstError.c_str());
+        }
+    }
 
     SettingsStore result;
     CHECK(LoadSettingsFile(path, result, error), "the file is still readable");
     const std::wstring* common = result.Find(L"Env", L"Common");
     CHECK(common != nullptr && *common == L"1", "the seed value survives");
-    int foundA = 0, foundB = 0;
+    // キーの存在だけでなく値まで突き合わせる（欠落だけでなく取り違えも検出する）。
+    int mismatchA = 0, mismatchB = 0;
     for (int i = 0; i < kRounds; ++i) {
         const std::wstring key = L"Key" + std::to_wstring(i);
-        if (result.Find(L"WriterA", key) != nullptr) { ++foundA; }
-        if (result.Find(L"WriterB", key) != nullptr) { ++foundB; }
+        const std::wstring want = std::to_wstring(i);
+        const std::wstring* va = result.Find(L"WriterA", key);
+        const std::wstring* vb = result.Find(L"WriterB", key);
+        if (va == nullptr || *va != want) { ++mismatchA; }
+        if (vb == nullptr || *vb != want) { ++mismatchB; }
     }
-    CHECK(foundA == kRounds, "every WriterA update is kept");
-    CHECK(foundB == kRounds, "every WriterB update is kept");
+    CHECK(mismatchA == 0, "every WriterA key kept its own value");
+    CHECK(mismatchB == 0, "every WriterB key kept its own value");
 
     ::DeleteFileW(path.c_str());
+}
+
+// ---- 設定ファイルの異常経路（Issue #178）----------------------------------
+// SettingsStore の UTF-8 / INI 単体テストとは別の層。ここでは実ファイルを相手に、
+//   読めない・壊れた設定ファイルを掴んだときの戻り値と、保存に失敗したときに
+//   変更履歴（Changes / Dirty）が保持されて再保存で反映されることを確認する。
+static void TestSettingsFileErrors() {
+    TestPrintf("TestSettingsFileErrors\n");
+    using stirling::settings::LoadSettingsFile;
+    using stirling::settings::SaveSettingsFile;
+    using stirling::settings::SaveSettingsFileMerged;
+    using stirling::settings::SettingsStore;
+
+    // 生バイト列をそのまま設定ファイルとして置く（BOM や不正 UTF-8 を作るため）。
+    auto putBytes = [](const std::wstring& path, const std::string& bytes) {
+        std::vector<unsigned char> raw(bytes.begin(), bytes.end());
+        WriteFile(fs::path(path), raw);
+    };
+    auto rawBytes = [](const std::wstring& path) {
+        const std::vector<unsigned char> v = ReadFileBytes(fs::path(path));
+        return std::string(v.begin(), v.end());
+    };
+
+    // 1) BOM 付きでも読める（利用者が手で保存し直した場合）。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_bom_test.ini");
+        putBytes(path, "\xEF\xBB\xBF[Env]\r\nName=\xE3\x81\x82\r\n");
+        SettingsStore store;
+        std::wstring error;
+        CHECK(LoadSettingsFile(path, store, error), "a BOM prefixed settings file loads");
+        CHECK(error.empty(), "a BOM prefixed file reports no error");
+        const std::wstring* v = store.Find(L"Env", L"Name");
+        CHECK(v != nullptr && *v == L"あ", "the value after the BOM is decoded");
+        ::DeleteFileW(path.c_str());
+    }
+
+    // 2) 存在しないファイルは「初回起動」として成功扱い（store は変更しない）。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_absent_test.ini");
+        ::DeleteFileW(path.c_str());
+        SettingsStore store;
+        std::wstring error;
+        CHECK(LoadSettingsFile(path, store, error), "a missing settings file is not an error");
+        CHECK(error.empty(), "a missing settings file reports no error");
+        CHECK(!store.Dirty(), "a missing settings file leaves the store untouched");
+    }
+
+    // 3) 壊れた UTF-8 は理由付きで失敗する。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_badutf8_test.ini");
+        putBytes(path, "[Env]\r\nName=A\xC3\x28\x42\r\n");   // 継続バイトが来ない 2 バイト列
+        SettingsStore store;
+        std::wstring error;
+        CHECK(!LoadSettingsFile(path, store, error), "broken UTF-8 fails to load");
+        CHECK(!error.empty(), "broken UTF-8 reports a reason");
+        CHECK(error.find(path) != std::wstring::npos, "the reason names the file");
+        ::DeleteFileW(path.c_str());
+    }
+
+    // 4) 解釈できない INI 行も理由付きで失敗する。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_badini_test.ini");
+        putBytes(path, "[Env]\r\nName=1\r\nthis line has no equals sign\r\n");
+        SettingsStore store;
+        std::wstring error;
+        CHECK(!LoadSettingsFile(path, store, error), "an unparsable line fails to load");
+        CHECK(!error.empty(), "an unparsable line reports a reason");
+        ::DeleteFileW(path.c_str());
+    }
+
+    // 5) 読めない設定ファイルへのマージ保存は拒否され、元ファイルを上書きしない。
+    //    変更記録は落とさない（次の保存機会に持ち越せること）。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_mergebad_test.ini");
+        const std::string broken = "[Env]\r\nName=1\r\nbroken line\r\n";
+        putBytes(path, broken);
+
+        SettingsStore store;
+        store.Set(L"Env", L"Added", L"9");
+        CHECK(store.Dirty() && store.Changes().size() == 1, "the change is recorded");
+
+        std::wstring error;
+        CHECK(!SaveSettingsFileMerged(path, store, error), "merged save refuses a broken file");
+        CHECK(!error.empty(), "the refusal reports a reason");
+        CHECK(rawBytes(path) == broken, "the broken file is left exactly as it was");
+        CHECK(store.Dirty(), "a refused save keeps the store dirty");
+        CHECK(store.Changes().size() == 1, "a refused save keeps the change log");
+
+        // 壊れた行を直せば、保留していた変更がそのまま反映される。
+        putBytes(path, "[Env]\r\nName=1\r\n");
+        CHECK(SaveSettingsFileMerged(path, store, error), "the pending change is saved once readable");
+        CHECK(!store.Dirty(), "a successful save clears the dirty flag");
+        CHECK(store.Changes().empty(), "a successful save clears the change log");
+
+        SettingsStore reread;
+        CHECK(LoadSettingsFile(path, reread, error), "reload after the repair");
+        const std::wstring* added = reread.Find(L"Env", L"Added");
+        CHECK(added != nullptr && *added == L"9", "the pending change reached the file");
+        const std::wstring* kept = reread.Find(L"Env", L"Name");
+        CHECK(kept != nullptr && *kept == L"1", "the existing key is untouched");
+        ::DeleteFileW(path.c_str());
+    }
+
+    // 6) 書き込みそのものが失敗する経路（出力先を書込拒否で掴む）。置換に失敗しても
+    //    元ファイルは変わらず、変更記録が残り、掴みを外せば同じ store で保存できる。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_locked_test.ini");
+        std::wstring error;
+        SettingsStore seed;
+        seed.Set(L"Env", L"Name", L"before");
+        CHECK(SaveSettingsFile(path, seed, error), "seed written for the locked case");
+        const std::string original = rawBytes(path);
+
+        SettingsStore store;
+        CHECK(LoadSettingsFile(path, store, error), "snapshot for the locked case");
+        store.ClearDirty();
+        store.Set(L"Env", L"Name", L"after");
+        store.Set(L"Env", L"Extra", L"1");
+        CHECK(store.Changes().size() == 2, "two changes are recorded");
+
+        // 読み取りのみ許可＝置換・削除を拒否するハンドル。
+        HANDLE hold = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(hold != INVALID_HANDLE_VALUE, "hold the settings file against replacement");
+        if (hold != INVALID_HANDLE_VALUE) {
+            const bool saved = SaveSettingsFileMerged(path, store, error);
+            CHECK(!saved, "the save fails while the file cannot be replaced");
+            CHECK(!error.empty(), "the failed save reports a reason");
+            CHECK(store.Dirty(), "the failed save keeps the store dirty");
+            CHECK(store.Changes().size() == 2, "the failed save keeps every change");
+            ::CloseHandle(hold);
+            CHECK(rawBytes(path) == original, "the settings file is untouched after a failed save");
+
+            // 掴みを外して再保存すると、保留していた変更がすべて反映される。
+            CHECK(SaveSettingsFileMerged(path, store, error), "retrying after the lock succeeds");
+            CHECK(!store.Dirty(), "the retry clears the dirty flag");
+            SettingsStore reread;
+            CHECK(LoadSettingsFile(path, reread, error), "reload after the retry");
+            const std::wstring* name = reread.Find(L"Env", L"Name");
+            const std::wstring* extra = reread.Find(L"Env", L"Extra");
+            CHECK(name != nullptr && *name == L"after", "the overwritten key has the new value");
+            CHECK(extra != nullptr && *extra == L"1", "the added key is present");
+        }
+
+        // 一時ファイルを残さない（失敗した保存の後始末）。
+        const std::wstring temp = path + L"." + std::to_wstring(::GetCurrentProcessId()) + L".tmp";
+        CHECK(::GetFileAttributesW(temp.c_str()) == INVALID_FILE_ATTRIBUTES,
+              "no temporary file is left behind");
+        ::DeleteFileW(path.c_str());
+    }
+
+    // 7) 同一キーの競合と、削除→追加の順序が契約どおりに適用される。
+    {
+        const std::wstring path = MergeTestIniPath(L"stirhex_order_test.ini");
+        std::wstring error;
+        SettingsStore seed;
+        seed.Set(L"Env", L"Shared", L"seed");
+        seed.Set(L"Env", L"Doomed", L"1");
+        CHECK(SaveSettingsFile(path, seed, error), "seed written for the ordering case");
+
+        // 別プロセス相当が先に同じキーを更新する。
+        SettingsStore other;
+        CHECK(LoadSettingsFile(path, other, error), "other snapshot");
+        other.ClearDirty();
+        other.Set(L"Env", L"Shared", L"other");
+        CHECK(SaveSettingsFileMerged(path, other, error), "the other process saves first");
+
+        // 後から保存する側も同じキーを更新する（後勝ち）。あわせて削除→再追加を行う。
+        SettingsStore mine;
+        CHECK(LoadSettingsFile(path, mine, error), "my snapshot");
+        mine.ClearDirty();
+        mine.Set(L"Env", L"Shared", L"mine");
+        mine.Remove(L"Env", L"Doomed");
+        mine.Set(L"Env", L"Doomed", L"2");   // 削除の後に同じキーを足し直す
+        CHECK(SaveSettingsFileMerged(path, mine, error), "my save");
+
+        SettingsStore merged;
+        CHECK(LoadSettingsFile(path, merged, error), "reload after the conflicting saves");
+        const std::wstring* shared = merged.Find(L"Env", L"Shared");
+        CHECK(shared != nullptr && *shared == L"mine", "the later save wins the conflicting key");
+        const std::wstring* doomed = merged.Find(L"Env", L"Doomed");
+        CHECK(doomed != nullptr && *doomed == L"2", "remove then set applies in order");
+
+        // 逆順（追加→削除）ではキーが消える。
+        SettingsStore last;
+        CHECK(LoadSettingsFile(path, last, error), "snapshot for the reverse order");
+        last.ClearDirty();
+        last.Set(L"Env", L"Doomed", L"3");
+        last.Remove(L"Env", L"Doomed");
+        CHECK(SaveSettingsFileMerged(path, last, error), "reverse order save");
+        SettingsStore after;
+        CHECK(LoadSettingsFile(path, after, error), "reload after the reverse order save");
+        CHECK(after.Find(L"Env", L"Doomed") == nullptr, "set then remove leaves the key gone");
+        ::DeleteFileW(path.c_str());
+    }
 }
 
 // エクスプローラで開くフォルダの決定（Issue #133）。相対 /ini パスの未作成ファイルでも
 //   保存先（カレントディレクトリ）へ辿り着けること。
 static void TestFolderToReveal() {
-    std::printf("[TestFolderToReveal]\n");
+    TestPrintf("[TestFolderToReveal]\n");
     using stirling::path::FolderToReveal;
     using stirling::path::IsRooted;
     using stirling::path::ParentFolder;
@@ -2413,7 +2915,7 @@ static void TestFolderToReveal() {
 }
 
 static void TestSettingsStoreBinary() {
-    std::printf("TestSettingsStoreBinary\n");
+    TestPrintf("TestSettingsStoreBinary\n");
     using stirling::settings::BytesToHex;
     using stirling::settings::HexToBytes;
 
@@ -2442,7 +2944,7 @@ static void TestSettingsStoreBinary() {
 }
 
 static void TestCp932Text() {
-    std::printf("TestCp932Text\n");
+    TestPrintf("TestCp932Text\n");
     using stirling::Cp932FromWide;
     using stirling::WideFromCp932;
 
@@ -2501,7 +3003,7 @@ static void TestCp932Text() {
 
 // CP932 固定の先行バイト判定（Issue #42）。文字ペインの DBCS ペア認識に使う。
 static void TestCp932LeadByte() {
-    std::printf("TestCp932LeadByte\n");
+    TestPrintf("TestCp932LeadByte\n");
     using stirling::IsCp932LeadByte;
 
     // 仕様: 0x81-0x9F / 0xE0-0xFC のみが 2 バイト文字の先行バイト。
@@ -2548,14 +3050,16 @@ static void TestCp932LeadByte() {
                   "matches IsDBCSLeadByte on ACP=932");
         }
     } else {
-        std::printf("  (skip: ACP=%u, IsDBCSLeadByte comparison is JP-only)\n",
-                    static_cast<unsigned int>(::GetACP()));
+        char reason[96];
+        std::snprintf(reason, sizeof(reason), "ACP=%u, IsDBCSLeadByte comparison is JP-only",
+                      static_cast<unsigned int>(::GetACP()));
+        SkipTest("TestCp932LeadByte/IsDBCSLeadByte", reason);
     }
 }
 
 // 構造体編集バーの char 配列文字列化（byte 層）。Unicode 文字セットの写像は CP932 固定。
 static void TestFormatStructCharArrayCp932() {
-    std::printf("[TestFormatStructCharArrayCp932]\n");
+    TestPrintf("[TestFormatStructCharArrayCp932]\n");
     using stirling::FormatStructCharArrayCp932;   // 0..5 の CP932 表現（Issue #107 で改称）
 
     // charset 0 (ASCII): 非印字は '.'
@@ -2615,7 +3119,7 @@ static void TestFormatStructCharArrayCp932() {
 //   0..5 は「CP932 版の結果をワイドへ変換したもの」と一致すること＝表示結果が
 //   従来（表示直前に WideFromCp932 していた頃）と変わらないことを担保する。
 static void TestFormatStructCharArrayW() {
-    std::printf("[TestFormatStructCharArrayW]\n");
+    TestPrintf("[TestFormatStructCharArrayW]\n");
     using stirling::FormatStructCharArrayCp932;
     using stirling::FormatStructCharArrayW;
     using stirling::WideFromCp932;
@@ -2683,9 +3187,11 @@ static void TestFormatStructCharArrayW() {
         const unsigned char hangul[] = { 0xED, 0x95, 0x9C };      // "한"
         CHECK(FormatStructCharArrayW(6, hangul, 3) == std::wstring(L"한"),
               "UTF-8 keeps characters outside CP932");
-        // 参考: CP932 経由だと '.' に潰れていた
-        const std::string mb = FormatStructCharArrayCp932(3, hangul, 3);
-        CHECK(WideFromCp932(mb.c_str(), (int)mb.size()) != std::wstring(L"한"),
+        // 対比: この文字は CP932 で表現できないため、CP932 を経由する経路では
+        //   復元できない（かつてここは UTF-8 バイト列を charset=3（UTF-16LE）へ
+        //   渡しており、別の文字コードとして解釈した結果を見ていた。Issue #178）。
+        std::string cp932;
+        CHECK(!stirling::Cp932FromWide(L"한", cp932),
               "the CP932 route cannot represent it");
     }
     {   // 4 バイト文字はサロゲートペア 2 コード単位になる
@@ -2729,7 +3235,7 @@ static void TestFormatStructCharArrayW() {
 
 // ---- struct.def パース（Issue #46: 配列要素数の検証）------------------------
 static void TestStructDefParse() {
-    std::printf("[TestStructDefParse]\n");
+    TestPrintf("[TestStructDefParse]\n");
     using stirling::StructDefSet;
 
     // 正常: 1 次元・2 次元の配列要素数が読めること。
@@ -2786,23 +3292,381 @@ static void TestStructDefParse() {
     }
 }
 
-// 読み出し検証のためにクリップボードを開く。他プロセスのロックは一時的なので短く待つ。
-//   開けなかった場合は検証をスキップせず失敗として扱う（黙って通り抜けないため）。
-static bool OpenClipboardForRead() {
-    for (int i = 0; i < 20; ++i) {
-        if (::OpenClipboard(nullptr)) { return true; }
-        ::Sleep(50);
+// ---- 構造体スカラの値整形（Issue #178）------------------------------------
+// FormatScalarValue / FormatScalarValueW は構造体編集バーの表示値そのものだが、
+//   直接のテストが無かった。幅・符号・表示基数・バイトオーダの組合せを既知バイト列
+//   との対応で固定する（analysis_artifacts/docs/18_struct_edit.md §6 の実測表）。
+static void TestStructScalarFormat() {
+    TestPrintf("[TestStructScalarFormat]\n");
+    using stirling::FieldKind;
+    using stirling::FormatScalarValue;
+    using stirling::FormatScalarValueW;
+    using stirling::kRadixDec1;
+    using stirling::kRadixFloat;
+    using stirling::kRadixHex;
+    using stirling::kRadixSignedDec;
+
+    struct Case {
+        FieldKind kind;
+        int size;
+        std::vector<unsigned char> bytes;
+        bool big;
+        int radix;
+        const char* expect;
+        const char* what;
+    };
+    const std::vector<Case> cases = {
+        // 1 バイト: char は符号拡張、byte は符号なし。基数 1 は 1・2 バイトでは 10 進のまま。
+        { FieldKind::Char, 1, {0xFF}, false, kRadixSignedDec, "-1",   "char 0xFF is -1" },
+        { FieldKind::Char, 1, {0xFF}, false, kRadixDec1,      "-1",   "char keeps its sign at radix 1" },
+        { FieldKind::Char, 1, {0x80}, false, kRadixSignedDec, "-128", "char lower bound" },
+        { FieldKind::Char, 1, {0x7F}, false, kRadixSignedDec, "127",  "char upper bound" },
+        { FieldKind::Char, 1, {0xFF}, false, kRadixHex,       "0xFF", "char in hex is unsigned" },
+        { FieldKind::Byte, 1, {0xFF}, false, kRadixDec1,      "255",  "byte 0xFF is 255" },
+        { FieldKind::Byte, 1, {0x00}, false, kRadixHex,       "0x00", "byte hex is zero padded" },
+        { FieldKind::Byte, 1, {0x0A}, false, kRadixHex,       "0x0A", "byte hex is upper case" },
+
+        // 2 バイト: 同じ値を LE / BE の両方の並びで確認する。
+        { FieldKind::Short, 2, {0x34, 0x12}, false, kRadixSignedDec, "4660", "short little endian" },
+        { FieldKind::Short, 2, {0x12, 0x34}, true,  kRadixSignedDec, "4660", "short big endian" },
+        { FieldKind::Short, 2, {0xFF, 0xFF}, false, kRadixSignedDec, "65535",
+          "short is read unsigned at 2 bytes" },
+        { FieldKind::Word,  2, {0xFF, 0xFF}, false, kRadixHex,       "0xFFFF", "WORD hex width" },
+        { FieldKind::Word,  2, {0x00, 0x01}, false, kRadixDec1,      "256",    "word radix 1" },
+
+        // 4 バイト: 基数 0 は符号付き再解釈、基数 1 は符号なし。
+        { FieldKind::Long,  4, {0xFF, 0xFF, 0xFF, 0xFF}, false, kRadixSignedDec, "-1",
+          "long is signed at radix 0" },
+        { FieldKind::Long,  4, {0xFF, 0xFF, 0xFF, 0xFF}, false, kRadixDec1, "4294967295",
+          "radix 1 is unsigned at 4 bytes" },
+        { FieldKind::Long,  4, {0x00, 0x00, 0x00, 0x80}, false, kRadixSignedDec, "-2147483648",
+          "long lower bound" },
+        { FieldKind::Long,  4, {0xFF, 0xFF, 0xFF, 0x7F}, false, kRadixSignedDec, "2147483647",
+          "long upper bound" },
+        { FieldKind::Dword, 4, {0x00, 0x00, 0x00, 0x80}, false, kRadixDec1, "2147483648",
+          "dword upper half" },
+        { FieldKind::Dword, 4, {0x80, 0x00, 0x00, 0x00}, true,  kRadixDec1, "2147483648",
+          "dword big endian" },
+        { FieldKind::Dword, 4, {0x78, 0x56, 0x34, 0x12}, false, kRadixHex, "0x12345678",
+          "dword hex little endian" },
+        { FieldKind::Dword, 4, {0x12, 0x34, 0x56, 0x78}, true,  kRadixHex, "0x12345678",
+          "dword hex big endian" },
+
+        // 浮動小数は基数に依らず浮動小数表示（"%g"）。
+        { FieldKind::Float,  4, {0x00, 0x00, 0x80, 0x3F}, false, kRadixHex, "1",
+          "float ignores the radix override" },
+        { FieldKind::Float,  4, {0x3F, 0x80, 0x00, 0x00}, true,  kRadixFloat, "1",
+          "float big endian" },
+        { FieldKind::Float,  4, {0x00, 0x00, 0x80, 0xBF}, false, kRadixFloat, "-1",
+          "negative float" },
+        { FieldKind::Float,  4, {0x00, 0x00, 0x00, 0x80}, false, kRadixFloat, "-0",
+          "negative zero keeps its sign" },
+        { FieldKind::Double, 8, {0, 0, 0, 0, 0, 0, 0xF0, 0x3F}, false, kRadixFloat, "1",
+          "double little endian" },
+        { FieldKind::Double, 8, {0x3F, 0xF0, 0, 0, 0, 0, 0, 0}, true, kRadixFloat, "1",
+          "double big endian" },
+        { FieldKind::Double, 8, {0x9C, 0x75, 0x00, 0x88, 0x3C, 0xE4, 0x37, 0x7E}, false,
+          kRadixFloat, "1e+300", "double uses exponent notation for large values" },
+
+        // 原は double を _gcvt へ 15 桁で渡す（FUN_00411b9e。Issue #215）。既定の %g は
+        //   6 桁で下位が落ちるため、桁数まで固定する。float は原も "%-g"（6 桁）。
+        { FieldKind::Double, 8, {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0}, false,
+          kRadixFloat, "-4.88645965504377e+235", "double keeps 15 significant digits" },
+        { FieldKind::Double, 8, {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xD5, 0x3F}, false,
+          kRadixFloat, "0.333333333333333", "double shows the digits the original shows" },
+        { FieldKind::Float,  4, {0xDB, 0x0F, 0x49, 0x40}, false, kRadixFloat, "3.14159",
+          "float stays at 6 significant digits" },
+    };
+    for (const Case& c : cases) {
+        const std::string got = FormatScalarValue(c.kind, c.size, c.bytes.data(), c.big, c.radix);
+        CHECK(got == c.expect, c.what);
+        if (got != c.expect) {
+            TestPrintf("    got \"%s\" expected \"%s\"\n", got.c_str(), c.expect);
+        }
+        // ワイド版は narrow 版を 1 文字ずつ広げたものと一致する（数値表記は ASCII）。
+        const std::wstring wide = FormatScalarValueW(c.kind, c.size, c.bytes.data(), c.big, c.radix);
+        CHECK(wide == std::wstring(got.begin(), got.end()), c.what);
     }
-    ++g_checks;
-    ++g_failures;
-    std::printf("  FAIL: could not open the clipboard for reading\n");
-    return false;
+
+    // 値を持たない種別は "?"（表示だけして編集させない）。
+    {
+        const unsigned char zero[8] = {0};
+        CHECK(FormatScalarValue(FieldKind::Unknown, 1, zero, false, kRadixSignedDec) == "?",
+              "unknown kind formats as a question mark");
+        CHECK(FormatScalarValue(FieldKind::Struct, 1, zero, false, kRadixSignedDec) == "?",
+              "a nested struct has no scalar value");
+    }
+}
+
+// ---- 構造体スカラの符号化（Issue #178）------------------------------------
+// EncodeScalar は編集した値をデータへ書き戻す唯一の経路。原版互換の受理条件
+//   （"0x" 前置・先頭 0 の禁止・前後空白の禁止・幅レンジ）を、一般的な数値パーサの
+//   期待値で上書きしないように固定する（§6）。
+static void TestStructScalarEncode() {
+    TestPrintf("[TestStructScalarEncode]\n");
+    using stirling::EncodeScalar;
+    using stirling::FieldKind;
+
+    struct Ok {
+        FieldKind kind; int size; const char* text; bool big;
+        std::vector<unsigned char> expect; const char* what;
+    };
+    const std::vector<Ok> accepts = {
+        // 10 進（符号あり・なし）と幅の下限・上限。
+        { FieldKind::Byte,  1, "0",    false, {0x00}, "zero" },
+        { FieldKind::Byte,  1, "255",  false, {0xFF}, "byte upper bound" },
+        { FieldKind::Char,  1, "-1",   false, {0xFF}, "negative byte" },
+        { FieldKind::Char,  1, "-128", false, {0x80}, "char lower bound" },
+        { FieldKind::Short, 2, "-32768", false, {0x00, 0x80}, "short lower bound little endian" },
+        { FieldKind::Short, 2, "-32768", true,  {0x80, 0x00}, "short lower bound big endian" },
+        { FieldKind::Word,  2, "65535", false, {0xFF, 0xFF}, "word upper bound" },
+        { FieldKind::Long,  4, "2147483647",  false, {0xFF, 0xFF, 0xFF, 0x7F}, "long upper bound" },
+        { FieldKind::Long,  4, "-2147483648", false, {0x00, 0x00, 0x00, 0x80}, "long lower bound" },
+        { FieldKind::Dword, 4, "4294967295",  false, {0xFF, 0xFF, 0xFF, 0xFF}, "dword upper bound" },
+        { FieldKind::Dword, 4, "305419896",   true,  {0x12, 0x34, 0x56, 0x78}, "dword big endian" },
+        // "0x" 前置の 16 進（符号なし）。
+        { FieldKind::Byte,  1, "0xFF", false, {0xFF}, "hex byte" },
+        { FieldKind::Byte,  1, "0xff", false, {0xFF}, "lower case hex" },
+        { FieldKind::Byte,  1, "0X0a", false, {0x0A}, "upper case prefix" },
+        { FieldKind::Dword, 4, "0x12345678", false, {0x78, 0x56, 0x34, 0x12}, "hex dword" },
+        // 原版互換: "-" だけの入力も通過し、値 0 になる（一般的なパーサとは異なる）。
+        { FieldKind::Char,  1, "-", false, {0x00}, "a bare minus is accepted as zero (faithful)" },
+        // 原版互換: 幅レンジ検証は「上位 32bit < 1」かつ「下位 32bit が負 or 幅内」なので、
+        //   負の範囲外は符号ビットが立っているだけで通り、下位バイトへ切り詰められる。
+        //   正の範囲外（下の rejects）とは扱いが違う。一般的な数値パーサの感覚で
+        //   reject 側へ動かさないよう、現仕様として固定する。
+        { FieldKind::Char,  1, "-129",    false, {0x7F},       "a byte below range wraps (faithful)" },
+        { FieldKind::Short, 2, "-32769",  false, {0xFF, 0x7F}, "a short below range wraps (faithful)" },
+        { FieldKind::Short, 2, "-100000", false, {0x60, 0x79}, "far below range still wraps (faithful)" },
+        // 浮動小数。指数は e/E/d/D の直後に必ず符号が要る。
+        { FieldKind::Float,  4, "1.0",   false, {0x00, 0x00, 0x80, 0x3F}, "float 1.0" },
+        { FieldKind::Float,  4, "1.0",   true,  {0x3F, 0x80, 0x00, 0x00}, "float big endian" },
+        { FieldKind::Float,  4, "+1.0",  false, {0x00, 0x00, 0x80, 0x3F}, "leading plus" },
+        { FieldKind::Float,  4, "-0.0",  false, {0x00, 0x00, 0x00, 0x80}, "negative zero keeps its sign" },
+        { FieldKind::Float,  4, "1e+0",  false, {0x00, 0x00, 0x80, 0x3F}, "exponent with a sign" },
+        { FieldKind::Double, 8, "1.0",   false, {0, 0, 0, 0, 0, 0, 0xF0, 0x3F}, "double 1.0" },
+        { FieldKind::Double, 8, "1.0",   true,  {0x3F, 0xF0, 0, 0, 0, 0, 0, 0}, "double big endian" },
+    };
+    for (const Ok& a : accepts) {
+        std::vector<unsigned char> out;
+        const bool ok = EncodeScalar(a.kind, a.size, a.text, a.big, out);
+        CHECK(ok, a.what);
+        CHECK(out == a.expect, a.what);
+        if (ok && out != a.expect) {
+            TestPrintf("    \"%s\" encoded to %zu bytes, first %02X\n", a.text, out.size(),
+                        out.empty() ? 0 : out[0]);
+        }
+    }
+
+    struct Ng { FieldKind kind; int size; const char* text; const char* what; };
+    const std::vector<Ng> rejects = {
+        { FieldKind::Byte,  1, "",       "empty text" },
+        { FieldKind::Byte,  1, " 1",     "a leading space is not trimmed" },
+        { FieldKind::Byte,  1, "1 ",     "a trailing space is not trimmed" },
+        { FieldKind::Byte,  1, "01",     "a leading zero followed by a digit is invalid" },
+        { FieldKind::Byte,  1, "0x",     "a prefix without digits is invalid" },
+        { FieldKind::Byte,  1, "0xZZ",   "non hex digits" },
+        { FieldKind::Byte,  1, "+1",     "a leading plus is not a valid integer" },
+        { FieldKind::Byte,  1, "1.5",    "an integer field rejects a decimal point" },
+        { FieldKind::Byte,  1, "256",    "byte out of range" },
+        { FieldKind::Byte,  1, "0x100",  "hex byte out of range" },
+        { FieldKind::Short, 2, "65536",  "short out of range" },
+        { FieldKind::Dword, 4, "4294967296",  "dword out of range" },
+        { FieldKind::Dword, 4, "0x100000000", "hex dword out of range" },
+        { FieldKind::Float, 4, "",       "empty float text" },
+        { FieldKind::Float, 4, "abc",    "not a number" },
+        { FieldKind::Float, 4, "1.2.3",  "two decimal points" },
+        { FieldKind::Float, 4, "1e3",    "an exponent without a sign is invalid (faithful)" },
+        { FieldKind::Float, 4, "+",      "a bare sign is invalid" },
+    };
+    for (const Ng& r : rejects) {
+        std::vector<unsigned char> out;
+        CHECK(!EncodeScalar(r.kind, r.size, r.text, false, out), r.what);
+    }
+
+    // 表示 → 編集 → 表示の往復（構造体バーの実際の使われ方）。
+    {
+        using stirling::FormatScalarValue;
+        struct Trip { FieldKind kind; int size; int radix; const char* text; };
+        const std::vector<Trip> trips = {
+            { FieldKind::Char,  1, stirling::kRadixSignedDec, "-128" },
+            { FieldKind::Byte,  1, stirling::kRadixHex,       "0xC3" },
+            { FieldKind::Short, 2, stirling::kRadixSignedDec, "4660" },
+            { FieldKind::Long,  4, stirling::kRadixSignedDec, "-2147483648" },
+            { FieldKind::Dword, 4, stirling::kRadixDec1,      "4294967295" },
+            { FieldKind::Float, 4, stirling::kRadixFloat,     "-1.5" },
+            { FieldKind::Double, 8, stirling::kRadixFloat,    "2.5" },
+        };
+        for (const Trip& t : trips) {
+            for (int pass = 0; pass < 2; ++pass) {
+                const bool big = (pass == 1);
+                std::vector<unsigned char> bytes;
+                CHECK(EncodeScalar(t.kind, t.size, t.text, big, bytes), "round trip encode");
+                if (bytes.size() != static_cast<size_t>(t.size)) { continue; }
+                const std::string shown =
+                    FormatScalarValue(t.kind, t.size, bytes.data(), big, t.radix);
+                // どの入力もその基数での正規形なので、表示は入力文字列そのものへ戻る。
+                CHECK(shown == std::string(t.text),
+                      "the displayed value survives an edit round trip");
+                if (shown != t.text) {
+                    TestPrintf("    round trip: \"%s\" -> \"%s\"\n", t.text, shown.c_str());
+                }
+            }
+        }
+    }
+}
+
+// ---- 構造体のサイズ計算とツリー生成（Issue #178）--------------------------
+// SizeOfStruct / BuildTree は構造体編集バーの「どこを何バイト読むか」を決める中核だが、
+//   直接のテストが無かった。ネスト・1/2 次元配列のオフセットとサイズ、データ不足時の
+//   "----"、基数の全体上書きを小さな定義文字列から確認する。
+static void TestStructTree() {
+    TestPrintf("[TestStructTree]\n");
+    using stirling::FieldKind;
+    using stirling::StructDefSet;
+    using stirling::StructNode;
+
+    const char* const kDef =
+        "struct Inner { byte a; word b; };"
+        "struct Outer { char c[3]; Inner in; long l; double d[2][2]; };";
+
+    StructDefSet defs;
+    std::wstring err;
+    CHECK(defs.ParseText(kDef, &err), "nested definition parses");
+    CHECK(err.empty(), "nested definition leaves err empty");
+    const int inner = defs.FindByName("Inner");
+    const int outer = defs.FindByName("Outer");
+    CHECK(inner == 0 && outer == 1, "definitions are indexed in order");
+    CHECK(defs.FindByName("Missing") == -1, "an unknown name is not found");
+
+    // サイズ: Inner = 1 + 2 = 3、Outer = 3 + 3 + 4 + 8*2*2 = 42。
+    CHECK(defs.SizeOfStruct(inner) == 3, "nested struct size");
+    CHECK(defs.SizeOfStruct(outer) == 42, "outer size includes nesting and both array dimensions");
+    CHECK(defs.SizeOfStruct(-1) == 0, "a negative index has no size");
+    CHECK(defs.SizeOfStruct(99) == 0, "an out of range index has no size");
+
+    // 十分な長さのデータでツリーを組む。
+    std::vector<unsigned char> data(64);
+    for (size_t i = 0; i < data.size(); ++i) { data[i] = static_cast<unsigned char>(i); }
+    data[0] = 'A'; data[1] = 'B'; data[2] = 'C';
+
+    StructNode root;
+    defs.BuildTree(outer, data, false, 0 /* ASCII */, root);
+    CHECK(root.hasChildren, "the root is a container");
+    CHECK(root.children.size() == 4, "four top level fields");
+    if (root.children.size() != 4) { return; }
+
+    // 1) char 配列: コンテナに文字列表現、子は 1 バイトずつの葉。
+    {
+        const StructNode& c = root.children[0];
+        CHECK(c.type == "char" && c.name == "c[3]", "char array container naming");
+        CHECK(c.hasChildren && c.children.size() == 3, "char array has one child per element");
+        CHECK(c.value == L"ABC", "char array container shows the text");
+        CHECK(c.children[0].name == "[0]" && c.children[2].name == "[2]", "element naming");
+        for (int i = 0; i < 3; ++i) {
+            CHECK(c.children[i].offset == i, "char element offset");
+            CHECK(c.children[i].size == 1, "char element size");
+            CHECK(c.children[i].editable, "char element is editable");
+            CHECK(c.children[i].kind == FieldKind::Char, "char element kind");
+        }
+    }
+    // 2) ネスト構造体: 型名は定義名のまま、子のオフセットは親から連続する。
+    {
+        const StructNode& n = root.children[1];
+        CHECK(n.type == "Inner" && n.name == "in", "nested struct naming");
+        CHECK(n.hasChildren && n.children.size() == 2, "nested struct children");
+        CHECK(!n.editable, "a container is not editable");
+        CHECK(n.children[0].name == "a" && n.children[0].offset == 3 && n.children[0].size == 1,
+              "nested first field");
+        CHECK(n.children[1].name == "b" && n.children[1].offset == 4 && n.children[1].size == 2,
+              "nested second field");
+        CHECK(n.children[1].type == "WORD", "word is displayed with the standard type name");
+    }
+    // 3) スカラ: ネストの直後から続く。
+    {
+        const StructNode& l = root.children[2];
+        CHECK(l.type == "long" && l.name == "l", "scalar naming");
+        CHECK(!l.hasChildren && l.editable, "a scalar leaf is editable");
+        CHECK(l.offset == 6 && l.size == 4, "scalar offset follows the nested struct");
+        CHECK(l.value == stirling::FormatScalarValueW(FieldKind::Long, 4, &data[6], false,
+                                                      stirling::kRadixSignedDec),
+              "scalar value matches the formatter");
+    }
+    // 4) 2 次元配列: コンテナ → 行 → 要素の 3 階層。
+    {
+        const StructNode& d = root.children[3];
+        CHECK(d.type == "double" && d.name == "d[2][2]", "2D array naming");
+        CHECK(d.hasChildren && d.children.size() == 2, "one child per first dimension");
+        if (d.children.size() == 2) {
+            for (int i = 0; i < 2; ++i) {
+                const StructNode& row = d.children[i];
+                CHECK(row.name == (i == 0 ? "[0]" : "[1]"), "row naming");
+                CHECK(row.hasChildren && row.children.size() == 2, "one child per second dimension");
+                for (int j = 0; j < 2; ++j) {
+                    const int want = 10 + (i * 2 + j) * 8;
+                    CHECK(row.children[j].offset == want, "2D element offset");
+                    CHECK(row.children[j].size == 8, "2D element size");
+                }
+            }
+        }
+    }
+
+    // データが足りない範囲は "----" で編集不可（末尾で構造体が切れている場合）。
+    {
+        std::vector<unsigned char> shortData(8, 0x41);
+        StructNode cut;
+        defs.BuildTree(outer, shortData, false, 0, cut);
+        CHECK(cut.children.size() == 4, "a short buffer still yields the whole shape");
+        if (cut.children.size() == 4) {
+            CHECK(cut.children[2].value == L"----", "a leaf past the end shows the filler");
+            CHECK(!cut.children[2].editable, "a leaf past the end is not editable");
+            CHECK(cut.children[2].offset == 6, "the offset is still reported");
+            CHECK(cut.children[0].children[0].editable, "leaves inside the buffer stay editable");
+            CHECK(cut.children[3].children[0].children[0].value == L"----",
+                  "array elements past the end show the filler too");
+        }
+    }
+
+    // 基数の全体上書き: 整数葉だけが 16 進になり、float/double は影響を受けない。
+    {
+        StructNode hex;
+        defs.BuildTree(outer, data, false, 0, hex, stirling::kRadixHex);
+        CHECK(hex.children.size() == 4, "override keeps the shape");
+        if (hex.children.size() == 4) {
+            CHECK(hex.children[2].radix == stirling::kRadixHex, "the override reaches the leaf");
+            CHECK(hex.children[2].value.rfind(L"0x", 0) == 0, "integers use hex under the override");
+            const StructNode& dbl = hex.children[3].children[0].children[0];
+            CHECK(dbl.value.rfind(L"0x", 0) != 0, "float and double ignore the override");
+        }
+    }
+
+    // 範囲外の defIndex は空のツリー（呼び出し側が def 未読込でも落ちない）。
+    {
+        StructNode empty;
+        defs.BuildTree(99, data, false, 0, empty);
+        CHECK(empty.children.empty(), "an unknown struct yields no children");
+        defs.BuildTree(-1, data, false, 0, empty);
+        CHECK(empty.children.empty(), "a negative index yields no children");
+    }
+
+    // バイトオーダの指定がツリーの値まで届く。
+    {
+        StructNode le, be;
+        defs.BuildTree(inner, data, false, 0, le);
+        defs.BuildTree(inner, data, true, 0, be);
+        CHECK(le.children.size() == 2 && be.children.size() == 2, "inner tree shape");
+        if (le.children.size() == 2 && be.children.size() == 2) {
+            CHECK(le.children[0].value == be.children[0].value, "a 1 byte field has no byte order");
+            CHECK(le.children[1].value != be.children[1].value,
+                  "the 2 byte field differs between little and big endian");
+        }
+    }
 }
 
 // 16進テキストの寛容パーサ（Issue #97。クリップボードの16進テキスト貼り付け）。
 //   受理形式・拒否条件と、失敗時に部分結果を返さないことを検証する。
 static void TestHexTextParse() {
-    std::printf("[TestHexTextParse]\n");
+    TestPrintf("[TestHexTextParse]\n");
     using stirling::HexTextError;
     using stirling::ParseHexText;
 
@@ -2883,7 +3747,7 @@ static void TestHexTextParse() {
 //   CP932 外の文字を表示するための土台）。文字欄の不変条件（1 ソースバイト = 1 表示
 //   セル）を保つため、サロゲートペアと不正な単独サロゲートの扱いを重点的に確認する。
 static void TestUtf16Text() {
-    std::printf("[TestUtf16Text]\n");
+    TestPrintf("[TestUtf16Text]\n");
     using stirling::DecodeUtf16;
     using stirling::EncodeUtf16;
     using stirling::Utf16CarryBytesAt;
@@ -2978,13 +3842,116 @@ static void TestUtf16Text() {
         CHECK(Utf16CarryBytesAt(normal, 4, 2, false) == 0, "no carry for a normal unit");
         CHECK(Utf16CarryBytesAt(win, 4, 0, false) == 0, "no carry at the very start");
     }
+    // --- 境界値（Issue #178: 復号・符号化とも両端を押さえる）---
+    {
+        struct Bmp { unsigned int cp; const char* what; };
+        const Bmp bmp[] = {
+            { 0x0000,  "U+0000" },
+            { 0xD7FF,  "the code unit just below the surrogate range" },
+            { 0xE000,  "the code unit just above the surrogate range" },
+            { 0xFFFF,  "U+FFFF (the last BMP code point)" },
+        };
+        for (const Bmp& b : bmp) {
+            unsigned char le[2] = { static_cast<unsigned char>(b.cp & 0xFF),
+                                    static_cast<unsigned char>(b.cp >> 8) };
+            const stirling::Utf16Decoded d = DecodeUtf16(le, 2, false);
+            CHECK(d.ok && d.codePoint == b.cp && d.length == 2, b.what);
+            unsigned char be[2] = { static_cast<unsigned char>(b.cp >> 8),
+                                    static_cast<unsigned char>(b.cp & 0xFF) };
+            const stirling::Utf16Decoded e = DecodeUtf16(be, 2, true);
+            CHECK(e.ok && e.codePoint == b.cp && e.length == 2, b.what);
+        }
+
+        // サロゲート区間の両端は単独では不正（2 バイト = 2 セルのまま）。
+        const unsigned int lone[] = { 0xD800, 0xDBFF, 0xDC00, 0xDFFF };
+        for (unsigned int u : lone) {
+            unsigned char le[2] = { static_cast<unsigned char>(u & 0xFF),
+                                    static_cast<unsigned char>(u >> 8) };
+            const stirling::Utf16Decoded d = DecodeUtf16(le, 2, false);
+            CHECK(!d.ok && d.length == 2, "a lone surrogate at the range edge is invalid");
+        }
+
+        // 面外の両端: U+10000（最小）と U+10FFFF（最大）。
+        struct Pair { unsigned int cp; unsigned int high; unsigned int low; const char* what; };
+        const Pair pairs[] = {
+            { 0x10000,  0xD800, 0xDC00, "U+10000 (the first supplementary code point)" },
+            { 0x10FFFF, 0xDBFF, 0xDFFF, "U+10FFFF (the last code point)" },
+        };
+        for (const Pair& pr : pairs) {
+            const unsigned char le[4] = {
+                static_cast<unsigned char>(pr.high & 0xFF), static_cast<unsigned char>(pr.high >> 8),
+                static_cast<unsigned char>(pr.low & 0xFF),  static_cast<unsigned char>(pr.low >> 8),
+            };
+            const stirling::Utf16Decoded d = DecodeUtf16(le, 4, false);
+            CHECK(d.ok && d.codePoint == pr.cp && d.length == 4, pr.what);
+            const unsigned char be[4] = {
+                static_cast<unsigned char>(pr.high >> 8), static_cast<unsigned char>(pr.high & 0xFF),
+                static_cast<unsigned char>(pr.low >> 8),  static_cast<unsigned char>(pr.low & 0xFF),
+            };
+            const stirling::Utf16Decoded e = DecodeUtf16(be, 4, true);
+            CHECK(e.ok && e.codePoint == pr.cp && e.length == 4, pr.what);
+
+            // 符号化は復号と往復する（LE / BE 両方）。
+            std::vector<unsigned char> enc;
+            CHECK(EncodeUtf16(pr.cp, false, enc) && enc.size() == 4, pr.what);
+            CHECK(enc == std::vector<unsigned char>(le, le + 4), "little endian pair encoding");
+            enc.clear();
+            CHECK(EncodeUtf16(pr.cp, true, enc) && enc.size() == 4, pr.what);
+            CHECK(enc == std::vector<unsigned char>(be, be + 4), "big endian pair encoding");
+        }
+
+        // 3 バイトでペアが切れている（下位サロゲートの片割れだけが窓に入っている）。
+        const unsigned char cut3[] = { 0x3d, 0xd8, 0x00 };
+        const stirling::Utf16Decoded d3 = DecodeUtf16(cut3, 3, false);
+        CHECK(!d3.ok && d3.truncated && d3.length == 2,
+              "a pair cut after three bytes is truncated, not invalid");
+    }
+
+    // --- BigEndian 側の符号化・ワイド変換・持ち越し ---
+    {
+        std::vector<unsigned char> out;
+        CHECK(EncodeUtf16(0xFFFF, true, out) && out.size() == 2 &&
+              out[0] == 0xFF && out[1] == 0xFF, "encodes U+FFFF big endian");
+
+        // 既存の内容を持つ vector へは追記する（破壊せず末尾へ足す）。
+        std::vector<unsigned char> acc = { 0xAA, 0xBB };
+        CHECK(EncodeUtf16(0x3042, true, acc) && acc.size() == 4, "encoding appends");
+        CHECK(acc[0] == 0xAA && acc[1] == 0xBB && acc[2] == 0x30 && acc[3] == 0x42,
+              "the existing content is kept in front");
+        // 不正なコードポイントでは既存部分も壊さない。
+        const std::vector<unsigned char> before = acc;
+        CHECK(!EncodeUtf16(0xDC00, true, acc), "a lone low surrogate is refused");
+        CHECK(acc == before, "a refused encoding leaves the buffer untouched");
+        CHECK(!EncodeUtf16(0x110000, true, acc), "beyond U+10FFFF is refused");
+        CHECK(acc == before, "a refused range leaves the buffer untouched");
+
+        // ワイド文字列 → BigEndian バイト列。
+        const wchar_t w[] = { L'A', 0x3042, 0xD83D, 0xDE00, 0 };
+        const std::vector<unsigned char> be = Utf16FromWide(w, 4, true);
+        const std::vector<unsigned char> want = { 0x00, 0x41, 0x30, 0x42, 0xD8, 0x3D, 0xDE, 0x00 };
+        CHECK(be == want, "converts wide to big endian bytes");
+        const wchar_t broken[] = { 0xDE00, L'A', 0 };   // 下位サロゲート単独 + "A"
+        const std::vector<unsigned char> bb = Utf16FromWide(broken, 2, true);
+        CHECK(bb.size() == 2 && bb[0] == 0x00 && bb[1] == 'A',
+              "an unpaired low surrogate is dropped in big endian too");
+        CHECK(Utf16FromWide(nullptr, 4, true).empty(), "nullptr yields no bytes");
+        CHECK(Utf16FromWide(w, 0, true).empty(), "length 0 yields no bytes");
+
+        // 窓の先頭がペアの途中か（BigEndian）。
+        const unsigned char win[] = { 0xd8, 0x3d, 0xde, 0x00 };
+        CHECK(Utf16CarryBytesAt(win, 4, 2, true) == 2, "carries over a split pair in big endian");
+        const unsigned char plain[] = { 0x00, 0x41, 0xde, 0x00 };
+        CHECK(Utf16CarryBytesAt(plain, 4, 2, true) == 0, "no carry when the pair is broken (BE)");
+        CHECK(Utf16CarryBytesAt(win, 4, 4, true) == 0, "no carry past the end of the buffer");
+        CHECK(Utf16CarryBytesAt(nullptr, 4, 2, true) == 0, "nullptr never carries");
+    }
 }
 
 // UTF-8 の復号・符号化と持ち越し判定（Issue #98。キャラクターセット UTF-8 対応）。
 //   文字欄の不変条件（1 ソースバイト = 1 表示セル）を保つための土台なので、
 //   「不正な列は 1 バイトずつ独立して扱う」ことを重点的に確認する。
 static void TestUtf8Text() {
-    std::printf("[TestUtf8Text]\n");
+    TestPrintf("[TestUtf8Text]\n");
     using stirling::DecodeUtf8;
     using stirling::EncodeUtf8;
     using stirling::Utf8CarryBytesAt;
@@ -3125,11 +4092,13 @@ static void TestUtf8Text() {
     }
 }
 
-// クリップボード転送の RAII（Issue #47）。
-//   グローバルメモリの所有権移譲・解放と、テキスト転送の往復を検証する。
-//   実クリップボードを使うため、テスト実行でクリップボードの内容は置き換わる。
+// クリップボード転送の RAII（Issue #47）のうち、メモリだけで完結する部分。
+//   グローバルメモリの所有権移譲・解放・ロックと、引数不正の検証を扱う。
+//   ここで呼ぶ転送 API は、いずれもクリップボードを開く前に戻る経路だけを通るため、
+//   利用者のクリップボードには触れない。実転送は TestClipboardTransferOs へ分離した
+//   （Issue #181）。
 static void TestClipboardUtil() {
-    std::printf("[TestClipboardUtil]\n");
+    TestPrintf("[TestClipboardUtil]\n");
     using ui::GlobalLockGuard;
     using ui::GlobalMemory;
 
@@ -3210,6 +4179,38 @@ static void TestClipboardUtil() {
         CHECK(!ui::PutClipboardOwned(nullptr, CF_TEXT, none, error), "invalid memory is rejected");
         CHECK(error == ERROR_NOT_ENOUGH_MEMORY, "invalid memory reports out-of-memory");
     }
+}
+
+// ---- OS 統合: 実クリップボードへの転送（Issue #181） ----
+// 成功した転送は利用者のクリップボードの内容を置き換える。失敗させる検証も
+// PutClipboardOwned が SetClipboardData の前に EmptyClipboard を通るため、
+// 同じく外に副作用が出る。コアテストは「ビルドして走らせれば通る」軽量なスイートに
+// 保ちたいので、ここは環境変数 STIRLING_CORE_TEST_OS=1 のときだけ実行する。
+// 実行しなかった場合もスキップとして集計へ載せ、未検証であることを出力に残す。
+
+// 読み出し検証のためにクリップボードを開く。他プロセスのロックは一時的なので短く待つ。
+//   開けなかった場合は検証をスキップせず失敗として扱う（黙って通り抜けないため）。
+static bool OpenClipboardForRead() {
+    for (int i = 0; i < 20; ++i) {
+        if (::OpenClipboard(nullptr)) { return true; }
+        ::Sleep(50);
+    }
+    ++g_checks;
+    ++g_failures;
+    TestPrintf("  FAIL: could not open the clipboard for reading\n");
+    return false;
+}
+
+static void TestClipboardTransferOs() {
+    TestPrintf("[TestClipboardTransferOs]\n");
+    const char* env = std::getenv("STIRLING_CORE_TEST_OS");
+    if (env == nullptr || std::strcmp(env, "1") != 0) {
+        SkipTest("TestClipboardTransferOs",
+                 "set STIRLING_CORE_TEST_OS=1 to run (it replaces the clipboard)");
+        return;
+    }
+    using ui::GlobalLockGuard;
+    using ui::GlobalMemory;
 
     // SetClipboardData が失敗したときは所有権を手放さない（＝呼び出し元が解放する）。
     //   書式 0 は不正な書式番号なので、クリップボードを開いた状態でも設定に失敗する。
@@ -3289,7 +4290,7 @@ static void TestClipboardUtil() {
 
 // Undo 履歴の容量管理（Issue #30）: PlanUndoTrim / ShiftSavePoint。
 static void TestUndoBudget() {
-    std::printf("[TestUndoBudget]\n");
+    TestPrintf("[TestUndoBudget]\n");
     using stirling::PlanUndoTrim;
     using stirling::ShiftSavePoint;
     using stirling::UndoTrimPlan;
@@ -3362,8 +4363,21 @@ static void FillDoc(BlockList& list, const std::vector<unsigned char>& data) {
     }
 }
 
+// 入力（pos / count / 元サイズ）だけから、削除できるはずのバイト数を求める。
+//   DeleteByte は pos が現在の総長未満のときだけ成功するので、pos が範囲内なら
+//   min(count, size-pos)、範囲外なら 0 になる。実装の戻り値には依存しない。
+static FileOffset ExpectedDeleteCount(size_t srcSize, FileOffset pos, FileOffset count) {
+    if (count <= 0 || pos < 0) { return 0; }
+    const FileOffset size = static_cast<FileOffset>(srcSize);
+    if (pos >= size) { return 0; }
+    const FileOffset avail = size - pos;
+    return (count < avail) ? count : avail;
+}
+
 // DeleteRange と「DeleteByte の反復」を同一データへ適用し、削除数・内容・ブロック構造の
 // すべてが一致することを確かめる（忠実性の担保）。線形参照モデルとも突き合わせる。
+//   期待削除数は入力から独立に計算し、両実装ともその値と比較する。実装同士の比較だけだと
+//   両方が同じ条件で早期終了しても検出できない（Issue #178）。
 static void CheckDeleteRangeEquivalence(const std::vector<unsigned char>& src,
                                         FileOffset pos, FileOffset count, const char* where) {
     BlockList bulk;
@@ -3371,25 +4385,28 @@ static void CheckDeleteRangeEquivalence(const std::vector<unsigned char>& src,
     FillDoc(bulk, src);
     FillDoc(byByte, src);
 
+    const FileOffset expect = ExpectedDeleteCount(src.size(), pos, count);
+
     FileOffset got = 0;
     {
         BlockCursor c(&bulk);
         got = c.DeleteRange(pos, count);
     }
-    FileOffset expect = 0;
+    FileOffset byByteCount = 0;
     {
         BlockCursor c(&byByte);
         for (FileOffset i = 0; i < count; ++i) {
             unsigned char t = 0;
             if (!c.DeleteByte(pos, &t)) { break; }
-            ++expect;
+            ++byByteCount;
         }
     }
-    CHECK(got == expect, where);                       // 削除できたバイト数
+    CHECK(got == expect, where);            // DeleteRange の削除数は独立した期待値と一致
+    CHECK(byByteCount == expect, where);    // DeleteByte 反復も同じ独立した期待値と一致
     CHECK(BlockShape(bulk) == BlockShape(byByte), where);   // ブロック構造
     CHECK(ReadAll(bulk) == ReadAll(byByte), where);         // 内容
 
-    // 線形参照モデル（std::vector）との突合
+    // 線形参照モデル（std::vector）との突合。erase 幅も独立した期待値を使う。
     std::vector<unsigned char> ref = src;
     if (expect > 0) {
         ref.erase(ref.begin() + static_cast<size_t>(pos),
@@ -3400,7 +4417,7 @@ static void CheckDeleteRangeEquivalence(const std::vector<unsigned char>& src,
 }
 
 static void TestDeleteRange() {
-    std::printf("[TestDeleteRange]\n");
+    TestPrintf("[TestDeleteRange]\n");
     // 3ブロック強（16KB×2 を跨ぐ長さ）のデータを用意する。
     std::vector<unsigned char> src(40000);
     for (size_t i = 0; i < src.size(); ++i) {
@@ -3539,7 +4556,7 @@ static void TestDeleteRange() {
 // 操作前の内容・ブロック構造のまま保たれることを、失敗位置を変えながら確認する。
 #ifdef STIRLING_TEST_ALLOC_HOOK
 static void TestAllocFailureRollback() {
-    std::printf("TestAllocFailureRollback\n");
+    TestPrintf("TestAllocFailureRollback\n");
 
     // 1) 複数ブロックへ跨る Insert の途中で確保が失敗する。
     for (int failAt = 1; failAt <= 8; ++failAt) {
@@ -3686,7 +4703,7 @@ static void TestAllocFailureRollback() {
 // 範囲初期化を「選択長と同容量の一時バッファ＋置換」から「ブロックへの直接 memset」へ
 // 変えたため、ブロック跨ぎ・境界・末尾クランプが SetByteAt の反復と一致することを確認する。
 static void TestWriteAndFillRange() {
-    std::printf("TestWriteAndFillRange\n");
+    TestPrintf("TestWriteAndFillRange\n");
 
     // 複数ブロックに跨るデータを用意する（16KB ブロック 3 個 + 端数）。
     std::vector<unsigned char> ref(static_cast<size_t>(kBlockCapacity) * 3 + 1234);
@@ -3724,6 +4741,27 @@ static void TestWriteAndFillRange() {
         CHECK(ReadAll(list) == ref, "clamped Write content");
         CHECK(list.GetTotalLength() == static_cast<FileOffset>(ref.size()),
               "clamped Write keeps the total length");
+    }
+
+    // Write: 入力の境界値。FillRange 側には同等の確認があるが Write には無かった
+    //   （Issue #183）。count<=0 と負の位置は実装が明示的に弾く契約（Read と違い
+    //   ガードを持つ）なので、その契約をここで固定する。
+    {
+        std::vector<unsigned char> src(100, 0x3C);
+        const std::vector<unsigned char> before = ReadAll(list);
+        BlockCursor c(&list);
+        CHECK(c.Write(0, src.data(), 0) == 0, "Write of zero length writes nothing");
+        CHECK(c.Write(0, src.data(), -1) == 0, "Write rejects a negative count");
+        CHECK(c.Write(-1, src.data(), 10) == 0, "Write rejects a negative position");
+        // EOF ちょうど（Seek は追記位置として成功し、書ける範囲が無くて 0）と、
+        //   その先（Seek 自体が失敗）は別経路なので両方見る。
+        CHECK(c.Write(static_cast<FileOffset>(ref.size()), src.data(), 10) == 0,
+              "Write at the EOF append position writes nothing");
+        CHECK(c.Write(static_cast<FileOffset>(ref.size()) + 1, src.data(), 10) == 0,
+              "Write past the end writes nothing");
+        CHECK(ReadAll(list) == before, "a rejected Write leaves the data untouched");
+        CHECK(list.GetTotalLength() == static_cast<FileOffset>(ref.size()),
+              "a rejected Write keeps the total length");
     }
 
     // FillRange: ブロック跨ぎの定数上書き。
@@ -3802,11 +4840,525 @@ static void TestWriteAndFillRange() {
 #endif
 }
 
+// ---- 前方検索の範囲指定・長いパターン（Issue #178）----
+// 前方検索はこれまで end=0（全長）だけを突き合わせており、有限の [start,end) と
+//   データ／範囲より長いパターンが未検証だった。範囲の境界（末尾がちょうど end に
+//   届く一致と、1 バイトはみ出す一致）を区別できることを固定する。
+static void TestSearchForwardRange() {
+    TestPrintf("TestSearchForwardRange\n");
+
+    auto find = [](BlockCursor& c, const std::vector<unsigned char>& pat,
+                   FileOffset start, FileOffset end) -> FileOffset {
+        FileOffset pos = -1;
+        const bool ok = c.SearchPattern(pat.data(), static_cast<int>(pat.size()), &pos,
+                                        BlockCursor::kForward, start, end);
+        return ok ? pos : -1;
+    };
+
+    // 1) 単一ブロック内の範囲境界。
+    {
+        std::vector<unsigned char> data(100, 0x00);
+        const std::vector<unsigned char> pat = {0x11, 0x22, 0x33};
+        for (size_t i = 0; i < pat.size(); ++i) { data[50 + i] = pat[i]; }
+        BlockList list;
+        BuildDoc(list, data);
+        BlockCursor c(&list);
+
+        CHECK(find(c, pat, 0, 53) == 50, "a match ending exactly at end is found");
+        CHECK(find(c, pat, 0, 52) == -1, "a match overflowing end by one byte is not found");
+        CHECK(find(c, pat, 0, 0) == 50, "end=0 means the whole document");
+        CHECK(find(c, pat, 50, 53) == 50, "start exactly at the match");
+        CHECK(find(c, pat, 51, 53) == -1, "start past the match");
+        CHECK(find(c, pat, 0, 51) == -1, "a range too short for the pattern finds nothing");
+    }
+
+    // 2) ブロック境界（16KB）を跨ぐ一致でも同じ境界判定になる。
+    {
+        std::vector<unsigned char> data(40000);
+        for (size_t i = 0; i < data.size(); ++i) {
+            data[i] = static_cast<unsigned char>((i * 91) & 0xFF);
+        }
+        const std::vector<unsigned char> pat = {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22};
+        const int at = kBlockCapacity - 3;      // 3 バイトが 1 ブロック目、残りが 2 ブロック目
+        for (size_t i = 0; i < pat.size(); ++i) { data[at + i] = pat[i]; }
+        BlockList list;
+        BuildDoc(list, data);
+        CHECK(list.Count() >= 3, "multi-block doc");
+        BlockCursor c(&list);
+
+        const FileOffset endOfMatch = at + static_cast<FileOffset>(pat.size());
+        CHECK(find(c, pat, 0, endOfMatch) == at, "a cross-block match ending at end is found");
+        CHECK(find(c, pat, 0, endOfMatch - 1) == -1, "one byte short of the cross-block match");
+        CHECK(find(c, pat, at, endOfMatch) == at, "start at the cross-block match");
+    }
+
+    // 3) データ／範囲より長いパターンは見つからない（打ち切りの確認）。
+    {
+        std::vector<unsigned char> data(100, 0x41);
+        BlockList list;
+        BuildDoc(list, data);
+        BlockCursor c(&list);
+        const std::vector<unsigned char> tooLong(200, 0x41);
+        CHECK(find(c, tooLong, 0, 0) == -1, "a pattern longer than the document is not found");
+        const std::vector<unsigned char> pat6(6, 0x41);
+        CHECK(find(c, pat6, 0, 5) == -1, "a pattern longer than the range is not found");
+        CHECK(find(c, pat6, 0, 6) == 0, "a pattern exactly filling the range is found");
+    }
+
+    // 4) 重なり合う一致は「次の 1 バイトから」順に返る。
+    {
+        const std::vector<unsigned char> data(64, 0x41);   // "AAAA..."
+        const std::vector<unsigned char> pat = {0x41, 0x41, 0x41};
+        BlockList list;
+        BuildDoc(list, data);
+        BlockCursor c(&list);
+        CHECK(find(c, pat, 0, 0) == 0, "first overlapping match");
+        CHECK(find(c, pat, 1, 0) == 1, "the next overlapping match starts one byte later");
+        CHECK(find(c, pat, 61, 0) == 61, "the last overlapping match");
+        CHECK(find(c, pat, 62, 0) == -1, "no room for a match near the end");
+    }
+}
+
+// ---- 複合編集ファズ（Issue #178）----
+// 既存の編集ファズは InsertByte / DeleteByte だけを使っていた。ここでは範囲操作
+//   （Insert / DeleteRange / Write / FillRange）と読み取り（Read / GetByteAt / SearchPattern）を
+//   同じカーソルで混ぜて使い続け、線形参照モデル（std::vector）と突き合わせる。
+static void TestEditFuzzMixed() {
+    TestPrintf("TestEditFuzzMixed\n");
+    BlockList list;
+    NewEmptyDoc(list);
+    BlockCursor c(&list);          // 同じカーソルを最後まで使い回す
+    std::vector<unsigned char> ref;
+
+    std::mt19937 rng(0xBADCAFE);
+    const int kOps = 6000;
+    int mismatchAt = -1;
+    int readMismatch = 0, byteMismatch = 0, searchMismatch = 0;
+    int opCount[6] = {0, 0, 0, 0, 0, 0};
+
+    for (int op = 0; op < kOps && mismatchAt < 0; ++op) {
+        const int size = static_cast<int>(ref.size());
+        // データが小さいうちは挿入へ寄せ、複数ブロックまで育ててから他の操作を混ぜる。
+        int kind = static_cast<int>(rng() % 6);
+        if (size < 64) { kind = static_cast<int>(rng() % 2); }
+
+        switch (kind) {
+        case 0: {   // InsertByte
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const unsigned char v = static_cast<unsigned char>(rng() & 0xFF);
+            if (!c.InsertByte(pos, v)) { mismatchAt = op; break; }
+            ref.insert(ref.begin() + pos, v);
+            ++opCount[0];
+            break;
+        }
+        case 1: {   // Insert（範囲）
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const int n = 1 + static_cast<int>(rng() % 5000);
+            std::vector<unsigned char> src(n);
+            for (int i = 0; i < n; ++i) { src[i] = static_cast<unsigned char>(rng() & 0xFF); }
+            if (!c.Insert(pos, src.data(), n)) { mismatchAt = op; break; }
+            ref.insert(ref.begin() + pos, src.begin(), src.end());
+            ++opCount[1];
+            break;
+        }
+        case 2: {   // DeleteByte
+            const int pos = static_cast<int>(rng() % size);
+            unsigned char got = 0;
+            if (!c.DeleteByte(pos, &got)) { mismatchAt = op; break; }
+            if (got != ref[pos]) { mismatchAt = op; break; }
+            ref.erase(ref.begin() + pos);
+            ++opCount[2];
+            break;
+        }
+        case 3: {   // DeleteRange（期待削除数は入力から独立に求める）
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const int n = 1 + static_cast<int>(rng() % 4000);
+            const FileOffset want = ExpectedDeleteCount(ref.size(), pos, n);
+            const FileOffset got = c.DeleteRange(pos, n);
+            if (got != want) { mismatchAt = op; break; }
+            if (want > 0) {
+                ref.erase(ref.begin() + pos, ref.begin() + pos + static_cast<size_t>(want));
+            }
+            ++opCount[3];
+            break;
+        }
+        case 4: {   // Write（長さ不変の上書き。末尾を越える分は打ち切られる）
+            const int pos = static_cast<int>(rng() % size);
+            const int n = 1 + static_cast<int>(rng() % 4000);
+            std::vector<unsigned char> src(n);
+            for (int i = 0; i < n; ++i) { src[i] = static_cast<unsigned char>(rng() & 0xFF); }
+            const FileOffset want = (n < size - pos) ? n : (size - pos);
+            const FileOffset got = c.Write(pos, src.data(), n);
+            if (got != want) { mismatchAt = op; break; }
+            for (FileOffset i = 0; i < want; ++i) {
+                ref[static_cast<size_t>(pos) + static_cast<size_t>(i)] =
+                    src[static_cast<size_t>(i)];
+            }
+            ++opCount[4];
+            break;
+        }
+        default: {  // FillRange（同上）
+            const int pos = static_cast<int>(rng() % size);
+            const int n = 1 + static_cast<int>(rng() % 4000);
+            const unsigned char v = static_cast<unsigned char>(rng() & 0xFF);
+            const FileOffset want = (n < size - pos) ? n : (size - pos);
+            const FileOffset got = c.FillRange(pos, n, v);
+            if (got != want) { mismatchAt = op; break; }
+            for (FileOffset i = 0; i < want; ++i) {
+                ref[static_cast<size_t>(pos) + static_cast<size_t>(i)] = v;
+            }
+            ++opCount[5];
+            break;
+        }
+        }
+        if (mismatchAt >= 0) { break; }
+
+        // 読み取り系を同じカーソルで挟む（編集で位置が壊れていないこと）。
+        //   1 バイト読みは GetByteAt（絶対位置キャッシュ経由の増分アクセス）と
+        //   Seek+Read（CStirlingDoc::GetByteAt と同じ経路）の両方で行い、
+        //   編集を挟んでも両者が一致することを見る（Issue #182 の回帰）。
+        if (!ref.empty()) {
+            const size_t at = rng() % ref.size();
+            unsigned char b = 0;
+            if (!c.GetByteAt(static_cast<FileOffset>(at), &b) || b != ref[at]) {
+                ++byteMismatch;
+            }
+            unsigned char b2 = 0;
+            if (!c.Seek(static_cast<FileOffset>(at), BlockCursor::kBegin, nullptr) ||
+                c.Read(1, &b2) != 1 || b2 != ref[at]) {
+                ++byteMismatch;
+            }
+
+            const size_t from = rng() % ref.size();
+            const size_t len = 1 + rng() % (ref.size() - from > 300 ? 300 : ref.size() - from);
+            std::vector<unsigned char> buf(len);
+            if (c.Seek(static_cast<FileOffset>(from), BlockCursor::kBegin, nullptr)) {
+                const FileOffset n = c.Read(static_cast<FileOffset>(len), buf.data());
+                if (n != static_cast<FileOffset>(len) ||
+                    std::memcmp(buf.data(), ref.data() + from, len) != 0) {
+                    ++readMismatch;
+                }
+            } else {
+                ++readMismatch;
+            }
+        }
+        // 実在する 3 バイト列の検索が参照モデルと一致する。
+        if (ref.size() >= 8 && (op % 37) == 0) {
+            const size_t src = rng() % (ref.size() - 3);
+            const std::vector<unsigned char> pat(ref.begin() + src, ref.begin() + src + 3);
+            const int expect = NaiveForward(ref, pat, 0, static_cast<int>(ref.size()));
+            FileOffset pos = -1;
+            const bool ok = c.SearchPattern(pat.data(), 3, &pos, BlockCursor::kForward, 0, 0);
+            if ((ok ? pos : -1) != expect) { ++searchMismatch; }
+        }
+
+        // 全突合は高コストなので周期的に実施。
+        if ((op % 500) == 499) {
+            const std::vector<unsigned char> got = ReadAll(list);
+            if (got != ref) { mismatchAt = op; }
+        }
+    }
+
+    CHECK(mismatchAt == -1, "mixed edit fuzz stays consistent with the reference model");
+    if (mismatchAt >= 0) { TestPrintf("  first divergence at op=%d\n", mismatchAt); }
+    CHECK(readMismatch == 0, "Read after edits matches the reference model");
+    CHECK(byteMismatch == 0, "single byte reads after edits match the reference model");
+    CHECK(searchMismatch == 0, "SearchPattern after edits matches the reference model");
+    CheckEqual(list, ref, "mixed edit fuzz final");
+    CheckInvariants(list, ref.size(), "mixed edit fuzz final");
+    CHECK(list.Count() >= 3, "mixed edit fuzz exercised multiple blocks");
+    for (int i = 0; i < 6; ++i) {
+        CHECK(opCount[i] > 0, "every mixed operation was exercised");
+    }
+    TestPrintf("  mixed fuzz: %zu bytes, %d blocks, ops ib=%d in=%d db=%d dr=%d wr=%d fi=%d\n",
+                ref.size(), list.Count(), opCount[0], opCount[1], opCount[2], opCount[3],
+                opCount[4], opCount[5]);
+}
+
+// ---- 編集後の GetByteAt（Issue #182 回帰）----
+// GetByteAt は絶対位置キャッシュ curAbs_ からの増分移動で高速化しているが、
+//   編集プリミティブが curNode_/curOffset_ だけを動かすとキャッシュと食い違い、
+//   誤った値や false を返していた。Write/FillRange は逆に、カーソルを動かさないまま
+//   curAbs_ だけを pos+written へ進めていた。各操作の直後に GetByteAt が
+//   Seek+Read と一致することを、決定的なケースで固定する。
+static void TestCursorAbsCacheAfterEdit() {
+    TestPrintf("TestCursorAbsCacheAfterEdit\n");
+
+    // 同じカーソルで全位置を GetByteAt し、参照モデルと突き合わせる。
+    auto verifyAll = [](BlockCursor& c, const std::vector<unsigned char>& ref, const char* where) {
+        int bad = 0;
+        for (size_t i = 0; i < ref.size(); ++i) {
+            unsigned char b = 0;
+            if (!c.GetByteAt(static_cast<FileOffset>(i), &b) || b != ref[i]) {
+                if (bad == 0) {
+                    TestPrintf("    first mismatch at %zu (%s)\n", i, where);
+                }
+                ++bad;
+            }
+        }
+        CHECK(bad == 0, where);
+        // 末尾の 1 つ先は実データ外なので必ず false。
+        unsigned char eof = 0;
+        CHECK(!c.GetByteAt(static_cast<FileOffset>(ref.size()), &eof), where);
+    };
+
+    // 1) Issue に記載した最小再現: InsertByte を繰り返した直後の GetByteAt。
+    {
+        BlockList list;
+        NewEmptyDoc(list);
+        BlockCursor c(&list);
+        std::vector<unsigned char> ref;
+        for (int i = 0; i < 100; ++i) {
+            const unsigned char v = static_cast<unsigned char>(i);
+            CHECK(c.InsertByte(i, v), "seed InsertByte");
+            ref.push_back(v);
+        }
+        unsigned char first = 0;
+        CHECK(c.GetByteAt(0, &first), "GetByteAt(0) right after InsertByte succeeds");
+        CHECK(first == ref[0], "GetByteAt(0) right after InsertByte reads the right byte");
+        verifyAll(c, ref, "GetByteAt after repeated InsertByte");
+    }
+
+    // 2) ブロック分割を伴う InsertByte。分割は挿入位置が前半か後半かで新ブロックを
+    //    手前(LinkNodeBefore)へ入れるか後ろ(LinkNodeAfter)へ入れるかが変わるので、
+    //    両方の分岐を通す。
+    for (int at : {8000, 12000}) {
+        BlockList list;
+        NewEmptyDoc(list);
+        BlockCursor c(&list);
+        std::vector<unsigned char> ref;
+        FillFullBlock(list, c, ref);
+        CHECK(c.InsertByte(at, 0xEE), "insert into a full block");
+        ref.insert(ref.begin() + at, 0xEE);
+        CHECK(list.Count() == 2, "the block split");
+        unsigned char b = 0;
+        CHECK(c.GetByteAt(at, &b) && b == 0xEE, "GetByteAt at the split point");
+        CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt backward across the split");
+        CHECK(c.GetByteAt(16000, &b) && b == ref[16000], "GetByteAt forward across the split");
+    }
+
+    // 2b) 未シークのカーソルでも GetByteAt は Seek+Read と同じ結果になる
+    //     （増分アクセスの起点が無いときは先頭から解決し直す）。
+    {
+        BlockList list;
+        NewEmptyDoc(list);
+        {
+            BlockCursor seeder(&list);
+            std::vector<unsigned char> data(40000);
+            for (size_t i = 0; i < data.size(); ++i) {
+                data[i] = static_cast<unsigned char>((i * 29 + 11) & 0xFF);
+            }
+            CHECK(seeder.Insert(0, data.data(), static_cast<FileOffset>(data.size())),
+                  "seed for the unseeked cursor case");
+        }
+        const std::vector<unsigned char> ref = ReadAll(list);
+        BlockCursor fresh(&list);   // 一度も Seek していないカーソル
+        unsigned char b = 0;
+        CHECK(fresh.GetByteAt(30000, &b) && b == ref[30000],
+              "an unseeked cursor resolves the position itself");
+        CHECK(fresh.GetByteAt(0, &b) && b == ref[0], "and stays usable afterwards");
+    }
+
+    // 3) 範囲挿入・DeleteByte・DeleteRange の直後。
+    {
+        std::vector<unsigned char> src(40000);
+        for (size_t i = 0; i < src.size(); ++i) {
+            src[i] = static_cast<unsigned char>((i * 31 + 7) & 0xFF);
+        }
+        {   // Insert（複数ブロックにまたがる範囲挿入）
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            std::vector<unsigned char> add(20000, 0xA5);
+            CHECK(c.Insert(5000, add.data(), static_cast<FileOffset>(add.size())), "range insert");
+            std::vector<unsigned char> ref = src;
+            ref.insert(ref.begin() + 5000, add.begin(), add.end());
+            unsigned char b = 0;
+            CHECK(c.GetByteAt(5000, &b) && b == 0xA5, "GetByteAt at the insert point");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after Insert");
+            CHECK(c.GetByteAt(30000, &b) && b == ref[30000], "GetByteAt far after Insert");
+        }
+        {   // DeleteByte
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            unsigned char removed = 0;
+            CHECK(c.DeleteByte(20000, &removed), "delete one byte");
+            CHECK(removed == src[20000], "the removed byte");
+            std::vector<unsigned char> ref = src;
+            ref.erase(ref.begin() + 20000);
+            unsigned char b = 0;
+            CHECK(c.GetByteAt(20000, &b) && b == ref[20000], "GetByteAt at the delete point");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after DeleteByte");
+        }
+        {   // DeleteRange（ノードごと除去される長さ）
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            CHECK(c.DeleteRange(100, 20000) == 20000, "range delete");
+            std::vector<unsigned char> ref = src;
+            ref.erase(ref.begin() + 100, ref.begin() + 20100);
+            unsigned char b = 0;
+            CHECK(c.GetByteAt(100, &b) && b == ref[100], "GetByteAt at the delete point");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after DeleteRange");
+        }
+        {   // DeleteByte でノードごとリストから外れる経路（usedLen==1 のノードを削除）。
+            //   カーソルは別ノードへ張り替えられるため、キャッシュとの食い違いが起きやすい。
+            BlockList list;
+            const std::vector<std::vector<unsigned char>> blocks = {
+                {0x10, 0x11, 0x12}, {0x20}, {0x30, 0x31},
+            };
+            std::vector<unsigned char> ref;
+            for (const std::vector<unsigned char>& blk : blocks) {
+                unsigned char* buf = new unsigned char[kBlockCapacity];
+                std::memset(buf, 0, kBlockCapacity);
+                std::memcpy(buf, blk.data(), blk.size());
+                list.AppendBlock(buf, kBlockCapacity, static_cast<int>(blk.size()));
+                ref.insert(ref.end(), blk.begin(), blk.end());
+            }
+            CHECK(list.Count() == 3, "three nodes before the delete");
+            BlockCursor c(&list);
+            unsigned char removed = 0;
+            CHECK(c.DeleteByte(3, &removed) && removed == 0x20, "delete the only byte of a node");
+            ref.erase(ref.begin() + 3);
+            CHECK(list.Count() == 2, "the emptied node is removed from the list");
+            verifyAll(c, ref, "GetByteAt after a node was unlinked");
+        }
+    }
+
+    // 4) 長さを変えない書き換え（Write / FillRange / SetByteAt）の直後。
+    //    以前は Write/FillRange が curNode_/curOffset_ を動かさないまま
+    //    curAbs_ だけを pos+written へ進めており、直後の GetByteAt が
+    //    「進めた分だけ手前」のバイトを返していた。
+    {
+        std::vector<unsigned char> src(40000);
+        for (size_t i = 0; i < src.size(); ++i) {
+            src[i] = static_cast<unsigned char>((i * 17 + 3) & 0xFF);
+        }
+        {   // Write
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            std::vector<unsigned char> patch(5000);
+            for (size_t i = 0; i < patch.size(); ++i) {
+                patch[i] = static_cast<unsigned char>(0xC0 + (i % 16));
+            }
+            const FileOffset n = c.Write(10000, patch.data(), static_cast<FileOffset>(patch.size()));
+            CHECK(n == static_cast<FileOffset>(patch.size()), "write count");
+            std::vector<unsigned char> ref = src;
+            std::copy(patch.begin(), patch.end(), ref.begin() + 10000);
+            unsigned char b = 0;
+            // pos + written の位置（旧実装が curAbs_ を進めていた先）を最初に読む。
+            CHECK(c.GetByteAt(15000, &b) && b == ref[15000], "GetByteAt at pos+written after Write");
+            CHECK(c.GetByteAt(10000, &b) && b == ref[10000], "GetByteAt at the write start");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after Write");
+        }
+        {   // FillRange
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            const FileOffset n = c.FillRange(10000, 5000, 0x5A);
+            CHECK(n == 5000, "fill count");
+            std::vector<unsigned char> ref = src;
+            std::fill(ref.begin() + 10000, ref.begin() + 15000, static_cast<unsigned char>(0x5A));
+            unsigned char b = 0;
+            CHECK(c.GetByteAt(15000, &b) && b == ref[15000],
+                  "GetByteAt at pos+filled after FillRange");
+            CHECK(c.GetByteAt(12000, &b) && b == 0x5A, "GetByteAt inside the filled range");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after FillRange");
+        }
+        {   // SetByteAt
+            BlockList list;
+            FillDoc(list, src);
+            BlockCursor c(&list);
+            CHECK(c.SetByteAt(20000, 0x99), "set one byte");
+            unsigned char b = 0;
+            CHECK(c.GetByteAt(20000, &b) && b == 0x99, "GetByteAt at the overwritten byte");
+            CHECK(c.GetByteAt(0, &b) && b == src[0], "GetByteAt at the head after SetByteAt");
+        }
+    }
+
+    // 5) 編集を挟んでも検索が正しく動く（走査は開始時にキャッシュを張り直す）。
+    {
+        std::vector<unsigned char> ref(30000);
+        for (size_t i = 0; i < ref.size(); ++i) {
+            ref[i] = static_cast<unsigned char>((i * 13 + 5) & 0xFF);
+        }
+        BlockList list;
+        FillDoc(list, ref);
+        BlockCursor c(&list);
+
+        const std::vector<unsigned char> pat = {0xDE, 0xAD, 0xBE, 0xEF};
+        CHECK(c.Insert(12345, pat.data(), static_cast<FileOffset>(pat.size())), "insert a pattern");
+        ref.insert(ref.begin() + 12345, pat.begin(), pat.end());
+
+        FileOffset pos = -1;
+        CHECK(c.SearchPattern(pat.data(), static_cast<int>(pat.size()), &pos,
+                              BlockCursor::kForward, 0, 0),
+              "search right after an insert");
+        CHECK(pos == 12345, "the search finds the inserted pattern");
+
+        // 検索の後も GetByteAt が正しい（走査で進んだキャッシュから戻れる）。
+        unsigned char b = 0;
+        CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after a search");
+        CHECK(c.GetByteAt(29000, &b) && b == ref[29000], "GetByteAt far after a search");
+    }
+
+    // 6) 空ドキュメント・データ外は false のまま（増分アクセスの再解決で穴を開けない）。
+    {
+        BlockList list;
+        NewEmptyDoc(list);
+        BlockCursor c(&list);
+        unsigned char b = 0;
+        CHECK(!c.GetByteAt(0, &b), "an empty document has no byte at 0");
+        CHECK(c.InsertByte(0, 0x42), "insert one byte");
+        CHECK(c.GetByteAt(0, &b) && b == 0x42, "the only byte is readable");
+        CHECK(!c.GetByteAt(1, &b), "one past the end is not readable");
+        CHECK(!c.GetByteAt(-1, &b), "a negative position is not readable");
+        unsigned char removed = 0;
+        CHECK(c.DeleteByte(0, &removed) && removed == 0x42, "delete the only byte");
+        CHECK(!c.GetByteAt(0, &b), "an emptied document has no byte at 0");
+    }
+
+    // 7) 相対シーク（kCurrent / kEnd）の直後。これらは原の逐語移植で絶対位置が
+    //    確定しない経路があるためキャッシュを無効化しており、次の GetByteAt が
+    //    自力で解決し直せることを確認する。
+    {
+        std::vector<unsigned char> ref(40000);
+        for (size_t i = 0; i < ref.size(); ++i) {
+            ref[i] = static_cast<unsigned char>((i * 23 + 9) & 0xFF);
+        }
+        const FileOffset total = static_cast<FileOffset>(ref.size());
+
+        {   // kCurrent 前方・後方
+            BlockList list;
+            FillDoc(list, ref);
+            BlockCursor c(&list);
+            unsigned char b = 0;
+            CHECK(c.Seek(1000, BlockCursor::kBegin, nullptr), "seek to a known position");
+            CHECK(c.Seek(20000, BlockCursor::kCurrent, nullptr), "relative seek forward");
+            CHECK(c.GetByteAt(30000, &b) && b == ref[30000], "GetByteAt after a forward kCurrent");
+            CHECK(c.Seek(-5000, BlockCursor::kCurrent, nullptr), "relative seek backward");
+            CHECK(c.GetByteAt(100, &b) && b == ref[100], "GetByteAt after a backward kCurrent");
+        }
+        {   // kEnd
+            BlockList list;
+            FillDoc(list, ref);
+            BlockCursor c(&list);
+            unsigned char b = 0;
+            CHECK(c.Seek(-1000, BlockCursor::kEnd, nullptr), "seek from the end");
+            CHECK(c.GetByteAt(total - 1, &b) && b == ref[ref.size() - 1],
+                  "GetByteAt after a kEnd seek");
+            CHECK(c.GetByteAt(0, &b) && b == ref[0], "GetByteAt at the head after a kEnd seek");
+        }
+    }
+}
+
 // ---- StreamFileWriter: 一時ファイル経由の逐次書込（Issue #155） ----
 // 選択範囲の保存・ダンプ保存は、書き終えてから出力先を置換する。途中で失敗しても
 // 既存ファイルが空や不完全な内容に置き換わらないことを確認する。
 static void TestStreamFileWriter() {
-    std::printf("TestStreamFileWriter\n");
+    TestPrintf("TestStreamFileWriter\n");
     using stirling::StreamFileWriter;
 
     // 1) 新規作成。チャンクを分けて書いても内容が連結される。
@@ -3851,8 +5403,7 @@ static void TestStreamFileWriter() {
         const fs::path out = TempFile("sfw_abort");
         const std::vector<unsigned char> orig = { 'k', 'e', 'e', 'p' };
         WriteFile(out, orig);
-        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
-                                            fs::directory_iterator());
+        const std::vector<std::wstring> before = DirEntryNames(out.parent_path());
         {
             StreamFileWriter w;
             CHECK(w.Open(out.wstring().c_str()).Ok(), "open for abort");
@@ -3862,8 +5413,7 @@ static void TestStreamFileWriter() {
             CHECK(!w.IsOpen(), "writer is closed after abort");
         }
         CHECK(ReadFileBytes(out) == orig, "aborting leaves the existing file untouched");
-        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
-                                           fs::directory_iterator());
+        const std::vector<std::wstring> after = DirEntryNames(out.parent_path());
         CHECK(after == before, "aborting leaves no temporary file behind");
         fs::remove(out);
     }
@@ -3873,8 +5423,7 @@ static void TestStreamFileWriter() {
         const fs::path out = TempFile("sfw_dtor");
         const std::vector<unsigned char> orig = { 'k', 'e', 'e', 'p', '2' };
         WriteFile(out, orig);
-        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
-                                            fs::directory_iterator());
+        const std::vector<std::wstring> before = DirEntryNames(out.parent_path());
         {
             StreamFileWriter w;
             CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the destructor case");
@@ -3882,8 +5431,7 @@ static void TestStreamFileWriter() {
             CHECK(w.Write(partial.data(), partial.size()).Ok(), "write partial data");
         }   // ここでデストラクタ＝Abort 相当
         CHECK(ReadFileBytes(out) == orig, "the destructor leaves the existing file untouched");
-        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
-                                           fs::directory_iterator());
+        const std::vector<std::wstring> after = DirEntryNames(out.parent_path());
         CHECK(after == before, "the destructor leaves no temporary file behind");
         fs::remove(out);
     }
@@ -3928,8 +5476,7 @@ static void TestStreamFileWriter() {
         const fs::path out = TempFile("sfw_flush");
         const std::vector<unsigned char> orig(30000, 0xAB);
         WriteFile(out, orig);
-        const size_t before = std::distance(fs::directory_iterator(out.parent_path()),
-                                            fs::directory_iterator());
+        const std::vector<std::wstring> before = DirEntryNames(out.parent_path());
         StreamFileWriter w;
         CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the flush check");
         const std::string body = "committed-after-flush";
@@ -3940,12 +5487,620 @@ static void TestStreamFileWriter() {
         CHECK(fs::file_size(out) == body.size(), "the file on disk matches the reported size");
         CHECK(ReadFileBytes(out) == std::vector<unsigned char>(body.begin(), body.end()),
               "the flushed content replaces the original");
-        const size_t after = std::distance(fs::directory_iterator(out.parent_path()),
-                                           fs::directory_iterator());
+        const std::vector<std::wstring> after = DirEntryNames(out.parent_path());
         CHECK(after == before, "committing leaves no temporary file behind");
         fs::remove(out);
     }
 }
+
+// ---- StreamFileWriter の I/O 故障注入（Issue #180）--------------------------
+// 保存経路には OS 側で自然に起こせない分岐がある（要求より短い WriteFile 成功、
+//   書込途中の失敗、FlushFileBuffers 失敗、置換に失敗して出力先が消える経路）。
+//   Win32FileHooks.h の差込口（STIRLING_TEST_IO_HOOK ビルドのみ）で該当 API だけを
+//   肩代わりし、契約どおりの結果・後始末・呼び出し順序になることを確認する。
+#ifdef STIRLING_TEST_IO_HOOK
+
+namespace io_fault {
+
+// フックから見える指示と記録。テストごとに Reset() してから使う。
+struct Plan {
+    // --- WriteFile ---
+    int   writeCallsBeforeFault = -1;  // この回数だけ素通しし、次の呼び出しで細工する（-1=細工しない）
+    bool  writeShort = false;          // 要求の一部だけ書けたことにする
+    DWORD writeShortBytes = 0;         // writeShort のときに書けたことにするバイト数
+    bool  writeFail = false;           // WriteFile 自体を失敗させる
+    DWORD writeError = 0;
+    bool  writeSwallow = false;        // 実際には書かず「全部書けた」ことにする（4GB 累積用）
+
+    // --- ReadFile ---
+    DWORD readCap = 0;                 // 1 回の ReadFile で返す上限（0=素通し）
+    int   readFailAtCall = -1;         // この回数目の ReadFile を失敗させる（-1=しない）
+    DWORD readError = 0;
+    int   readEofAtCall = -1;          // この回数目の ReadFile を EOF（0 バイト成功）にする
+
+    // --- FlushFileBuffers ---
+    bool  flushFail = false;
+    DWORD flushError = 0;
+
+    // --- ReplaceFileW / MoveFileExW ---
+    int   replaceFailures = 0;         // 先頭から何回失敗させるか（残りは素通し）
+    DWORD replaceError = 0;
+    bool  replaceDeletesTarget = false;  // 失敗と同時に出力先を消す（ERROR_UNABLE_TO_MOVE_REPLACEMENT 相当）
+    int   moveFailures = 0;
+    DWORD moveError = 0;
+
+    // --- 記録 ---
+    int writeCalls = 0;
+    int readCalls = 0;
+    int flushCalls = 0;
+    int replaceCalls = 0;
+    int moveCalls = 0;
+    std::vector<std::string> order;    // "flush" / "replace" / "move" の呼び出し順
+};
+
+Plan g_plan;
+
+void Reset() { g_plan = Plan(); }
+
+bool WriteHook(HANDLE h, const void* buf, DWORD want,
+               DWORD* outWrote, DWORD* outError, BOOL* outResult) {
+    const int call = g_plan.writeCalls++;
+    if (g_plan.writeSwallow) {          // 実 I/O を伴わずに書けたことにする
+        *outWrote = want;
+        *outResult = TRUE;
+        return true;
+    }
+    if (g_plan.writeCallsBeforeFault < 0 || call != g_plan.writeCallsBeforeFault) {
+        return false;                   // 素通し
+    }
+    if (g_plan.writeFail) {
+        *outWrote = 0;
+        *outError = g_plan.writeError;
+        *outResult = FALSE;
+        return true;
+    }
+    if (g_plan.writeShort) {
+        // 要求の一部だけを本当に書いてから、その分だけ書けたと報告する
+        //   （継ぎ足しで最終的な内容が正しくなることを見るため実データも進める）。
+        DWORD wrote = 0;
+        const DWORD partial = (g_plan.writeShortBytes < want) ? g_plan.writeShortBytes : want;
+        if (partial > 0 && !::WriteFile(h, buf, partial, &wrote, nullptr)) {
+            *outWrote = 0;
+            *outError = ::GetLastError();
+            *outResult = FALSE;
+            return true;
+        }
+        *outWrote = wrote;              // 0 バイト成功もここで表現できる
+        *outResult = TRUE;
+        return true;
+    }
+    return false;
+}
+
+// ReadFile の肩代わり。readCap で 1 回に返す量を絞り、指定回で失敗や EOF を起こす。
+//   絞る場合も実データは本物の ReadFile で読むため、読み継いだ結果の内容まで確認できる。
+bool ReadHook(HANDLE h, void* buf, DWORD want, DWORD* outRead, DWORD* outError, BOOL* outResult) {
+    const int call = g_plan.readCalls++;
+    if (g_plan.readFailAtCall >= 0 && call == g_plan.readFailAtCall) {
+        *outRead = 0;
+        *outError = g_plan.readError;
+        *outResult = FALSE;
+        return true;
+    }
+    if (g_plan.readEofAtCall >= 0 && call >= g_plan.readEofAtCall) {
+        // 0 バイト成功＝EOF（サイズ取得後に縮んだ状態）。一度 EOF に達したら以降も
+        //   EOF のままにする（実ファイルなら次の読み取りでデータが戻ることはない）。
+        *outRead = 0;
+        *outResult = TRUE;
+        return true;
+    }
+    if (g_plan.readCap == 0) { return false; }   // 素通し
+    const DWORD ask = (want < g_plan.readCap) ? want : g_plan.readCap;
+    DWORD got = 0;
+    if (!::ReadFile(h, buf, ask, &got, nullptr)) {
+        *outRead = 0;
+        *outError = ::GetLastError();
+        *outResult = FALSE;
+        return true;
+    }
+    *outRead = got;
+    *outResult = TRUE;
+    return true;
+}
+
+bool FlushHook(HANDLE, DWORD* outError, BOOL* outResult) {
+    ++g_plan.flushCalls;
+    g_plan.order.push_back("flush");
+    if (!g_plan.flushFail) { return false; }
+    *outError = g_plan.flushError;
+    *outResult = FALSE;
+    return true;
+}
+
+bool ReplaceHook(const wchar_t* target, const wchar_t*, DWORD* outError, BOOL* outResult) {
+    const int call = g_plan.replaceCalls++;
+    g_plan.order.push_back("replace");
+    if (call >= g_plan.replaceFailures) { return false; }   // 素通し（再試行での成功）
+    if (g_plan.replaceDeletesTarget) {
+        // ReplaceFileW が ERROR_UNABLE_TO_MOVE_REPLACEMENT で失敗したときと同じ状態:
+        //   出力先は既に消えており、書いた内容は一時ファイルにしか無い。
+        ::DeleteFileW(target);
+    }
+    *outError = g_plan.replaceError;
+    *outResult = FALSE;
+    return true;
+}
+
+// 契約違反のフック: 要求より多く書けたと報告する。ラッパが切り詰めることを確かめる用
+//   （素の値をそのまま通すと、呼出側の `left -= wrote`(size_t) が巨大値へ反転する）。
+bool OverreportingWriteHook(HANDLE, const void*, DWORD want,
+                            DWORD* outWrote, DWORD*, BOOL* outResult) {
+    ++g_plan.writeCalls;
+    *outWrote = want + 1000;   // 本物の WriteFile ではあり得ない値
+    *outResult = TRUE;
+    return true;
+}
+
+bool MoveHook(const wchar_t*, const wchar_t*, DWORD* outError, BOOL* outResult) {
+    const int call = g_plan.moveCalls++;
+    g_plan.order.push_back("move");
+    if (call >= g_plan.moveFailures) { return false; }
+    *outError = g_plan.moveError;
+    *outResult = FALSE;
+    return true;
+}
+
+// テスト 1 件のあいだだけフックを張る RAII（CHECK 失敗で抜けても必ず解除する）。
+struct ScopedHooks {
+    ScopedHooks() {
+        Reset();
+        stirling::io::SetWriteHook(&WriteHook);
+        stirling::io::SetReadHook(&ReadHook);
+        stirling::io::SetFlushHook(&FlushHook);
+        stirling::io::SetReplaceHook(&ReplaceHook);
+        stirling::io::SetMoveHook(&MoveHook);
+    }
+    ~ScopedHooks() { stirling::io::ClearFileHooks(); Reset(); }
+    ScopedHooks(const ScopedHooks&) = delete;
+    ScopedHooks& operator=(const ScopedHooks&) = delete;
+};
+
+}  // namespace io_fault
+
+static void TestStreamFileWriterFaults() {
+    TestPrintf("TestStreamFileWriterFaults\n");
+    using stirling::FileIoStatus;
+    using stirling::StreamFileWriter;
+
+    const std::string body = "stream-writer-fault-injection-body";
+    const std::vector<unsigned char> bodyBytes(body.begin(), body.end());
+
+    // 1) WriteFile が要求より短く成功しても、継ぎ足して全量が書かれる。
+    {
+        const fs::path out = TempFile("io_short_write");
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.writeCallsBeforeFault = 0;   // 最初の WriteFile を短くする
+        io_fault::g_plan.writeShort = true;
+        io_fault::g_plan.writeShortBytes = 5;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the short write case");
+        const stirling::FileIoResult r = w.Write(body.data(), body.size());
+        CHECK(r.Ok(), "a short write is topped up, not an error");
+        CHECK(w.Written() == static_cast<FileOffset>(body.size()), "every byte is accounted for");
+        CHECK(io_fault::g_plan.writeCalls >= 2, "the short write forced another WriteFile");
+        CHECK(w.Commit().Ok(), "commit after the short write");
+        CHECK(ReadFileBytes(out) == bodyBytes, "the file holds the whole body");
+        fs::remove(out);
+    }
+
+    // 2) 0 バイト成功（ディスク不足等で進まない）はエラーにする。無限ループにしない。
+    {
+        const fs::path out = TempFile("io_zero_write");
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.writeCallsBeforeFault = 0;
+        io_fault::g_plan.writeShort = true;
+        io_fault::g_plan.writeShortBytes = 0;   // 「成功したが 0 バイト」
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the zero write case");
+        const stirling::FileIoResult r = w.Write(body.data(), body.size());
+        CHECK(!r.Ok(), "a zero byte success is an error");
+        CHECK(r.status == FileIoStatus::kWriteFailed, "zero write status");
+        CHECK(r.systemError == ERROR_WRITE_FAULT, "zero write reports a stalled write");
+        CHECK(w.Written() == 0, "nothing was counted as written");
+        w.Abort();
+        CHECK(!fs::exists(out), "the target was never created");
+    }
+
+    // 3) 書込途中の失敗は原因コードごと返り、出力先は元のまま・一時ファイルも残らない。
+    {
+        const fs::path out = TempFile("io_write_fail");
+        const std::vector<unsigned char> orig(2048, 0x41);
+        WriteFile(out, orig);
+        const std::vector<std::wstring> before = DirEntryNames(out.parent_path());
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.writeCallsBeforeFault = 1;   // 2 回目の WriteFile を失敗させる
+        io_fault::g_plan.writeFail = true;
+        io_fault::g_plan.writeError = ERROR_DISK_FULL;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the write failure case");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "the first write succeeds");
+        const stirling::FileIoResult r = w.Write(body.data(), body.size());
+        CHECK(!r.Ok(), "the injected write failure is reported");
+        CHECK(r.status == FileIoStatus::kWriteFailed, "write failure status");
+        CHECK(r.systemError == ERROR_DISK_FULL, "write failure keeps the cause code");
+        CHECK(io_fault::g_plan.replaceCalls == 0 && io_fault::g_plan.moveCalls == 0,
+              "a failed write never reaches the replacement");
+        w.Abort();
+        CHECK(ReadFileBytes(out) == orig, "the target keeps its original content");
+        CHECK(DirEntryNames(out.parent_path()) == before, "no temporary file is left behind");
+        fs::remove(out);
+    }
+
+    // 4) FlushFileBuffers 失敗（遅延書込エラー）も同様。置換は行わない。
+    {
+        const fs::path out = TempFile("io_flush_fail");
+        const std::vector<unsigned char> orig(1024, 0x42);
+        WriteFile(out, orig);
+        const std::vector<std::wstring> before = DirEntryNames(out.parent_path());
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.flushFail = true;
+        io_fault::g_plan.flushError = ERROR_DISK_FULL;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the flush failure case");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write before the flush");
+        const stirling::FileIoResult r = w.Commit();
+        CHECK(!r.Ok(), "the injected flush failure is reported");
+        CHECK(r.status == FileIoStatus::kWriteFailed, "flush failure status");
+        CHECK(r.systemError == ERROR_DISK_FULL, "flush failure keeps the cause code");
+        CHECK(io_fault::g_plan.flushCalls == 1, "the flush was actually attempted");
+        CHECK(io_fault::g_plan.replaceCalls == 0 && io_fault::g_plan.moveCalls == 0,
+              "a failed flush never reaches the replacement");
+        CHECK(!w.IsOpen(), "the writer is closed after a failed commit");
+        CHECK(w.KeptTempPath().empty(), "the target survived, so no temporary file is kept");
+        CHECK(ReadFileBytes(out) == orig, "the target keeps its original content");
+        CHECK(DirEntryNames(out.parent_path()) == before, "no temporary file is left behind");
+        fs::remove(out);
+    }
+
+    // 5) 成功する Commit の呼び出し順序は フラッシュ → 置換。
+    {
+        const fs::path out = TempFile("io_order");
+        WriteFile(out, std::vector<unsigned char>(16, 0x43));
+        io_fault::ScopedHooks hooks;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the ordering case");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write before the ordering check");
+        CHECK(io_fault::g_plan.order.empty(), "nothing is flushed or replaced before Commit");
+        CHECK(w.Commit().Ok(), "commit succeeds");
+        const std::vector<std::string> want = {"flush", "replace"};
+        CHECK(io_fault::g_plan.order == want, "Commit flushes before it replaces");
+        CHECK(ReadFileBytes(out) == bodyBytes, "the replacement content");
+        fs::remove(out);
+    }
+
+    // 6) ReplaceFileW が失敗しても MoveFileExW で置換できれば成功する。
+    {
+        const fs::path out = TempFile("io_move_fallback");
+        WriteFile(out, std::vector<unsigned char>(16, 0x44));
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.replaceFailures = 5;   // 再試行を使い切らせる
+        io_fault::g_plan.replaceError = ERROR_ACCESS_DENIED;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the move fallback case");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write for the move fallback case");
+        const stirling::FileIoResult r = w.Commit();
+        CHECK(r.Ok(), "the move fallback completes the commit");
+        CHECK(r.fileSize == static_cast<FileOffset>(body.size()), "the reported size");
+        CHECK(io_fault::g_plan.moveCalls >= 1, "the move fallback was used");
+        CHECK(ReadFileBytes(out) == bodyBytes, "the target holds the new content");
+        CHECK(w.KeptTempPath().empty(), "a successful commit keeps no temporary file");
+        fs::remove(out);
+    }
+
+    // 7) 共有違反は一時的なことがあるので数回再試行し、途中で成功したら commit も成功する。
+    {
+        const fs::path out = TempFile("io_retry");
+        WriteFile(out, std::vector<unsigned char>(16, 0x45));
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.replaceFailures = 2;   // 3 回目で素通し＝成功
+        io_fault::g_plan.replaceError = ERROR_SHARING_VIOLATION;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the retry case");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write for the retry case");
+        CHECK(w.Commit().Ok(), "a transient sharing violation is retried");
+        CHECK(io_fault::g_plan.replaceCalls == 3, "the replacement was retried");
+        CHECK(io_fault::g_plan.moveCalls == 0, "a successful retry never falls back to the move");
+        CHECK(ReadFileBytes(out) == bodyBytes, "the retried replacement content");
+        fs::remove(out);
+    }
+
+    // 8) 置換の途中で出力先が消え、移動も失敗した場合だけ一時ファイルを残す（Issue #170）。
+    //    この分岐はロックを掴むだけのテストでは到達できない。
+    {
+        const fs::path dir = TempFile("io_kept_temp");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        const fs::path out = dir / L"target.bin";
+        WriteFile(out, std::vector<unsigned char>(64, 0x46));
+
+        std::wstring kept;
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.replaceFailures = 5;
+            io_fault::g_plan.replaceError = ERROR_UNABLE_TO_MOVE_REPLACEMENT;
+            io_fault::g_plan.replaceDeletesTarget = true;   // 出力先が消える
+            io_fault::g_plan.moveFailures = 5;
+            io_fault::g_plan.moveError = ERROR_ACCESS_DENIED;
+
+            StreamFileWriter w;
+            CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the kept temp case");
+            CHECK(w.Write(body.data(), body.size()).Ok(), "write for the kept temp case");
+            const stirling::FileIoResult r = w.Commit();
+            CHECK(!r.Ok(), "the commit fails when neither replace nor move works");
+            CHECK(r.status == FileIoStatus::kWriteFailed, "kept temp failure status");
+            CHECK(r.systemError == ERROR_UNABLE_TO_MOVE_REPLACEMENT,
+                  "the first replacement error is reported");
+            CHECK(!fs::exists(out), "the target really is gone in this scenario");
+
+            kept = w.KeptTempPath();
+            CHECK(!kept.empty(), "the temporary file holding the data is kept");
+            CHECK(r.keptTempPath == kept,
+                  "the commit result carries the same kept temporary path (Issue #186)");
+            CHECK(fs::exists(fs::path(kept)), "the kept temporary file exists");
+            CHECK(ReadFileBytes(fs::path(kept)) == bodyBytes,
+                  "the kept temporary file holds every byte that was written");
+
+            w.Abort();
+            CHECK(fs::exists(fs::path(kept)), "Abort does not delete the kept temporary file");
+        }   // デストラクタ（= Abort 相当）でも消えない
+        CHECK(!kept.empty() && fs::exists(fs::path(kept)),
+              "the destructor does not delete the kept temporary file either");
+        fs::remove_all(dir, ec);
+    }
+
+    // 9) 4GB を超える累積でも Written / Commit の報告サイズが 32bit へ落ちない。
+    //    実 I/O を伴わないフック（書いたことにするだけ）で確認するため、
+    //    ディスクもメモリも消費しない。
+    {
+        const fs::path out = TempFile("io_4gb");
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.writeSwallow = true;
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the 4GB accumulation case");
+        const size_t chunk = 8u * 1024u * 1024u;   // 内部分割の上限と同じ 8MB
+        const std::vector<unsigned char> buf(chunk, 0x00);
+        const FileOffset k4GB = 4LL * 1024 * 1024 * 1024;
+        const FileOffset target = k4GB + static_cast<FileOffset>(chunk);
+        bool writeFailed = false;
+        for (FileOffset done = 0; done < target; done += static_cast<FileOffset>(chunk)) {
+            if (!w.Write(buf.data(), chunk).Ok()) { writeFailed = true; break; }
+        }
+        CHECK(!writeFailed, "the swallowed writes all succeed");
+        CHECK(w.Written() > k4GB, "the running total passes 4GB without truncating");
+        const stirling::FileIoResult r = w.Commit();
+        CHECK(r.Ok(), "commit after the 4GB accumulation");
+        CHECK(r.fileSize == w.Written(), "the reported size matches the running total");
+        CHECK(r.fileSize > k4GB, "the reported size keeps the full 64-bit total");
+        fs::remove(out);
+    }
+
+    // 10) フックを外したあとは実 I/O へ戻る（他のテストへ影響を残さない）。
+    {
+        const fs::path out = TempFile("io_hooks_off");
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open with the hooks cleared");
+        CHECK(w.Write(body.data(), body.size()).Ok(), "write with the hooks cleared");
+        CHECK(w.Commit().Ok(), "commit with the hooks cleared");
+        CHECK(ReadFileBytes(out) == bodyBytes, "real I/O is restored");
+        fs::remove(out);
+    }
+
+    // 11) 契約違反のフック（要求より多く書けたと報告）でも、ラッパが要求値へ切り詰めるので
+    //     呼出側の残り長が size_t で反転せず、走査がバッファ外へ出ない。
+    {
+        const fs::path out = TempFile("io_overreport");
+        io_fault::ScopedHooks hooks;
+        stirling::io::SetWriteHook(&io_fault::OverreportingWriteHook);
+
+        StreamFileWriter w;
+        CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the over-reporting hook");
+        const stirling::FileIoResult r = w.Write(body.data(), body.size());
+        CHECK(r.Ok(), "the over-reported write still completes");
+        CHECK(w.Written() == static_cast<FileOffset>(body.size()),
+              "the byte count is clamped to what was requested");
+        CHECK(io_fault::g_plan.writeCalls == 1, "one call is enough (the loop does not run away)");
+        w.Abort();
+    }
+}
+
+// ---- BlockFileIO 読込側の I/O 故障注入（Issue #180）------------------------
+// LoadFileIntoBlocks には、ReadFile の途中結果を制御しないと通れない分岐がある。
+//   - ReadFile が要求より短く成功したときの読み継ぎ
+//   - 途中の読込失敗（list.Clear / kReadFailed / ハンドルを渡さない）
+//   - サイズ取得後にファイルが縮んだ場合（途中 EOF）の実読込サイズ
+//   - 0 バイトまで縮んだ場合の空ブロック補完
+// 外部プロセスとのタイミング競争ではなく、Win32FileHooks.h の差込口で再現する。
+static void TestBlockFileIoReadFaults() {
+    TestPrintf("TestBlockFileIoReadFaults\n");
+    using stirling::FileIoResult;
+    using stirling::FileIoStatus;
+    using stirling::LoadFileIntoBlocks;
+
+    // 検証用のファイル（複数ブロック・複数チャンクにまたがらない程度の大きさ）。
+    const size_t kSize = 100000;   // 16KB ブロック 7 個（末尾は端数）
+    std::vector<unsigned char> data(kSize);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<unsigned char>((i * 53 + 17) & 0xFF);
+    }
+
+    // 1) ReadFile が毎回わずかしか返さなくても、読み継いで全内容が組み上がる。
+    {
+        const fs::path in = TempFile("io_short_read");
+        WriteFile(in, data);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 1000;   // 1 回の ReadFile は最大 1000 バイト
+
+        BlockList list;
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str());
+        CHECK(r.Ok(), "short reads are stitched together");
+        CHECK(r.fileSize == static_cast<FileOffset>(kSize), "the whole file was read");
+        CHECK(io_fault::g_plan.readCalls > 50, "the cap really forced many ReadFile calls");
+        VerifyLoadedStructure(list, kSize, "short read structure");
+        CheckEqual(list, data, "short read content");
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 2) 途中の読込失敗は理由付きで返り、ブロック列を残さず、ハンドルも渡さない。
+    {
+        const fs::path in = TempFile("io_read_fail");
+        WriteFile(in, data);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 1000;
+        io_fault::g_plan.readFailAtCall = 3;   // 4 回目の ReadFile で失敗させる
+        io_fault::g_plan.readError = ERROR_CRC;
+
+        BlockList list;
+        void* const kDirtySentinel = reinterpret_cast<void*>(static_cast<intptr_t>(-1));
+        void* keep = kDirtySentinel;   // 上書きされることを見るため、あえて汚しておく
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str(),
+                                                  stirling::FileShareMode::kDenyNone, &keep);
+        CHECK(!r.Ok(), "a read failure is reported");
+        CHECK(r.status == FileIoStatus::kReadFailed, "read failure status");
+        CHECK(r.systemError == ERROR_CRC, "read failure keeps the cause code");
+        CHECK(r.fileSize == static_cast<FileOffset>(kSize),
+              "a failed read still reports the size of the target file");
+        CHECK(list.IsEmpty(), "a failed load leaves no blocks behind");
+        CHECK(list.Count() == 0, "a failed load leaves an empty list");
+        CHECK(keep == nullptr, "a failed load does not hand over the handle");
+        // 予期せず成功した場合にハンドルを掴んだままにしない（掴んだままだと後片付けが
+        //   失敗し、このテストの失敗が別の場所の例外として現れて原因が見えなくなる）。
+        if (keep != nullptr && keep != kDirtySentinel) {
+            ::CloseHandle(static_cast<HANDLE>(keep));
+        }
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 2b) 既にブロックを積んだ後（2 チャンク目）で失敗した場合も、ブロック列を残さない。
+    //     1 チャンク目（1.6MB）が積まれた状態で失敗させないと list.Clear() の有無を
+    //     区別できない（2 の条件では失敗時点でまだ 1 個も積まれていない）。
+    {
+        const size_t big = static_cast<size_t>(kReadChunk) + 40000;
+        std::vector<unsigned char> huge(big, 0x5A);
+        const fs::path in = TempFile("io_read_fail_late");
+        WriteFile(in, huge);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readFailAtCall = 1;   // 1 チャンク目を読み切った直後に失敗
+        io_fault::g_plan.readError = ERROR_DEVICE_NOT_CONNECTED;
+
+        BlockList list;
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str());
+        CHECK(!r.Ok(), "a late read failure is reported");
+        CHECK(r.status == FileIoStatus::kReadFailed, "late read failure status");
+        CHECK(r.systemError == ERROR_DEVICE_NOT_CONNECTED, "late read failure cause code");
+        CHECK(r.fileSize == static_cast<FileOffset>(big),
+              "a late failure still reports the size of the target file");
+        CHECK(io_fault::g_plan.readCalls == 2, "the failure happened on the second chunk");
+        CHECK(list.IsEmpty(), "the blocks read so far are discarded");
+        CHECK(list.Count() == 0, "the list is empty after a late failure");
+        CHECK(list.GetTotalLength() == 0, "and reports no length");
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 3) サイズ取得後に他プロセスが縮めた場合（途中 EOF）。読めた分だけを返す。
+    {
+        const fs::path in = TempFile("io_read_eof");
+        WriteFile(in, data);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 30000;
+        io_fault::g_plan.readEofAtCall = 1;   // 30000 バイト読んだ直後に EOF
+
+        BlockList list;
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str());
+        CHECK(r.Ok(), "hitting EOF early is not an error");
+        CHECK(r.fileSize == 30000, "the reported size is what was actually read");
+        VerifyLoadedStructure(list, 30000, "early EOF structure");
+        const std::vector<unsigned char> head(data.begin(), data.begin() + 30000);
+        CheckEqual(list, head, "early EOF content");
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 4) 0 バイトまで縮んだ場合でも、ドキュメントの不変条件（1 個以上のブロック）を保つ。
+    {
+        const fs::path in = TempFile("io_read_eof0");
+        WriteFile(in, data);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readEofAtCall = 0;   // 最初の ReadFile がいきなり EOF
+
+        BlockList list;
+        void* keep = nullptr;
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str(),
+                                                  stirling::FileShareMode::kDenyNone, &keep);
+        CHECK(r.Ok(), "shrinking to zero is not an error");
+        CHECK(r.fileSize == 0, "nothing was read");
+        CHECK(list.Count() == 1, "the empty block is supplied");
+        CHECK(list.GetHead() != nullptr && list.GetHead()->usedLen == 0, "and it is empty");
+        CHECK(keep != nullptr, "a successful load hands over the handle");
+        if (keep != nullptr) { ::CloseHandle(static_cast<HANDLE>(keep)); }
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 5) チャンク境界（1.6MB）を跨ぐ読み継ぎでも内容が一致する。
+    {
+        const size_t big = static_cast<size_t>(kReadChunk) + 40000;   // 2 チャンク目に入る
+        std::vector<unsigned char> huge(big);
+        for (size_t i = 0; i < huge.size(); ++i) {
+            huge[i] = static_cast<unsigned char>((i * 7 + 3) & 0xFF);
+        }
+        const fs::path in = TempFile("io_read_chunks");
+        WriteFile(in, huge);
+
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 7777;   // 16KB にも 1.6MB にも揃わない半端な刻み
+
+        BlockList list;
+        const FileIoResult r = LoadFileIntoBlocks(list, in.wstring().c_str());
+        CHECK(r.Ok(), "reads across the chunk boundary are stitched together");
+        CHECK(r.fileSize == static_cast<FileOffset>(big), "the whole multi-chunk file was read");
+        VerifyLoadedStructure(list, big, "multi-chunk short read structure");
+        CheckEqual(list, huge, "multi-chunk short read content");
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+
+    // 6) フックを外したあとは実 I/O へ戻る。
+    {
+        const fs::path in = TempFile("io_read_hooks_off");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(LoadFileIntoBlocks(list, in.wstring().c_str()).Ok(), "real read I/O is restored");
+        CheckEqual(list, data, "real read content");
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+}
+
+#endif  // STIRLING_TEST_IO_HOOK
 
 // ---- 安全保存: temp→置換（Issue #170） ----
 // SaveBlocksToFile は出力先を直接切り詰めて書いていたため、書込・フラッシュに失敗すると
@@ -3953,7 +6108,7 @@ static void TestStreamFileWriter() {
 // なったことで、成功しない限り出力先が変わらないこと、および ReplaceFileW によって
 // 出力先の同一性（ファイル ID・代替データストリーム）が保たれることを確認する。
 static void TestAtomicSave() {
-    std::printf("TestAtomicSave\n");
+    TestPrintf("TestAtomicSave\n");
     using stirling::BlockList;
     using stirling::BlockCursor;
     using stirling::FileIoResult;
@@ -3977,10 +6132,7 @@ static void TestAtomicSave() {
         CHECK(fs::is_directory(dir), "create a private directory for the case");
         return dir;
     };
-    auto entryCount = [](const fs::path& dir) {
-        return static_cast<size_t>(std::distance(fs::directory_iterator(dir),
-                                                 fs::directory_iterator()));
-    };
+    auto entryNames = [](const fs::path& dir) { return DirEntryNames(dir); };
 
     // 1) 既存ファイルへの保存は、作成日時と代替データストリームを保つ（ReplaceFileW）。
     //    MoveFileExW で置き換えると、どちらも一時ファイル側の状態になってしまう。
@@ -4000,7 +6152,8 @@ static void TestAtomicSave() {
                 adsReady = (::WriteFile(ads, "meta", 4, &wrote, nullptr) != FALSE) && (wrote == 4);
                 ::CloseHandle(ads);
             } else {
-                std::printf("  (alternate data streams unsupported here; skipping that check)\n");
+                SkipTest("TestAtomicSave/alternate data stream",
+                         "alternate data streams unsupported on this volume");
             }
         }
         // 置換前の作成日時（ReplaceFileW は置換先の作成日時を引き継ぐ。MoveFileExW は
@@ -4052,7 +6205,7 @@ static void TestAtomicSave() {
         const fs::path out = dir / L"target.bin";
         const std::vector<unsigned char> orig(2048, 0x5C);
         WriteFile(out, orig);
-        const size_t before = entryCount(dir);
+        const std::vector<std::wstring> before = entryNames(dir);
 
         stirling::StreamFileWriter w;
         CHECK(w.Open(out.wstring().c_str()).Ok(), "open while the target is free");
@@ -4071,7 +6224,7 @@ static void TestAtomicSave() {
             CHECK(r.systemError != 0, "replacement failure reports a system error");
             CHECK(ReadFileBytes(out) == orig, "the target keeps its original content");
             CHECK(w.KeptTempPath().empty(), "the target survived, so no temporary file is kept");
-            CHECK(entryCount(dir) == before,
+            CHECK(entryNames(dir) == before,
                   "a failed replacement leaves no temporary file behind");
         } else {
             w.Abort();
@@ -4140,7 +6293,7 @@ static void TestAtomicSave() {
         CHECK(r.fileSize == static_cast<FileOffset>(body.size()), "new save reports the size");
         CHECK(ReadFileBytes(out) == std::vector<unsigned char>(body.begin(), body.end()),
               "new save content");
-        CHECK(entryCount(dir) == 1, "only the saved file remains in the directory");
+        CHECK(entryNames(dir).size() == 1, "only the saved file remains in the directory");
         std::error_code ec;
         fs::remove_all(dir, ec);
     }
@@ -4167,6 +6320,56 @@ static void TestAtomicSave() {
         CHECK(ReadFileBytes(out) == data, "multi-block save content");
         fs::remove(out);
     }
+
+#ifdef STIRLING_TEST_IO_HOOK
+    // 8) 置換に失敗して出力先が消えた場合、残した一時ファイルのパスが SaveBlocksToFile の
+    //    戻り値まで伝わる（Issue #186）。この経路でしか書いた内容の在り処を利用者へ
+    //    知らせられないため、writer 内部で保持するだけでなく結果へ載ることを固定する。
+    {
+        const fs::path dir = makeCaseDir("atomic_kept_temp_result");
+        const fs::path out = dir / L"target.bin";
+        WriteFile(out, std::vector<unsigned char>(32, 0x5A));
+
+        BlockList list;
+        seedList(list);
+
+        std::wstring kept;
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.replaceFailures = 5;
+            io_fault::g_plan.replaceError = ERROR_UNABLE_TO_MOVE_REPLACEMENT;
+            io_fault::g_plan.replaceDeletesTarget = true;   // 出力先が消える
+            io_fault::g_plan.moveFailures = 5;
+            io_fault::g_plan.moveError = ERROR_ACCESS_DENIED;
+
+            const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+            CHECK(!r.Ok(), "the save fails when neither replace nor move works");
+            CHECK(r.status == FileIoStatus::kWriteFailed, "kept temp save status");
+            CHECK(!fs::exists(out), "the target really is gone in this scenario");
+            kept = r.keptTempPath;
+            CHECK(!kept.empty(), "the result carries the kept temporary file path");
+            CHECK(fs::exists(fs::path(kept)), "the kept temporary file exists");
+            CHECK(ReadFileBytes(fs::path(kept)) == std::vector<unsigned char>(body.begin(), body.end()),
+                  "the kept temporary file holds what the save wrote");
+        }
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+
+    // 9) 置換に成功した保存では取り残しパスを載せない（誤った案内を出さないため）。
+    {
+        const fs::path dir = makeCaseDir("atomic_kept_temp_absent");
+        const fs::path out = dir / L"target.bin";
+        WriteFile(out, std::vector<unsigned char>(32, 0x5B));
+        BlockList list;
+        seedList(list);
+        const FileIoResult r = stirling::SaveBlocksToFile(list, out.wstring().c_str());
+        CHECK(r.Ok(), "the save succeeds without injected failures");
+        CHECK(r.keptTempPath.empty(), "a successful save carries no kept temporary path");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+    }
+#endif  // STIRLING_TEST_IO_HOOK
 }
 
 // ---- BGREP 通知（Issue #156） ----
@@ -4175,7 +6378,7 @@ static void TestAtomicSave() {
 // 「アクセス拒否」と誤判定される）。LPARAM 経由で構造体を渡す形になったことで、
 // 4GB 境界前後の値が欠損しないことを確認する。
 static void TestBgrepNotify() {
-    std::printf("TestBgrepNotify\n");
+    TestPrintf("TestBgrepNotify\n");
     using stirling::BgrepHitNotify;
     using stirling::BgrepScanNotify;
 
@@ -4183,122 +6386,212 @@ static void TestBgrepNotify() {
     static_assert(sizeof(BgrepScanNotify::size) == 8, "scan size must stay 64-bit");
     static_assert(sizeof(BgrepHitNotify::pos) == 8, "hit position must stay 64-bit");
 
+    // 型が 64bit 値を保持できること（4GB 境界前後を代表値で確認する）。
+    //   かつてはここで 9 個の値を LPARAM へキャストして戻す往復と、
+    //   「WPARAM は 4GB を 0 へ切り詰める」という旧方式の実演を行っていた。どちらも
+    //   生産コードの送信・受信処理を通らないため、通知経路が WPARAM へ戻っても合格し得た。
+    //   経路そのものの回帰検出は e2e（BGREP の結果表示）へ委ね、ここは型契約に絞る
+    //   （Issue #178）。
     const FileOffset kValues[] = {
-        0,
-        1,
-        0x7FFFFFFFll,          // 2GB - 1
-        0x80000000ll,          // 2GB（int なら符号反転する境界）
+        0,                     // 「サイズ 0＝アクセス拒否」の判定に使う値
         0xFFFFFFFFll,          // 4GB - 1
-        0x100000000ll,         // 4GB ちょうど（WPARAM 直接格納だと Win32 で 0 に化ける）
-        0x100000001ll,         // 4GB + 1
-        0x200000000ll,         // 8GB（同上）
+        0x100000000ll,         // 4GB ちょうど（32bit 幅なら 0 に化ける）
         0x123456789Abcll,      // 任意の 4GB 超
     };
-    const wchar_t* const kPath = L"C:\\dir\\sub\\target.bin";
-
     for (const FileOffset v : kValues) {
-        // 走査通知: LPARAM 経由で往復しても値が欠けない。
         BgrepScanNotify scan;
-        scan.path = kPath;
         scan.size = v;
-        const LPARAM lp = (LPARAM)&scan;
-        const BgrepScanNotify* rs = (const BgrepScanNotify*)lp;
-        CHECK(rs->size == v, "scan size survives the LPARAM round trip");
-        CHECK(std::wcscmp(rs->path, kPath) == 0, "scan path survives the LPARAM round trip");
+        CHECK(scan.size == v, "the scan size field holds a 64-bit value");
         // 「サイズ 0＝アクセス拒否」の判定が 4GB の倍数で誤発火しない。
-        CHECK((rs->size == 0) == (v == 0), "access-denied decision uses the full 64-bit size");
+        CHECK((scan.size == 0) == (v == 0), "access-denied decision uses the full 64-bit size");
 
-        // ヒット通知: 同上。
         BgrepHitNotify hit;
-        hit.path = kPath;
         hit.pos = v;
-        const LPARAM lph = (LPARAM)&hit;
-        const BgrepHitNotify* rh = (const BgrepHitNotify*)lph;
-        CHECK(rh->pos == v, "hit position survives the LPARAM round trip");
-        CHECK(std::wcscmp(rh->path, kPath) == 0, "hit path survives the LPARAM round trip");
-    }
-
-    // 対比: WPARAM へ直接入れると Win32 では 4GB 以上が失われる（退行の検知用）。
-    //   x64 では WPARAM も 64bit なので欠損しない。ビルド毎に期待値を切り替える。
-    {
-        const FileOffset v = 0x100000000ll;   // 4GB ちょうど
-        const WPARAM packed = (WPARAM)v;
-        const FileOffset unpacked = (FileOffset)packed;
-        if (sizeof(WPARAM) == 4) {
-            CHECK(unpacked == 0, "WPARAM truncates 4GB to 0 on Win32 (why the struct is needed)");
-        } else {
-            CHECK(unpacked == v, "WPARAM keeps 4GB on x64");
-        }
+        CHECK(hit.pos == v, "the hit position field holds a 64-bit value");
     }
 }
 
-int main() {
-    std::printf("=== Stirling core unit tests ===\n");
-    TestBlockListBasics();
-    TestMultiByteInsert();
-    TestRead();
-    TestSeek();
-    TestInsertByteSplit();
-    TestInsertByteFullBlockLastPos();
-    TestInsertOverflowAtLastByte();
-    TestDelete();
-    TestDeleteLastByteSingleBlock();
-    TestFuzz();
-    TestFileRoundTrip();
-    TestLoadEditSave();
-    TestSearchBasic();
-    TestSearchEofBounds();
-    TestSearchMismatch();
-    TestSearchAcrossBlocks();
-    TestSearchFuzz();
-    TestSearchBackwardMissedMatch();
-    TestSetByteAt();
-    TestLargeOffsetSeek();
-    TestLargeOffsetDataOps();
-    TestLargeRealData();
-    TestFileIoStatus();
-    TestLargeFileRoundTrip();
-    TestSettingsCodec();
-    TestSettingsCodecWide();
-    TestSettingsMigration();
-    TestSettingsStoreUtf8();
-    TestSettingsStoreValueEscape();
-    TestMarkFileRoundTrip();
-    TestMarkFileEmptyAndComments();
-    TestMarkFileRejects();
-    TestMarkFileHugeDecimals();
-    TestMarkListRoundTrip();
-    TestMarkListLimitAndRejects();
-    TestSettingsStoreIni();
-    TestSettingsStoreChangeLog();
-    TestSettingsFileMergedSave();
-    TestSettingsFileConcurrentSave();
-    TestFolderToReveal();
-    TestSettingsStoreBinary();
-    TestCp932Text();
-    TestCp932LeadByte();
-    TestFormatStructCharArrayCp932();
-    TestFormatStructCharArrayW();
-    TestStructDefParse();
-    TestHexTextParse();
-    TestUtf8Text();
-    TestUtf16Text();
-    TestClipboardUtil();
-    TestUndoBudget();
-    TestDeleteRange();
-    TestWriteAndFillRange();
-    TestStreamFileWriter();
-    TestAtomicSave();
-    TestBgrepNotify();
+
+static void TestChecksum() {
+    using stirling::Checksum;
+    using stirling::ChecksumAlgorithm;
+    using stirling::ChecksumState;
+    const ChecksumAlgorithm algorithms[] = { ChecksumAlgorithm::Crc32,
+        ChecksumAlgorithm::Md5, ChecksumAlgorithm::Sha1, ChecksumAlgorithm::Sha256 };
+    const char* inputs[] = { "", "abc", "123456789" };
+    const char* expected[][4] = {
+        { "00000000", "D41D8CD98F00B204E9800998ECF8427E", "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709", "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855" },
+        { "352441C2", "900150983CD24FB0D6963F7D28E17F72", "A9993E364706816ABA3E25717850C26C9CD0D89D", "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" },
+        { "CBF43926", "25F9E794323B453885F5181F1B624D0B", "F7C3BC1D808E04732ADF679965CCC34CA7AE3441", "15E2B0D3C33891EBB0F1EF609EC419420C20E320CE94C65FBC8C3312448EB225" }
+    };
+    Checksum hash;
+    for (size_t row = 0; row < 3; ++row) {
+        BlockList list;
+        NewEmptyDoc(list);
+        BlockCursor cursor(&list);
+        const auto length = static_cast<FileOffset>(std::strlen(inputs[row]));
+        if (length) CHECK(cursor.Insert(0, inputs[row], length), "checksum input");
+        const auto before = ReadAll(list);
+        for (size_t a = 0; a < 4; ++a) {
+            hash.Start(list, 0, length, algorithms[a]);
+            while (hash.State() == ChecksumState::Running) hash.Step(1);
+            CHECK(hash.State() == ChecksumState::Complete, "checksum completed");
+            CHECK(std::strcmp(hash.Hex(), expected[row][a]) == 0, "known checksum vector");
+            CHECK(hash.Processed() == length, "processed length");
+            CHECK(ReadAll(list) == before, "checksum did not mutate data");
+        }
+    }
+    BlockList blocks;
+    NewEmptyDoc(blocks);
+    std::vector<unsigned char> data(3 * kBlockCapacity + 17);
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<unsigned char>(i * 17 + 3);
+    BlockCursor cursor(&blocks);
+    CHECK(cursor.Insert(0, data.data(), static_cast<FileOffset>(data.size())), "multi-block input");
+    // Slice starts immediately before a block boundary and crosses two boundaries.
+    const FileOffset start = kBlockCapacity - 3, length = kBlockCapacity + 11;
+    hash.Start(blocks, start, length, ChecksumAlgorithm::Sha256);
+    CHECK(hash.Step(0) == ChecksumState::Running && hash.Processed() == 0, "zero budget");
+    for (size_t i = 0; i < 1000 && hash.State() == ChecksumState::Running; ++i) hash.Step(257);
+    CHECK(hash.State() == ChecksumState::Complete, "block-boundary calculation");
+    CHECK(std::strcmp(hash.Hex(), "1FE455C6E440138C224DCB979C9F40D4CAACDEE2F6463DDE6D6C2D0895B50A34") == 0, "independent slice digest");
+    CHECK(ReadAll(blocks) == data, "slice calculation preserved bytes");
+    hash.Start(blocks, 0, blocks.GetTotalLength(), ChecksumAlgorithm::Sha256);
+    hash.Step(10);
+    hash.Cancel();
+    CHECK(hash.State() == ChecksumState::Cancelled && !*hash.Hex(), "cancel discards digest");
+    CHECK(hash.Step(100) == ChecksumState::Cancelled, "cancelled calculation stays stopped");
+    hash.Start(blocks, blocks.GetTotalLength(), 0, ChecksumAlgorithm::Crc32);
+    CHECK(hash.State() == ChecksumState::Complete && std::strcmp(hash.Hex(), "00000000") == 0, "empty EOF range");
+    const FileOffset invalid[][2] = { {-1, 1}, {0, -1}, {1, INT64_MAX}, {INT64_MAX, 1}, {0, INT64_MAX} };
+    for (const auto& range : invalid) {
+        CHECK(hash.Start(blocks, range[0], range[1], ChecksumAlgorithm::Sha256) == ChecksumState::InvalidRange, "reject invalid range without overflow");
+        CHECK(!*hash.Hex(), "failure clears previous digest");
+    }
+    CHECK(hash.Start(blocks, 0, 1, static_cast<ChecksumAlgorithm>(99)) == ChecksumState::CryptoError, "reject unsupported algorithm");
+    CHECK(hash.ErrorCode() != 0 && !*hash.Hex(), "crypto error is reported");
+    hash.Start(blocks, 0, 1, ChecksumAlgorithm::Crc32);
+    auto* first = blocks.GetHead();
+    auto* saved = first->data;
+    first->data = nullptr; // Controlled read failure; restore before destruction.
+    CHECK(hash.Step(1) == ChecksumState::ReadError && !*hash.Hex(), "read error is not a digest");
+    first->data = saved;
+    BlockList empty;
+    CHECK(hash.Start(empty, 0, 0, ChecksumAlgorithm::Sha256) == ChecksumState::Complete, "empty list");
+}
+
+int wmain(int argc, wchar_t** argv) {
+    std::filesystem::path reportDirectory;
+    if (argc == 3 && std::wcscmp(argv[1], L"--report-dir") == 0) {
+        reportDirectory = argv[2];
+    } else if (argc != 1) {
+        std::fprintf(stderr, "Usage: core_test.exe [--report-dir DIRECTORY]\n");
+        return 2;
+    }
+    TestPrintf("=== Stirling core unit tests ===\n");
+    g_report.Run("TestBlockListBasics", g_checks, g_failures, TestBlockListBasics);
+    g_report.Run("TestMultiByteInsert", g_checks, g_failures, TestMultiByteInsert);
+    g_report.Run("TestRead", g_checks, g_failures, TestRead);
+    g_report.Run("TestSeek", g_checks, g_failures, TestSeek);
+    g_report.Run("TestInsertByteSplit", g_checks, g_failures, TestInsertByteSplit);
+    g_report.Run("TestInsertByteFullBlockLastPos", g_checks, g_failures, TestInsertByteFullBlockLastPos);
+    g_report.Run("TestInsertOverflowAtLastByte", g_checks, g_failures, TestInsertOverflowAtLastByte);
+    g_report.Run("TestDelete", g_checks, g_failures, TestDelete);
+    g_report.Run("TestDeleteLastByteSingleBlock", g_checks, g_failures, TestDeleteLastByteSingleBlock);
+    g_report.Run("TestFuzz", g_checks, g_failures, TestFuzz);
+    g_report.Run("TestFileRoundTrip", g_checks, g_failures, TestFileRoundTrip);
+    g_report.Run("TestLoadEditSave", g_checks, g_failures, TestLoadEditSave);
+    g_report.Run("TestSearchBasic", g_checks, g_failures, TestSearchBasic);
+    g_report.Run("TestSearchEofBounds", g_checks, g_failures, TestSearchEofBounds);
+    g_report.Run("TestSearchMismatch", g_checks, g_failures, TestSearchMismatch);
+    g_report.Run("TestSearchAcrossBlocks", g_checks, g_failures, TestSearchAcrossBlocks);
+    g_report.Run("TestSearchFuzz", g_checks, g_failures, TestSearchFuzz);
+    g_report.Run("TestSearchBackwardMissedMatch", g_checks, g_failures, TestSearchBackwardMissedMatch);
+    g_report.Run("TestSetByteAt", g_checks, g_failures, TestSetByteAt);
+    g_report.Run("TestLargeOffsetSeek", g_checks, g_failures, TestLargeOffsetSeek);
+    g_report.Run("TestLargeOffsetDataOps", g_checks, g_failures, TestLargeOffsetDataOps);
+    g_report.Run("TestLargeOffsetBulkOps", g_checks, g_failures, TestLargeOffsetBulkOps);
+    g_report.Run("TestLargeRealData", g_checks, g_failures, TestLargeRealData);
+    g_report.Run("TestFileIoStatus", g_checks, g_failures, TestFileIoStatus);
+    g_report.Run("TestLargeFileRoundTrip", g_checks, g_failures, TestLargeFileRoundTrip);
+    g_report.Run("TestSettingsCodec", g_checks, g_failures, TestSettingsCodec);
+    g_report.Run("TestSettingsCodecWide", g_checks, g_failures, TestSettingsCodecWide);
+    g_report.Run("TestSettingsMigration", g_checks, g_failures, TestSettingsMigration);
+    g_report.Run("TestSettingsStoreUtf8", g_checks, g_failures, TestSettingsStoreUtf8);
+    g_report.Run("TestSettingsStoreValueEscape", g_checks, g_failures, TestSettingsStoreValueEscape);
+    g_report.Run("TestMarkFileRoundTrip", g_checks, g_failures, TestMarkFileRoundTrip);
+    g_report.Run("TestMarkFileEmptyAndComments", g_checks, g_failures, TestMarkFileEmptyAndComments);
+    g_report.Run("TestMarkFileRejects", g_checks, g_failures, TestMarkFileRejects);
+    g_report.Run("TestMarkFileHugeDecimals", g_checks, g_failures, TestMarkFileHugeDecimals);
+    g_report.Run("TestMarkListRoundTrip", g_checks, g_failures, TestMarkListRoundTrip);
+    g_report.Run("TestMarkListLimitAndRejects", g_checks, g_failures, TestMarkListLimitAndRejects);
+    g_report.Run("TestSettingsStoreIni", g_checks, g_failures, TestSettingsStoreIni);
+    g_report.Run("TestSettingsStoreChangeLog", g_checks, g_failures, TestSettingsStoreChangeLog);
+    g_report.Run("TestSettingsFileMergedSave", g_checks, g_failures, TestSettingsFileMergedSave);
+    g_report.Run("TestSettingsFileConcurrentSave", g_checks, g_failures, TestSettingsFileConcurrentSave);
+    g_report.Run("TestSettingsFileErrors", g_checks, g_failures, TestSettingsFileErrors);
+    g_report.Run("TestFolderToReveal", g_checks, g_failures, TestFolderToReveal);
+    g_report.Run("TestSettingsStoreBinary", g_checks, g_failures, TestSettingsStoreBinary);
+    g_report.Run("TestCp932Text", g_checks, g_failures, TestCp932Text);
+    g_report.Run("TestCp932LeadByte", g_checks, g_failures, TestCp932LeadByte);
+    g_report.Run("TestFormatStructCharArrayCp932", g_checks, g_failures, TestFormatStructCharArrayCp932);
+    g_report.Run("TestFormatStructCharArrayW", g_checks, g_failures, TestFormatStructCharArrayW);
+    g_report.Run("TestStructDefParse", g_checks, g_failures, TestStructDefParse);
+    g_report.Run("TestStructScalarFormat", g_checks, g_failures, TestStructScalarFormat);
+    g_report.Run("TestStructScalarEncode", g_checks, g_failures, TestStructScalarEncode);
+    g_report.Run("TestStructTree", g_checks, g_failures, TestStructTree);
+    g_report.Run("TestHexTextParse", g_checks, g_failures, TestHexTextParse);
+    g_report.Run("TestChecksum", g_checks, g_failures, TestChecksum);
+    g_report.Run("TestUtf8Text", g_checks, g_failures, TestUtf8Text);
+    g_report.Run("TestUtf16Text", g_checks, g_failures, TestUtf16Text);
+    g_report.Run("TestClipboardUtil", g_checks, g_failures, TestClipboardUtil);
+    g_report.Run("TestClipboardTransferOs", g_checks, g_failures, TestClipboardTransferOs);
+    g_report.Run("TestUndoBudget", g_checks, g_failures, TestUndoBudget);
+    g_report.Run("TestDeleteRange", g_checks, g_failures, TestDeleteRange);
+    g_report.Run("TestWriteAndFillRange", g_checks, g_failures, TestWriteAndFillRange);
+    g_report.Run("TestSearchForwardRange", g_checks, g_failures, TestSearchForwardRange);
+    g_report.Run("TestEditFuzzMixed", g_checks, g_failures, TestEditFuzzMixed);
+    g_report.Run("TestCursorAbsCacheAfterEdit", g_checks, g_failures, TestCursorAbsCacheAfterEdit);
+    g_report.Run("TestStreamFileWriter", g_checks, g_failures, TestStreamFileWriter);
+#ifdef STIRLING_TEST_IO_HOOK
+    g_report.Run("TestStreamFileWriterFaults", g_checks, g_failures, TestStreamFileWriterFaults);
+    g_report.Run("TestBlockFileIoReadFaults", g_checks, g_failures, TestBlockFileIoReadFaults);
+#endif
+    g_report.Run("TestAtomicSave", g_checks, g_failures, TestAtomicSave);
+    g_report.Run("TestBgrepNotify", g_checks, g_failures, TestBgrepNotify);
 #ifdef STIRLING_TEST_ALLOC_HOOK
-    TestAllocFailureRollback();
+    g_report.Run("TestAllocFailureRollback", g_checks, g_failures, TestAllocFailureRollback);
 #endif
 
-    std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
+    // 実行環境とスキップの内訳を出す。ALL PASS は「実行した検証がすべて通った」意味で、
+    //   スキップした項目まで検証済みという意味ではない（オプトインの 2GB 系など）。
+    TestPrintf("=== arch: %d-bit, %d checks, %d failures, %zu skipped ===\n",
+                static_cast<int>(sizeof(void*) * 8), g_checks, g_failures, g_skipped.size());
+    for (const std::string& s : g_skipped) {
+        TestPrintf("  skipped: %s\n", s.c_str());
+    }
+
+    // 実行専用の一時ディレクトリを片付ける（残っていれば取り残しとして報告する）。
+    {
+        std::error_code ec;
+        const std::vector<std::wstring> left = DirEntryNames(TestTempRoot());
+        if (!left.empty()) {
+            TestPrintf("  note: %zu leftover entries in the test temp directory\n", left.size());
+        }
+        fs::remove_all(TestTempRoot(), ec);
+    }
+
+    if (!reportDirectory.empty()) {
+        try {
+            g_report.Write(reportDirectory, sizeof(void*) == 8 ? "x64" : "x86");
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "Report error: %s\n", e.what());
+            return 2;
+        }
+    }
     if (g_failures == 0) {
-        std::printf("ALL PASS\n");
+        TestPrintf("ALL PASS\n");
         return 0;
     }
-    std::printf("FAILED\n");
+    TestPrintf("FAILED\n");
     return 1;
 }

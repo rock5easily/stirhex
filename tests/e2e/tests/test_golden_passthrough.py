@@ -21,8 +21,6 @@ class TestGoldenPassthrough:
             assert drv.hwnd != 0
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_load_and_save_as(self, run_both_stirling):
         """Open a binary file and Save As without any edits.
         Verify both original and ported produce byte-identical files to input."""

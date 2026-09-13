@@ -7,8 +7,6 @@ class TestGoldenEditHex:
     """Golden comparison tests for 16-bit hex editing operations."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_overwrite_hex(self, run_both_stirling):
         """Type hex characters in overwrite mode (default), then Save As.
         Verify both original and ported produce byte-identical modified binary."""
@@ -30,8 +28,6 @@ class TestGoldenEditHex:
         assert len(port_out) == len(test_data), "Overwrite mode should not alter total length"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_undo_hex(self, run_both_stirling):
         """Type hex characters, then Undo, then Save As.
         Verify both original and ported restore exact initial data."""

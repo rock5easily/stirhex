@@ -130,6 +130,7 @@ const Entry kEntries[] = {
     { 0x070D, 0x80F8 },   // 16進テキスト貼り付け
     { 0x070E, 0x80FA },   // マークの書き出し...
     { 0x070F, 0x80FB },   // マークの読み込み...
+    { 0x0710, ID_TOOLS_CHECKSUM }, // チェックサム・ハッシュ計算（Issue #228）
 };
 
 const Entry* Find(UINT raw) {

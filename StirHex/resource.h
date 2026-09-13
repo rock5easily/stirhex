@@ -106,6 +106,7 @@
 #define IDD_PRINT_RANGE_BAR     200
 #define IDD_PRINT_RANGE         201
 #define IDD_SELECT_RANGE        202
+#define IDD_CHECKSUM            260     // Checksum dialog (Issue #226)
 
 // ---------------------------------------------------------------------------
 // Stirling-specific command IDs (0x8000 range). Standard MFC commands
@@ -213,8 +214,20 @@
 #define ID_CHARSET_UTF8        33017   // 0x80f9 キャラクターセット: UTF-8（原には無い）
 #define ID_MARK_EXPORT         33018   // 0x80fa マークの書き出し（原には無い。Issue #99）
 #define ID_MARK_IMPORT         33019   // 0x80fb マークの読み込み（原には無い。Issue #99）
+#define ID_TOOLS_CHECKSUM      33020   // 0x80fc Checksum / hash (Issue #226)
 
 // ---------------------------------------------------------------------------
+// Checksum dialog controls (Issue #226).
+#define IDC_CHECKSUM_ALL             1400
+#define IDC_CHECKSUM_SELECTION       1401
+#define IDC_CHECKSUM_ALGORITHM       1402
+#define IDC_CHECKSUM_START           1403
+#define IDC_CHECKSUM_LENGTH          1404
+#define IDC_CHECKSUM_RESULT          1405
+#define IDC_CHECKSUM_COPY            1406
+#define IDC_CHECKSUM_STATUS          1407
+#define IDC_CHECKSUM_STOP            1408
+
 // Status-bar indicator panes (original custom IDs 0xE7xx). The sizing
 // template strings live in the RC STRINGTABLE (59140/59143/59144/59145/
 // 59146/59149). Each pane is refreshed by an ON_UPDATE_COMMAND_UI handler
@@ -676,6 +689,25 @@
 #define IDS_ERR_RANGE_READ_FAILED   1198    // "データを読み取れませんでした..."
 #define IDS_ERR_EDIT_OUT_OF_MEMORY  1197    // "メモリが不足しているため、この操作を実行できませんでした"
 #define IDS_CONFIRM_BACKUP_FAILED   1199    // バックアップを作成できないまま保存するかの確認（Issue #170）
+// 置換失敗で出力先が消え、書いた内容が一時ファイルにしか無いときの案内（"%s"にパスを埋める。Issue #186）。
+//   1200〜1214 は IDC_STRUCT_* と数値が重なるため、混同を避けて 1220 から採る。
+#define IDS_ERR_KEPT_TEMP_PATH      1220
+
+// Checksum strings (Issue #226).
+#define IDS_CHECKSUM_CRC32           1230
+#define IDS_CHECKSUM_MD5             1231
+#define IDS_CHECKSUM_SHA1            1232
+#define IDS_CHECKSUM_SHA256          1233
+#define IDS_CHECKSUM_PROGRESS        1234
+#define IDS_CHECKSUM_DONE            1235
+#define IDS_CHECKSUM_CANCELLED       1236
+#define IDS_CHECKSUM_CRYPTO_ERROR    1237
+#define IDS_CHECKSUM_READ_ERROR      1238
+#define IDS_CHECKSUM_CHANGED         1239
+#define IDS_CHECKSUM_TIMER_ERROR     1240
+#define IDS_CHECKSUM_INVALID_RANGE   1241
+#define IDS_CHECKSUM_ALGORITHM_ERROR 1242
+
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 
 // 既存の文字列リソースを参照するための別名（文言は原の文字列表にあるもの）。

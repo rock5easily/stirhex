@@ -7,8 +7,6 @@ class TestGoldenJumpNavigation:
     """Golden comparison tests for Jump dialog and Top/End navigation."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_jump_absolute_hex(self, run_both_stirling):
         """Jump to absolute hex address 0x20 and write hex bytes."""
         test_data = bytes([0x00] * 64)
@@ -29,8 +27,6 @@ class TestGoldenJumpNavigation:
         assert orig_out == expected, f"Original jump output mismatch: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_jump_absolute_dec(self, run_both_stirling):
         """Jump to absolute decimal address 32 (0x20) and write hex bytes."""
         test_data = bytes([0x00] * 64)
@@ -50,8 +46,6 @@ class TestGoldenJumpNavigation:
         assert orig_out == expected, f"Original decimal jump output mismatch: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_jump_relative_backward(self, run_both_stirling):
         """Jump with negative relative offset (-) and perform edits."""
         test_data = bytes([0x00] * 64)
@@ -75,8 +69,6 @@ class TestGoldenJumpNavigation:
         assert orig_out == expected, f"Original relative jump mismatch: {orig_out.hex()}"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_goto_data_top_and_end(self, run_both_stirling):
         """Navigate to Data End and Data Top, and insert bytes at boundaries."""
         test_data = b"MIDDLE_DATA_BLOCK"

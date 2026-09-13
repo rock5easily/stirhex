@@ -315,9 +315,9 @@ class TestHelpKeymapStructBehavior:
                     raw_ids.extend(
                         raw for _name, raw in drv.key_assign_functions(page) if raw != 0
                     )
-                # 原の112項目に、移植で追加した「16進テキスト貼り付け」(Issue #97) を加えた数。
-                assert len(raw_ids) == 113
-                assert len(set(raw_ids)) == 113
+                # 原の112項目に、16進テキスト貼り付けとチェックサム計算を加えた数。
+                assert len(raw_ids) == 114
+                assert len(set(raw_ids)) == 114
                 assert RAW_MARK2 in raw_ids and RAW_MARK3 in raw_ids
                 assert RAW_PASTE_HEX in raw_ids
 

@@ -4,6 +4,7 @@
 //   キャレット/選択反転(PatBlt)/文字セット別レンダラ(this+0x344)/
 //   バイト単位色(GetByteColor 0x45cf92)/マーク色を実装済み。
 #include "pch.h"
+#include "dialog/ChecksumDlg.h"
 #include "app/UiStrings.h"   // ui::MsgBox（表題はアプリ名で統一）
 #include <afxpriv.h>   // CPreviewView / AFX_IDD_PREVIEW_TOOLBAR（全画面印刷プレビュー）
 #include "resource.h"
@@ -204,6 +205,8 @@ BEGIN_MESSAGE_MAP(CStirlingView, CView)
     ON_UPDATE_COMMAND_UI(ID_DELETE_SELECTION, &CStirlingView::OnUpdateEditSelectionCmd)
     ON_COMMAND(ID_FILL_SELECTION, &CStirlingView::OnFillSelection)
     ON_UPDATE_COMMAND_UI(ID_FILL_SELECTION, &CStirlingView::OnUpdateEditSelectionCmd)
+    ON_COMMAND(ID_TOOLS_CHECKSUM, &CStirlingView::OnChecksum)
+    ON_UPDATE_COMMAND_UI(ID_TOOLS_CHECKSUM, &CStirlingView::OnUpdateChecksum)
     ON_COMMAND(ID_SAVE_SELECTION, &CStirlingView::OnSaveSelection)
     ON_UPDATE_COMMAND_UI(ID_SAVE_SELECTION, &CStirlingView::OnUpdateSelectionCmd)
     ON_COMMAND(ID_SAVE_DUMP, &CStirlingView::OnSaveDump)
@@ -3661,7 +3664,9 @@ void CStirlingView::OnUpdateIndicatorWordDec(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(2, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 2 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 2 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     const unsigned long v = AssembleInt(b, n, pDoc->IsByteOrderBig());
     CString s; s.Format(_T("W : %d"), (int)(unsigned short)v);
     pCmdUI->SetText(s);
@@ -3673,7 +3678,9 @@ void CStirlingView::OnUpdateIndicatorWordHex(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(2, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 2 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 2 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     const unsigned long v = AssembleInt(b, n, pDoc->IsByteOrderBig());
     CString s; s.Format(_T("W : 0x%04X"), (unsigned)(unsigned short)v);
     pCmdUI->SetText(s);
@@ -3685,7 +3692,9 @@ void CStirlingView::OnUpdateIndicatorDwordDec(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(4, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 4 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 4 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     const unsigned long v = AssembleInt(b, n, pDoc->IsByteOrderBig());
     CString s; s.Format(_T("DW : %u"), (unsigned)v);
     pCmdUI->SetText(s);
@@ -3697,7 +3706,9 @@ void CStirlingView::OnUpdateIndicatorDwordHex(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(4, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 4 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 4 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     const unsigned long v = AssembleInt(b, n, pDoc->IsByteOrderBig());
     CString s; s.Format(_T("DW : 0x%08X"), (unsigned)v);
     pCmdUI->SetText(s);
@@ -3709,7 +3720,9 @@ void CStirlingView::OnUpdateIndicatorFloat(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(4, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 4 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 4 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     unsigned char le[8]; ToNativeLE(b, n, pDoc->IsByteOrderBig(), le);
     float f; ::memcpy(&f, le, sizeof(f));
     CString s; s.Format(_T("f : %g"), (double)f);
@@ -3722,10 +3735,14 @@ void CStirlingView::OnUpdateIndicatorDouble(CCmdUI* pCmdUI) {
     pCmdUI->Enable(TRUE);
     unsigned char b[8];
     const int n = ReadBytesAtCaret(8, b);
-    if (n < 1 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
+    // 原はデータが 8 バイト揃わないペインを空欄にする（末尾で不足分を 0 と
+    //   見せない。Issue #212 で実測）。
+    if (n < 8 || pDoc == nullptr) { pCmdUI->SetText(_T("")); return; }
     unsigned char le[8]; ToNativeLE(b, n, pDoc->IsByteOrderBig(), le);
     double d; ::memcpy(&d, le, sizeof(d));
-    CString s; s.Format(_T("d : %g"), d);
+    // 原は double を有効 15 桁で表示する（実測: -4.88645965504377e+235）。
+    //   既定の %g は 6 桁で、下位の桁が落ちる（Issue #212）。
+    CString s; s.Format(_T("d : %.15g"), d);
     pCmdUI->SetText(s);
 }
 
@@ -3767,6 +3784,17 @@ void CStirlingView::OnRunApp() {
 void CStirlingView::OnUserMenuInvoke(UINT nID) {
     // nID: ID_USERMENU_1(0x803A)..ID_TWOSTROKE_3(0x8046) → userMenus[0..12]
     PopupUserMenuAtCaret((int)nID - ID_USERMENU_1);
+}
+
+void CStirlingView::OnChecksum() {
+    CStirlingDoc* doc = GetDocument();
+    if (!doc) return;
+    CChecksumDlg dialog(this, *doc, m_selActive, SelLo(), SelHi());
+    dialog.DoModal();
+}
+
+void CStirlingView::OnUpdateChecksum(CCmdUI* ui) {
+    ui->Enable(GetDocument() != nullptr);
 }
 
 // 選択範囲を生バイナリでファイルに保存（原 0x802c FUN_00446986）。
@@ -3838,8 +3866,10 @@ bool CStirlingView::WriteRangeToFile(const CString& path, stirling::FileOffset l
         }
         pos += got;
     }
-    if (!writer.Commit().Ok()) {
-        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+    const stirling::FileIoResult committed = writer.Commit();
+    if (!committed.Ok()) {
+        // 置換に失敗して出力先が消えた場合は、書いた内容が残っている場所も伝える（Issue #186）。
+        ui::MsgBoxSaveFailed(GetSafeHwnd(), IDS_ERR_WRITE_FAILED, committed.keptTempPath);
         return false;
     }
     return true;
@@ -4527,8 +4557,10 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
         ui::MsgBoxRes(GetSafeHwnd(), failMsg);
         return false;
     }
-    if (!writer.Commit().Ok()) {
-        ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_WRITE_FAILED);
+    const stirling::FileIoResult committed = writer.Commit();
+    if (!committed.Ok()) {
+        // 置換に失敗して出力先が消えた場合は、書いた内容が残っている場所も伝える（Issue #186）。
+        ui::MsgBoxSaveFailed(GetSafeHwnd(), IDS_ERR_WRITE_FAILED, committed.keptTempPath);
         return false;
     }
     return true;

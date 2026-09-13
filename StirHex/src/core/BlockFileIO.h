@@ -15,6 +15,8 @@
 #include "BlockList.h"
 #include "CoreTypes.h"
 
+#include <string>
+
 namespace stirling {
 
 // 原の 1.6MB 読取チャンク（0x190000, 16KB の 100 倍）。
@@ -37,6 +39,10 @@ struct FileIoResult {
     // 判明していればサイズ。Load 成功時は実際に読み込んだバイト数、
     // Save 成功時は書き込んだバイト数、失敗時は判明していれば対象ファイルのサイズ。
     FileOffset    fileSize = 0;
+    // 保存の置換に失敗し、出力先が消えたまま書いた内容が一時ファイルにしか無いときだけ、
+    // その一時ファイルのパス（それ以外は空。Issue #186）。呼出側は失敗メッセージへ併記して
+    // 利用者へ知らせる。詳細は StreamFileWriter::Commit のコメントを参照。
+    std::wstring  keptTempPath;
 
     bool Ok() const { return status == FileIoStatus::kOk; }
 };

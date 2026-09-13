@@ -15,7 +15,11 @@ pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-v --junitxml=reports/report.xml --html=reports/report.html --self-contained-html"
 markers = [
-    "original: Tests targeting Original Stirling (analysis_target/Stirling.exe)",
-    "ported: Tests targeting StirHex (porting/StirHex)",
-    "golden: Golden comparison tests verifying byte-identical output between Original and Ported",
+    # The three marks say which executables a test starts, and they do not overlap:
+    # a golden test carries only "golden", so -m ported never starts the original
+    # (Issue #206).
+    "original: Starts Original Stirling only (analysis_target/Stirling.exe)",
+    "ported: Starts StirHex only (porting/StirHex)",
+    "golden: Starts both and compares their output byte for byte",
+    "unit: Checks the driver itself; starts nothing",
 ]

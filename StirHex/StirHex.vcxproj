@@ -66,6 +66,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <AdditionalDependencies>bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>if not exist "$(OutDir)help" mkdir "$(OutDir)help"
@@ -112,6 +113,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\app\StirlingSettings.cpp" />
     <ClCompile Include="src\app\AppSettings.cpp" />
     <ClCompile Include="src\app\ShellUtil.cpp" />
+    <ClCompile Include="src\app\LeakReport.cpp" />
     <ClCompile Include="src\app\SettingsCodec.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -132,6 +134,10 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\frame\UserMenuCatalog.cpp" />
     <ClCompile Include="src\frame\ChildFrame.cpp" />
     <ClCompile Include="src\doc\StirlingDoc.cpp" />
+    <ClCompile Include="src\dialog\ChecksumDlg.cpp" />
+    <ClCompile Include="src\core\Checksum.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="src\view\StirlingView.cpp" />
     <ClCompile Include="src\dialog\FindDlg.cpp" />
     <ClCompile Include="src\dialog\ReplaceDlg.cpp" />
@@ -210,6 +216,8 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\frame\UserMenuCatalog.h" />
     <ClInclude Include="src\frame\ChildFrame.h" />
     <ClInclude Include="src\doc\StirlingDoc.h" />
+    <ClInclude Include="src\dialog\ChecksumDlg.h" />
+    <ClInclude Include="src\core\Checksum.h" />
     <ClInclude Include="src\view\StirlingView.h" />
     <ClInclude Include="src\dialog\FindDlg.h" />
     <ClInclude Include="src\dialog\ReplaceDlg.h" />
@@ -234,6 +242,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\core\BgrepNotify.h" />
     <ClInclude Include="src\core\BlockFileIO.h" />
     <ClInclude Include="src\core\StreamFileWriter.h" />
+    <ClInclude Include="src\core\Win32FileHooks.h" />
     <ClInclude Include="src\core\StructDef.h" />
     <ClInclude Include="src\core\CharConv.h" />
     <ClInclude Include="src\core\Cp932Text.h" />

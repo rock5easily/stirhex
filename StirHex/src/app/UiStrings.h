@@ -6,6 +6,8 @@
 
 #include <afxwin.h>
 
+#include <string>
+
 #include "resource.h"   // IDS_CHARSET_NAME_BASE ほか移植側の文字列ID
 
 namespace ui {
@@ -28,6 +30,22 @@ inline int MsgBox(HWND owner, LPCWSTR text, UINT type = MB_OK | MB_ICONEXCLAMATI
 // 本文を文字列リソースから取るメッセージボックス。
 inline int MsgBoxRes(HWND owner, UINT strId, UINT type = MB_OK | MB_ICONEXCLAMATION) {
     return MsgBox(owner, LoadW(strId), type);
+}
+
+// 保存の置換に失敗して出力先が消え、書いた内容が一時ファイルにしか残っていないときの案内
+//   （Issue #186）。パスが空なら空文字列を返すので、失敗メッセージへ無条件に連結してよい。
+//   保存失敗を伝える箇所ごとに文言を書くと取り残しの案内が漏れるため、ここへ集約する。
+inline CStringW KeptTempPathNoteW(const std::wstring& keptTempPath) {
+    if (keptTempPath.empty()) { return CStringW(); }
+    CStringW note;
+    note.Format(LoadW(IDS_ERR_KEPT_TEMP_PATH), keptTempPath.c_str());
+    return L"\n\n" + note;
+}
+
+// 失敗メッセージ（リソース文字列）＋取り残し案内。保存失敗の通知を 1 行で書けるようにする。
+inline int MsgBoxSaveFailed(HWND owner, UINT strId, const std::wstring& keptTempPath) {
+    return MsgBox(owner, LoadW(strId) + KeptTempPathNoteW(keptTempPath),
+                  MB_OK | MB_ICONEXCLAMATION);
 }
 
 // 機能名（コマンド名）の文字列リソースID。

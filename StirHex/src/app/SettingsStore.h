@@ -15,7 +15,7 @@
 //
 // セクション名・キー名の比較は ASCII 範囲で大文字小文字を区別しない（レジストリの挙動に合わせる）。
 //
-// この単位は MFC / Win32 に依存しない（単体テストは porting/tests/core_test.cpp）。
+// この単位は MFC / Win32 に依存しない（単体テストは porting/tests/core/core_test.cpp）。
 #pragma once
 
 #include <string>

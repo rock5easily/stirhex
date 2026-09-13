@@ -115,6 +115,8 @@ void ShowFileIoError(UINT headlineId, LPCTSTR path, const stirling::FileIoResult
         text += L"\n";
         text += reason;
     }
+    // 出力先が消え、書いた内容が一時ファイルにしか無い場合はその場所も知らせる（Issue #186）。
+    text += ui::KeptTempPathNoteW(r.keptTempPath);
     ui::MsgBox(MainWndHandle(), text, MB_OK | MB_ICONEXCLAMATION);
 }
 

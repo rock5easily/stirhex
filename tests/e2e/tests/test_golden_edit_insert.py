@@ -7,8 +7,6 @@ class TestGoldenEditInsert:
     """Golden comparison tests for Insert mode, Deletion, and Text pane editing."""
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_insert_mode_hex(self, run_both_stirling):
         """Toggle to Insert mode with VK_INSERT, type hex characters, and verify inserted bytes."""
         test_data = b"0123456789ABCDEF"
@@ -28,8 +26,6 @@ class TestGoldenEditInsert:
         assert len(port_out) == len(test_data) + 4
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_delete_key(self, run_both_stirling):
         """Delete bytes at caret with VK_DELETE and verify truncation."""
         test_data = b"PREFIX_1234567890_SUFFIX"
@@ -48,8 +44,6 @@ class TestGoldenEditInsert:
         assert len(port_out) == len(test_data) - 7
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_backspace_key(self, run_both_stirling):
         """Move caret right then delete with VK_BACK."""
         test_data = b"ABCDEFGHIJKLMN"
@@ -70,8 +64,6 @@ class TestGoldenEditInsert:
         assert len(port_out) == len(test_data) - 2
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_text_pane_ascii(self, run_both_stirling):
         """Switch to Text pane with Tab and type ASCII characters in overwrite mode."""
         test_data = bytes([0x00] * 16)

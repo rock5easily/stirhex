@@ -14,6 +14,7 @@ from drivers.stirling_driver import (
 class TestIssue44UnicodeDriver:
     """Exercise text-bearing control paths against ANSI and Unicode builds."""
 
+    @pytest.mark.unit
     def test_rejects_x86_python_for_x64_target(self):
         with pytest.raises(RuntimeError, match="requires 64-bit Python"):
             _require_compatible_bitness(False, True)
@@ -68,8 +69,6 @@ class TestIssue44UnicodeDriver:
                 drv.close_settings_sheet(sheet, accept=False)
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_wm_char_accepts_half_and_full_width(self, run_both_stirling):
         def action(drv: StirlingDriver, output_file: Path):
             drv.set_charset_sjis()

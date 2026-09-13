@@ -90,8 +90,6 @@ class TestIssue42CharPane:
     """
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     @pytest.mark.parametrize(
         "charset_cmd",
         [
@@ -124,8 +122,6 @@ class TestIssue42CharPane:
         assert orig_out == port_out, "Ported char pane dump does not match Original Stirling!"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     def test_golden_dump_truncated_lead_byte(self, run_both_stirling):
         """A file ending with a lead byte must render the same as the original."""
 
@@ -140,8 +136,6 @@ class TestIssue42CharPane:
         assert orig_out == port_out, "Ported truncated lead byte dump does not match Original!"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     @pytest.mark.parametrize(
         "charset_cmd,start_addr",
         [
@@ -181,8 +175,6 @@ class TestIssue42CharPane:
         assert orig_out == port_out, "Ported range dump does not match Original Stirling!"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     @pytest.mark.parametrize(
         "data,charset_cmd,start_addr",
         [
@@ -229,8 +221,6 @@ class TestIssue42CharPane:
         assert orig_out == port_out, "Ported range dump does not match Original Stirling!"
 
     @pytest.mark.golden
-    @pytest.mark.ported
-    @pytest.mark.original
     @pytest.mark.parametrize(
         "charset_cmd,encoding",
         [

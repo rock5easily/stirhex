@@ -17,7 +17,7 @@
 namespace stirling {
 
 BlockCursor::BlockCursor(BlockList* list)
-    : list_(list), curNode_(nullptr), curOffset_(0), curAbs_(0) {}
+    : list_(list), curNode_(nullptr), curOffset_(0), curAbs_(0), curAbsValid_(false) {}
 
 bool BlockCursor::Seek(FileOffset pos, int origin, FileOffset* outAbs) {
     if (list_->IsEmpty()) {
@@ -183,6 +183,16 @@ bool BlockCursor::Seek(FileOffset pos, int origin, FileOffset* outAbs) {
     if (outAbs != nullptr) {
         *outAbs = total;
     }
+    // 絶対位置キャッシュの更新（Issue #182）。kBegin は要求位置がそのまま絶対位置に
+    //   なるので確定させる。kCurrent/kEnd は原の逐語移植で total が相対値のまま残る
+    //   縮退経路があり、outAbs へ渡る値も絶対位置とは限らないため、無効化に倒す
+    //   （生産コードの呼び出しは全て kBegin。kCurrent/kEnd は単体テストのみ）。
+    if (origin == kBegin) {
+        curAbs_ = pos;
+        curAbsValid_ = true;
+    } else {
+        curAbsValid_ = false;
+    }
     return true;
 }
 
@@ -236,7 +246,12 @@ bool BlockCursor::Insert(FileOffset pos, const void* srcv, FileOffset count) {
     int capacity = curNode_->capacity;
     int used = curNode_->usedLen;
     if (curOffset_ < 0 || used < curOffset_) return false;  // curOffset==used(EOF追記)は許容
-    return InsertWorker(used, capacity, data, count, static_cast<const unsigned char*>(srcv));
+    const bool ok = InsertWorker(used, capacity, data, count,
+                                 static_cast<const unsigned char*>(srcv));
+    // 挿入はブロック分割でカーソルを動かすため、絶対位置キャッシュを無効化する
+    //   （次の GetByteAt は先頭から解決し直す。Issue #182）。
+    curAbsValid_ = false;
+    return ok;
 }
 
 bool BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data,
@@ -393,6 +408,7 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
         curNode_->usedLen = used + 1;
         curOffset_ = curOffset_ + 1;
     }
+    curAbsValid_ = false;   // カーソルが動いた（Issue #182）
     return true;
 }
 
@@ -434,6 +450,9 @@ bool BlockCursor::DeleteByte(FileOffset pos, unsigned char* outByte) {
         data[used - 1] = 0;
         curNode_->usedLen = used - 1;
     }
+    // ノード除去でカーソルが別ノードへ移る場合があるうえ、削除で以降の絶対位置が
+    //   ずれるため、絶対位置キャッシュを無効化する（Issue #182）。
+    curAbsValid_ = false;
     return true;
 }
 
@@ -493,12 +512,19 @@ FileOffset BlockCursor::DeleteRange(FileOffset pos, FileOffset count) {
         curOffset_ = 0;
         curAbs_ = 0;
     }
+    // どちらの経路でも curNode_/curOffset_ と curAbs_ は整合している（Issue #182）。
+    curAbsValid_ = true;
     return deleted;
 }
 
 bool BlockCursor::GetByteAt(FileOffset pos, unsigned char* out) {
-    if (curNode_ == nullptr) {
-        return false;
+    // 未シークのカーソル（curNode_ == nullptr）、または直前の編集でカーソルが動いて
+    //   キャッシュが無効になっている場合は、curAbs_ からの増分移動という前提が崩れて
+    //   いるので先頭から解決し直す（Seek が curAbs_ を張り直す。Issue #182）。
+    //   Seek(kBegin) は成功時に必ず curNode_ を設定するため、以降の参照は安全。
+    //   検索の内側ループは走査開始時の Seek(kBegin) で有効化済みのため、ここは通らない。
+    if (curNode_ == nullptr || !curAbsValid_) {
+        if (!Seek(pos, kBegin, &curAbs_)) return false;
     }
     int used = curNode_->usedLen;       // 原 local_c
     FileOffset delta = pos - curAbs_;   // 原 iVar1（符号付き。64bit 化で 2GB 超の差分も表現可）
@@ -534,7 +560,8 @@ bool BlockCursor::SetByteAt(FileOffset pos, unsigned char b) {
     if (curNode_ == nullptr) return false;
     if (curOffset_ < 0 || curOffset_ >= curNode_->usedLen) return false;  // 実データ位置のみ
     curNode_->data[curOffset_] = b;
-    curAbs_ = pos;
+    curAbs_ = pos;          // Seek(kBegin) が張ったキャッシュと同じ値（Issue #182）
+    curAbsValid_ = true;
     return true;
 }
 
@@ -568,7 +595,11 @@ FileOffset BlockCursor::Write(FileOffset pos, const void* srcv, FileOffset count
         off = 0;
         node = list_->GetNext(node);
     }
-    curAbs_ = pos + written;
+    // 走査はローカルの node/off で行い、curNode_/curOffset_ は Seek 直後（pos）のまま。
+    //   以前はここで curAbs_ = pos + written としており、キャッシュだけが先へ進んで
+    //   カーソル本体と食い違っていた（Issue #182）。位置を合わせる。
+    curAbs_ = pos;
+    curAbsValid_ = true;
     return written;
 }
 
@@ -601,7 +632,9 @@ FileOffset BlockCursor::FillRange(FileOffset pos, FileOffset count, unsigned cha
         off = 0;
         node = list_->GetNext(node);
     }
-    curAbs_ = pos + filled;
+    // Write と同じ理由で、カーソル本体（Seek 直後の pos）へ合わせる（Issue #182）。
+    curAbs_ = pos;
+    curAbsValid_ = true;
     return filled;
 }
 

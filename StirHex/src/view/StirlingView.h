@@ -493,6 +493,8 @@ protected:
     afx_msg void OnFindPrevCmd();                       // 繰り返し検索(後方)
     afx_msg void OnDeleteSelection();                   // 選択範囲の削除（0x802a）
     afx_msg void OnFillSelection();                     // 選択範囲の初期化（0x802b, IDD 165）
+    afx_msg void OnChecksum();
+    afx_msg void OnUpdateChecksum(CCmdUI* ui);
     afx_msg void OnSaveSelection();                     // 選択範囲を生バイナリで保存（0x802c）
     afx_msg void OnUpdateSelectionCmd(CCmdUI* pCmdUI);  // 選択あり時のみ活性（選択範囲の保存用）
     afx_msg void OnSaveDump();                          // ダンプイメージの保存（0x8060, IDD 198）

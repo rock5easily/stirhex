@@ -303,11 +303,16 @@ std::string FormatFloat(const unsigned char* p, int size, bool big) {
     for (int i = 0; i < size && i < 8; ++i) tmp[i] = big ? p[size - 1 - i] : p[i];
     char buf[64];
     if (size == 4) {
+        // 原 FUN_00411b06 は書式 "%-g"（有効 6 桁）。幅指定が無いので左詰めフラグは効かない。
         float f; memcpy(&f, tmp, 4);
         _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%g", static_cast<double>(f));
     } else {
+        // 原 FUN_00411b9e は _gcvt 相当へ 15 を渡す（有効 15 桁）。既定の %g は 6 桁で
+        //   下位が落ちる（Issue #215。ステータスバーの同種の差は #212）。
+        //   原は _gcvt の出力から小数点以下の末尾ゼロを FUN_00411c32 で削るが、%g は
+        //   もともと末尾ゼロを出さないため、桁数を合わせれば同じ表示になる。
         double d; memcpy(&d, tmp, 8);
-        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%g", d);
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%.15g", d);
     }
     return buf;
 }

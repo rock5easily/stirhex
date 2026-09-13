@@ -35,7 +35,7 @@ CMD_EDIT_FIND = 57640
 CMD_EDIT_REPLACE = 57641
 
 # Stirling Custom Command IDs
-ID_EDIT_REDO = 32777
+ID_EDIT_REDO = 57644
 ID_GOTO_DATA_TOP = 32782
 ID_GOTO_DATA_END = 32783
 ID_JUMP = 32794
@@ -309,6 +309,8 @@ LVIF_TEXT = 0x0001
 SB_GETTEXTA = win32con.WM_USER + 2
 SB_GETTEXTW = win32con.WM_USER + 13
 WM_IME_CHAR = 0x0286
+# CStirlingView's own message that re-runs the external change check (StirlingView.h).
+WM_STIRLING_CHECK_FILE = 0x0400 + 0x1B
 TEXT_BUFFER_CHARS = 2048
 STATUS_TEXT_BUFFER_CHARS = 0x10000
 WS_EX_MDICHILD = getattr(win32con, "WS_EX_MDICHILD", 0x40)
@@ -495,6 +497,50 @@ def _combobox_texts(hwnd: int) -> list[str]:
         text = buf.value if is_unicode else buf.value.decode("cp932", errors="replace")
         texts.append(text.replace("\u200e", ""))
     return texts
+
+
+def _has_dlg_item(hwnd: int, item_id: int) -> bool:
+    """Whether a dialog carries the given control. GetDlgItem raises when it does not."""
+    try:
+        return bool(win32gui.GetDlgItem(hwnd, item_id))
+    except Exception:
+        return False
+
+
+def _dialog_buttons(hwnd: int) -> list[tuple[int, str]]:
+    """Every Button descendant of a dialog, in creation order, without duplicates."""
+    found: list[tuple[int, str]] = []
+    seen: set[int] = set()
+
+    def _cb(child, _):
+        if child not in seen:
+            try:
+                if win32gui.GetClassName(child) == "Button":
+                    seen.add(child)
+                    found.append((child, win32gui.GetWindowText(child)))
+            except Exception:
+                pass
+        return True
+
+    win32gui.EnumChildWindows(hwnd, _cb, None)
+    return found
+
+
+def _click_task_dialog_button(hwnd: int, accelerator: str, fallback_index: int) -> None:
+    """Answer a task-dialog style prompt (the shell overwrite confirmation, Issue #203).
+
+    Its buttons are plain Button windows with control id 0 inside a DirectUIHWND, so
+    neither GetDlgItem nor WM_COMMAND with IDYES/IDNO reaches them; the button window
+    itself has to be clicked. Buttons are matched by their access key ("&Y" / "&N",
+    which both the Japanese and the English shell use) and by position as a fallback.
+    """
+    buttons = _dialog_buttons(hwnd)
+    target = next((h for h, text in buttons if accelerator in text), None)
+    if target is None:
+        if len(buttons) <= fallback_index:
+            raise RuntimeError(f"No button for {accelerator!r} in prompt {hwnd}: {buttons}")
+        target = buttons[fallback_index][0]
+    win32gui.PostMessage(target, win32con.BM_CLICK, 0, 0)
 
 
 def _file_dialog_edit(dialog_hwnd: int) -> int:
@@ -803,7 +849,49 @@ class StirlingDriver:
         part_count = int(win32gui.SendMessage(sb_h, 0x0406, 0, 0))
         return sb_h, is_visible, part_count
 
-    def capture_view_pixels(self) -> bytes | None:
+    def capture_view_image(self) -> tuple[bytes, int, int] | None:
+        """Client area of the active view as (pixels, width, height).
+
+        The pixels are 4 bytes each, rows laid out consecutively, so a caller can look at
+        one region instead of comparing whole screens (Issue #204). Whether the rows run
+        top-down or bottom-up is left to the device; comparisons within a single capture
+        pair are unaffected by it.
+        """
+        captured = self.capture_view_pixels(with_size=True)
+        return captured
+
+    @staticmethod
+    def capture_window_image(hwnd: int) -> tuple[bytes, int, int] | None:
+        """Client area of any window of this process as (pixels, width, height).
+
+        Same shape as capture_view_image, for windows other than the data view - the bit
+        image window in particular, whose content has to be compared before and after an
+        edit (Issue #204).
+        """
+        import ctypes
+        import win32ui
+        if not hwnd or not win32gui.IsWindow(hwnd):
+            return None
+        rect = win32gui.GetClientRect(hwnd)
+        w = rect[2] - rect[0]
+        h = rect[3] - rect[1]
+        if w <= 0 or h <= 0:
+            return None
+        hwndDC = win32gui.GetDC(hwnd)
+        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+        saveDC = mfcDC.CreateCompatibleDC()
+        saveBitMap = win32ui.CreateBitmap()
+        saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
+        saveDC.SelectObject(saveBitMap)
+        ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)  # PW_CLIENTONLY
+        pixels = saveBitMap.GetBitmapBits(True)
+        win32gui.DeleteObject(saveBitMap.GetHandle())
+        saveDC.DeleteDC()
+        mfcDC.DeleteDC()
+        win32gui.ReleaseDC(hwnd, hwndDC)
+        return pixels, w, h
+
+    def capture_view_pixels(self, with_size: bool = False):
         """Capture the client area pixel buffer of the active CStirlingView."""
         import ctypes
         import win32ui
@@ -827,7 +915,7 @@ class StirlingDriver:
         saveDC.DeleteDC()
         mfcDC.DeleteDC()
         win32gui.ReleaseDC(vh, hwndDC)
-        return bmpstr
+        return (bmpstr, w, h) if with_size else bmpstr
 
 
 
@@ -1374,7 +1462,7 @@ class StirlingDriver:
         time.sleep(0.1)
 
     def redo(self):
-        """Execute Edit -> Redo (ID_EDIT_REDO = 32777)."""
+        """Execute Edit -> Redo (ID_EDIT_REDO = 57644)."""
         self.post_command(ID_EDIT_REDO)
         time.sleep(0.1)
 
@@ -1484,11 +1572,31 @@ class StirlingDriver:
         timings.wait_until_passes(5, 0.2, _check_saved)
         time.sleep(0.3)
 
-    def save_as_via_dialog(self, dest_path: str | Path):
-        """Save current document to dest_path via Save As command (57604)."""
+    def save_as_via_dialog(
+        self,
+        dest_path: str | Path,
+        remove_existing: bool = True,
+        overwrite: str = "yes",
+    ):
+        """Save current document to dest_path via Save As command (57604).
+
+        remove_existing (default True) deletes an existing destination first, so the
+        common dialog never asks for confirmation. Pass False to exercise the overwrite
+        prompt itself; `overwrite` then decides how to answer it:
+
+          "yes"    accept and let the save proceed (the file dialog closes)
+          "no"     decline, then cancel the file dialog. Nothing is saved and the
+                   document keeps its current path (Issue #203).
+
+        Returns True when the document was saved, False when the overwrite prompt was
+        declined.
+        """
+        if overwrite not in ("yes", "no"):
+            raise ValueError(f"overwrite must be 'yes' or 'no', got {overwrite!r}")
         dest_path = str(Path(dest_path).resolve())
-        if os.path.exists(dest_path):
+        if remove_existing and os.path.exists(dest_path):
             os.remove(dest_path)
+        expect_prompt = not remove_existing and os.path.exists(dest_path)
 
         safe_set_focus(self.hwnd)
         time.sleep(0.3)
@@ -1511,12 +1619,50 @@ class StirlingDriver:
         _set_control_text(edit_hwnd, dest_path)
         time.sleep(0.1)
 
-        # Trigger Save button (IDOK = 1)
+        # Trigger Save button (IDOK = 1). When the destination exists, the click opens the
+        # modal overwrite confirmation inside the dialog's own message loop, so a
+        # synchronous SendMessage would block here until that prompt is answered - which
+        # only this thread can do. Drive it asynchronously in that case (Issue #203).
         btn = win32gui.GetDlgItem(dlg_hwnd, 1)
-        if btn:
-            win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
-        win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
-        
+        if expect_prompt:
+            if btn:
+                win32gui.PostMessage(btn, win32con.BM_CLICK, 0, 0)
+            else:
+                win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        else:
+            if btn:
+                win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
+            win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+
+        if expect_prompt:
+            # The overwrite confirmation is another #32770 owned by the file dialog; it is
+            # told apart by its window handle and by not being a file dialog itself.
+            def _find_prompt():
+                for h, cls, _title in self._get_process_windows():
+                    if cls == "#32770" and h != dlg_hwnd and not _file_dialog_edit(h):
+                        return h
+                raise RuntimeError("Overwrite confirmation not shown yet")
+
+            prompt = timings.wait_until_passes(5, 0.2, _find_prompt)
+            if overwrite == "yes":
+                _click_task_dialog_button(prompt, "&Y", 0)
+            else:
+                _click_task_dialog_button(prompt, "&N", 1)
+            time.sleep(0.5)
+            if overwrite == "no":
+                # Declining leaves the file dialog open; close it so the app returns to
+                # its normal state with the document untouched.
+                win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
+
+                def _check_closed():
+                    if not win32gui.IsWindow(dlg_hwnd):
+                        return True
+                    raise RuntimeError("Save As dialog still open")
+
+                timings.wait_until_passes(5, 0.2, _check_closed)
+                time.sleep(0.3)
+                return False
+
         # Wait until dialog closes and destination file exists
         def _check_saved():
             if os.path.exists(dest_path) and os.path.getsize(dest_path) >= 0:
@@ -1525,6 +1671,7 @@ class StirlingDriver:
 
         timings.wait_until_passes(5, 0.2, _check_saved)
         time.sleep(0.3)
+        return True
 
     def open_file_via_dialog(self, file_path: str | Path):
         """Open a file via File Open command (57601) and Common File Dialog."""
@@ -1959,6 +2106,63 @@ class StirlingDriver:
             raise RuntimeError(f"Dialog not found: {title}")
 
         return timings.wait_until_passes(timeout, 0.1, _find)
+
+    # --- External change notification (IDD_FILE_CHANGED 199, Issue #205) ---
+    #   Radio buttons: 1016 ignore / 1017 reload / 1018 save as.
+    #   1007 destination edit, 1011 "open the changed file and compare" checkbox.
+
+    def notify_file_changed(self) -> None:
+        """Make the view run its external-change check, as activating it would."""
+        safe_set_focus(self.hwnd)
+        view_hwnd = self.get_view_hwnd()
+        if view_hwnd:
+            win32gui.PostMessage(view_hwnd, WM_STIRLING_CHECK_FILE, 0, 0)
+        time.sleep(0.5)
+
+    def find_file_changed_dialog(self, timeout: float = 5.0) -> int:
+        """The external change dialog, recognised by its three choice buttons."""
+        def _find():
+            for hwnd, cls, _caption in self._get_process_windows():
+                if cls == "#32770" and all(
+                    _has_dlg_item(hwnd, ctrl) for ctrl in (1016, 1017, 1018)
+                ):
+                    return hwnd
+
+            raise RuntimeError("External change dialog not shown")
+
+        return timings.wait_until_passes(timeout, 0.2, _find)
+
+    def answer_file_changed_dialog(
+        self,
+        choice: str,
+        save_as: str | Path | None = None,
+        compare: bool = False,
+        timeout: float = 5.0,
+    ) -> None:
+        """Answer the external change dialog.
+
+        choice: "ignore" / "reload" / "save_as" / "cancel". Cancelling (ESC) leaves the
+        decision open, so the view asks again the next time it is activated.
+        """
+        dialog = self.find_file_changed_dialog(timeout=timeout)
+        if choice == "cancel":
+            win32gui.PostMessage(dialog, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
+            time.sleep(0.5)
+            return
+
+        radio = {"ignore": 1016, "reload": 1017, "save_as": 1018}[choice]
+        self.click_dialog_button(dialog, radio)
+        time.sleep(0.2)
+        if choice == "save_as":
+            if save_as is None:
+                raise ValueError("save_as requires a destination path")
+            _set_control_text(win32gui.GetDlgItem(dialog, 1007), str(Path(save_as).resolve()))
+            time.sleep(0.2)
+            if compare:
+                self.click_dialog_button(dialog, 1011)
+                time.sleep(0.2)
+        win32gui.PostMessage(dialog, win32con.WM_COMMAND, 1, 0)   # IDOK
+        time.sleep(0.8)
 
     @staticmethod
     def click_dialog_button(dialog_hwnd: int, control_id: int):

@@ -1,6 +1,7 @@
 import ctypes
 import os
 import time
+import struct
 import winreg
 from ctypes import wintypes
 from pathlib import Path
@@ -13,9 +14,11 @@ from typing import Any, Dict
 # helpers below (Issue #96).
 # - Original Stirling: HKCU\Software\DDS2\Stirling\Settings
 # - StirHex: the [Env] section of the settings file
+ORIGINAL_ROOT = r"Software\DDS2\Stirling\Settings"
+
 REG_CONFIGS = [
     {
-        "root": r"Software\DDS2\Stirling\Settings",
+        "root": ORIGINAL_ROOT,
         "key_map": {
             "dynamic_mark": "DynamicMark",
             "show_sub_caret": "ShowSubCaret",
@@ -320,6 +323,7 @@ def stirling_settings(
     esc_menu: bool | None = None,
     two_stroke_timeout: int | None = None,
     user_menus: dict[int, list[int]] | None = None,
+    status_items: list[int] | None = None,
     **extra_settings
 ):
     """Context manager that applies prerequisite settings for Stirling before test
@@ -327,6 +331,17 @@ def stirling_settings(
 
     Supports both Original Stirling (HKCU\\Software\\DDS2\\Stirling\\Settings)
     and StirHex (the [Env] section of its settings file).
+
+    status_items takes the command ids of the status bar panes (the catalogue in
+    EnvSettingsDlg.cpp: 0xE709 address hex, 0xE70B WORD hex, ...). The two builds store
+    that layout differently, so it cannot go through extra_settings (Issue #211):
+
+      - StirHex:  StatusItemCount plus StatusItem0..N
+      - Original: a single REG_BINARY named StatusBar holding little-endian DWORDs, with
+                  a leading 0 for the message pane that StirHex does not count
+
+    Both forms were confirmed against the running applications: writing the layout below
+    gives eight panes in the original and seven in StirHex, showing the same values.
     """
     options = {
         "file_exclusive_mode": file_exclusive_mode,
@@ -356,6 +371,15 @@ def stirling_settings(
             if opt_val is not None and opt_key in key_map:
                 reg_name = key_map[opt_key]
                 settings_to_apply[reg_name] = (opt_val, winreg.REG_DWORD)
+
+        if status_items:
+            if root == ORIGINAL_ROOT:
+                blob = b"".join(struct.pack("<I", value) for value in [0, *status_items])
+                settings_to_apply["StatusBar"] = (blob, winreg.REG_BINARY)
+            else:
+                settings_to_apply["StatusItemCount"] = (len(status_items), winreg.REG_DWORD)
+                for index, value in enumerate(status_items):
+                    settings_to_apply[f"StatusItem{index}"] = (value, winreg.REG_DWORD)
 
         if user_menus:
             settings_to_apply["UserMenuCount"] = (15, winreg.REG_DWORD)

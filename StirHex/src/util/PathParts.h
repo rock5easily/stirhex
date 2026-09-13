@@ -1,4 +1,4 @@
-// パス文字列の分解（MFC / Win32 に依存しない。単体テストは porting/tests/core_test.cpp）。
+// パス文字列の分解（MFC / Win32 に依存しない。単体テストは porting/tests/core/core_test.cpp）。
 //   シェル操作（ui::RevealInExplorer）が「どのフォルダを開くか」を決める部分を、
 //   実際にフォルダを開く処理から切り離してテストできるようにするための単位（Issue #133）。
 #pragma once
