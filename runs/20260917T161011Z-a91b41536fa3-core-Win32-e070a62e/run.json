@@ -1,0 +1,11 @@
+{
+    "schema":  1,
+    "runId":  "20260917T161011Z-a91b41536fa3-core-Win32-e070a62e",
+    "runAt":  "2026-09-17T16:10:11.0000000+00:00",
+    "publishedAt":  "2026-09-17T16:11:18.2786418+00:00",
+    "commit":  "a91b41536fa352288f4fb073b85c94bd704e1f4b",
+    "platform":  "Win32",
+    "testKind":  "core",
+    "htmlSha256":  "a3ed79b566bebcb614ae65a20b7d59e27e6a26791c4669b49a6a70684de2389c",
+    "xmlSha256":  "111ca0b267f9d113da8062e36723994298dc1c2388629b9afee8def1e63decfe"
+}
