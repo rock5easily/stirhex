@@ -46,6 +46,9 @@ public:
     // データ変更シーケンス番号（編集/Undo/Redo/保存等で単調増加）。
     //   構造体編集バー等が「キャレット非移動の書換え」を検出して再表示するために用いる。
     long ChangeSeq() const { return m_changeSeq; }
+    // データ内容の変更シーケンス番号（編集/Undo/Redo/再読込/内容破棄で単調増加。保存では増えない）。
+    //   検索結果一覧が「保存しただけ」で結果を古い扱いにしないために用いる（Issue #236）。
+    long DataChangeSeq() const { return m_dataChangeSeq; }
 
     // View からのアクセス
     stirling::BlockList& Blocks() { return m_blocks; }
@@ -247,6 +250,8 @@ protected:
     unsigned long long m_undoBytes = 0;
     int m_cleanUndoSize = 0;      // 保存/読込時の Undo 深さ（＝未変更点）。-1=到達不能（保存点消失）
     long m_changeSeq = 0;         // データ変更シーケンス（SetModifiedFlag で単調増加）
+    long m_dataChangeSeq = 0;     // データ内容の変更シーケンス（保存による SetModifiedFlag では増えない）
+    bool m_savingContents = false;   // 保存完了時の SetModifiedFlag を内容変更と区別する
     // 位置→マーク種別(0/1/2)。ソート済（std::map）
     std::map<stirling::FileOffset, int> m_marks;
     CTime m_diskTime;             // 最後に読込/保存したときのディスク上の更新日時（原 doc+0x330）

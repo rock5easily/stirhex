@@ -107,6 +107,7 @@
 #define IDD_PRINT_RANGE         201
 #define IDD_SELECT_RANGE        202
 #define IDD_CHECKSUM            260     // Checksum dialog (Issue #226)
+#define IDD_FIND_RESULT         261     // Find-all result list dialog, modeless (Issue #236)
 
 // ---------------------------------------------------------------------------
 // Stirling-specific command IDs (0x8000 range). Standard MFC commands
@@ -261,6 +262,14 @@
 #define IDC_FIND_COMBO          1026    // 検索データ入力コンボ
 #define IDC_FIND_PREV           1041    // 前検索ボタン
 #define IDC_FIND_NEXT           1042    // 次検索ボタン
+#define IDC_FIND_ALL            1410    // 全て検索ボタン（移植版で追加。Issue #236）
+
+// --- 検索結果一覧ダイアログ（IDD_FIND_RESULT 261, モードレス。Issue #236） ---
+#define IDC_FINDRESULT_CONDITION 1411   // 検索条件の表示
+#define IDC_FINDRESULT_STATUS   1412    // 件数・状態の表示
+#define IDC_FINDRESULT_LIST     1413    // 結果一覧（仮想リストビュー。アドレス/データ）
+#define IDC_FINDRESULT_RESEARCH 1414    // 再検索ボタン
+#define IDC_FINDRESULT_STOP     1415    // 中止ボタン
 
 // --- 不一致検索ダイアログ（IDD_FIND_MISMATCH 160, モーダル） ---
 #define IDC_MISMATCH_BYTE       1007    // 不一致パターン（単一16進バイト）
@@ -707,6 +716,25 @@
 #define IDS_CHECKSUM_TIMER_ERROR     1240
 #define IDS_CHECKSUM_INVALID_RANGE   1241
 #define IDS_CHECKSUM_ALGORITHM_ERROR 1242
+
+// Find-all result list (Issue #236).
+#define IDS_FINDRESULT_TITLE         1243
+#define IDS_FINDRESULT_COL_ADDRESS   1244
+#define IDS_FINDRESULT_COL_DATA      1245
+#define IDS_FINDRESULT_RUNNING       1246
+#define IDS_FINDRESULT_COMPLETE      1247
+#define IDS_FINDRESULT_NONE          1248
+#define IDS_FINDRESULT_TRUNCATED     1249
+#define IDS_FINDRESULT_CANCELLED     1250
+#define IDS_FINDRESULT_CHANGED       1251
+#define IDS_FINDRESULT_READ_ERROR    1252
+#define IDS_FINDRESULT_COND_HEX      1253
+#define IDS_FINDRESULT_COND_TEXT     1254
+#define IDS_FINDRESULT_RANGE_CURSOR  1255
+#define IDS_FINDRESULT_RANGE_ALL     1256
+#define IDS_FINDRESULT_RANGE_SEL     1257
+#define IDS_FINDRESULT_TIMER_ERROR   1258
+#define IDS_FINDRESULT_CREATE_ERROR  1259
 
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 

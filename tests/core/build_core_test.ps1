@@ -59,11 +59,15 @@ $srcHexText = Join-Path $root "..\..\StirHex\src\core\HexText.cpp"
 $srcUtf8Text = Join-Path $root "..\..\StirHex\src\core\Utf8Text.cpp"
 $srcUtf16Text = Join-Path $root "..\..\StirHex\src\core\Utf16Text.cpp"
 $srcChecksum = Join-Path $root "..\..\StirHex\src\core\Checksum.cpp"
+# Hex search pattern with the ?? wildcard (Issue #233)
+$srcHexPattern = Join-Path $root "..\..\StirHex\src\core\HexPattern.cpp"
+# Incremental find-all search (Issue #236)
+$srcFindAll = Join-Path $root "..\..\StirHex\src\core\FindAll.cpp"
 $srcInc  = Join-Path $root "..\..\StirHex\src"
 # ClipboardUtil.h (header only, Issue #47) needs the clipboard APIs from user32.lib
 
 Write-Host "== build ($Arch) =="
-& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DSTIRLING_TEST_ALLOC_HOOK /DSTIRLING_TEST_IO_HOOK /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcStream" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" "$srcUtf16Text" "$srcChecksum" /link bcrypt.lib user32.lib shell32.lib ole32.lib advapi32.lib
+& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DSTIRLING_TEST_ALLOC_HOOK /DSTIRLING_TEST_IO_HOOK /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcStream" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" "$srcUtf16Text" "$srcChecksum" "$srcHexPattern" "$srcFindAll" /link bcrypt.lib user32.lib shell32.lib ole32.lib advapi32.lib
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
 Write-Host "== run =="

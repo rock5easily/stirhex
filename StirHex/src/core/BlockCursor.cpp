@@ -639,7 +639,8 @@ FileOffset BlockCursor::FillRange(FileOffset pos, FileOffset count, unsigned cha
 }
 
 bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, FileOffset* outPos,
-                                int direction, FileOffset start, FileOffset end) {
+                                int direction, FileOffset start, FileOffset end,
+                                const unsigned char* wildcard) {
     if (patternLen <= 0) {
         return false;  // 無効入力（原は patternLen>=1 前提）
     }
@@ -647,8 +648,11 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
     if (start < 0 || start >= total) {
         return false;  // GetByteAt が参照できる実データ位置のみを開始位置として受け付ける
     }
-    // 終端未指定(0)かつ前方は全長。
-    if (direction == kForward && end == 0) {
+    // 終端未指定(0)かつ前方は全長。前方の終端は全長を超えないよう抑える。
+    //   完全一致では全長を超えた位置の GetByteAt が失敗して未発見になるが、ワイルドカード
+    //   位置は読まないため、抑えないとデータ末尾の外側にも一致してしまう（Issue #233）。
+    //   呼出側が編集前の範囲終端を渡す場合（選択範囲内の対話置換で長さが縮んだ後など）がある。
+    if (direction == kForward && (end == 0 || end > total)) {
         end = total;
     }
     // 開始位置へシーク。絶対位置を curAbs_ へ格納（原は out へ this+0xc を渡す）。
@@ -658,10 +662,21 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
     int skip[256];
     for (int i = 0; i < 256; ++i) skip[i] = patternLen;
     const int last = patternLen - 1;
+    // ワイルドカードの位置は照合しない（任意のバイトに一致する）。
+    const auto isWild = [wildcard](int i) { return wildcard != nullptr && wildcard[i] != 0; };
 
     if (direction == kForward) {
+        // ワイルドカードはどのバイトとも一致するため、スキップ量は「末尾に最も近い
+        //   ワイルドカード（末尾位置を除く）」までの距離を超えてはならない。
+        for (int i = last - 1; i >= 0; --i) {
+            if (isWild(i)) {
+                for (int v = 0; v < 256; ++v) skip[v] = last - i;
+                break;
+            }
+        }
         for (int i = 0; i < last; ++i) {
-            skip[pattern[i]] = (patternLen - i) - 1;
+            if (isWild(i)) continue;
+            if (last - i < skip[pattern[i]]) skip[pattern[i]] = last - i;
         }
         unsigned char b = 0;
         // start/pos とも 64bit のため (start-1)+patternLen は 2GB 超でも桁溢れしない。
@@ -669,8 +684,10 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
             int j = patternLen;
             for (;;) {
                 --j;
-                if (!GetByteAt(pos, &b)) return false;
-                if (b != pattern[j]) break;
+                if (!isWild(j)) {
+                    if (!GetByteAt(pos, &b)) return false;
+                    if (b != pattern[j]) break;
+                }
                 if (j == 0) { *outPos = pos; return true; }
                 --pos;
             }
@@ -687,23 +704,36 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
             //   なければならない。原実装は i を昇順に代入して最右の出現位置を採り、さらに
             //   シフト量を max(k+1, skip[b]) としていたため、間にある一致を飛び越えていた
             //   （Issue #71）。降順に代入して最小の i を残す。出現しないバイトは patternLen。
+            //   ワイルドカードはどのバイトとも一致するため、シフト量は「先頭に最も近い
+            //   ワイルドカード（先頭位置を除く）」の位置を超えてはならない（Issue #233）。
+            for (int i = 1; i <= last; ++i) {
+                if (isWild(i)) {
+                    for (int v = 0; v < 256; ++v) skip[v] = i;
+                    break;
+                }
+            }
             for (int i = last; i >= 1; --i) {
-                skip[pattern[i]] = i;
+                if (isWild(i)) continue;
+                if (i < skip[pattern[i]]) skip[pattern[i]] = i;
             }
             unsigned char b = 0;
             for (FileOffset windowStart = start - last; end <= windowStart; ) {
                 FileOffset pos = windowStart;
                 int k = 0;
                 for (;;) {
-                    if (!GetByteAt(pos, &b)) return false;
-                    if (b != pattern[k]) break;
+                    if (!isWild(k)) {
+                        if (!GetByteAt(pos, &b)) return false;
+                        if (b != pattern[k]) break;
+                    }
                     if (k == last) { *outPos = windowStart; return true; }
                     ++pos;
                     ++k;
                 }
                 // ウィンドウ先頭のバイト。k==0 なら今読んだ b がそれ自身、k>0 なら先頭は
-                //   pattern[0] と一致済みなので、読み直さずに決まる。
-                const unsigned char head = (k == 0) ? b : pattern[0];
+                //   pattern[0] と一致済みなので、読み直さずに決まる。ただし先頭がワイルドカード
+                //   のときは値が決まらないため読み直す。
+                unsigned char head = (k == 0) ? b : pattern[0];
+                if (isWild(0) && !GetByteAt(windowStart, &head)) return false;
                 // skip[] の値域は 1..patternLen なので、ウィンドウは必ず左へ前進する
                 //   （原実装にあった「進まない場合の打ち切り」は不要になった）。
                 const FileOffset shift = static_cast<FileOffset>(skip[head]);

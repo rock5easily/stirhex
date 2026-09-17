@@ -42,7 +42,7 @@ int CReplaceDlg::CurrentRange() const {
 
 // comboId のフィールドを解決。空/不正はメッセージを出して false。isReplace=true は
 // 「空なら削除モード確認」を出す（Yes で空バイト列を許容）。
-bool CReplaceDlg::ResolveField(int comboId, bool isHex, std::vector<unsigned char>& out) {
+bool CReplaceDlg::ResolveField(int comboId, bool isHex, stirling::HexPattern& out) {
     CStringW text;
     GetDlgItemText(comboId, text);
     const bool isReplace = (comboId == IDC_REPL_REPLACE_COMBO);
@@ -54,7 +54,7 @@ bool CReplaceDlg::ResolveField(int comboId, bool isHex, std::vector<unsigned cha
             // 置換データ未入力: 削除モードで実行するか確認（Yes で空バイト列）。
             const int yn = ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_REPLACE_EMPTY), MB_YESNO | MB_ICONQUESTION);
             if (yn != IDYES) { return false; }
-            out.clear();
+            out = stirling::HexPattern();
             return true;
         }
         // 検索データ未入力。
@@ -63,15 +63,18 @@ bool CReplaceDlg::ResolveField(int comboId, bool isHex, std::vector<unsigned cha
     }
 
     if (isHex) {
-        if (!dlg::ParseHexStrict(text, out)) {
+        // ワイルドカード `??` は検索データだけで受け付ける（Issue #233）。
+        const bool allowWildcard = !isReplace;
+        if (!stirling::ParseHexPattern(text.GetString(), static_cast<size_t>(text.GetLength()),
+                                       allowWildcard, out)) {
             ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_INVALID_DATA), MB_OK | MB_ICONEXCLAMATION);
             return false;
         }
-        SetDlgItemText(comboId, dlg::NormalizeHex(out));
+        SetDlgItemText(comboId, stirling::FormatHexPattern(out).c_str());
         return true;
     }
-    out = m_pView->BuildTextBytes(text);
-    if (out.empty()) {
+    out = stirling::MakeExactPattern(m_pView->BuildTextBytes(text));
+    if (out.Empty()) {
         ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_INVALID_DATA), MB_OK | MB_ICONEXCLAMATION);
         return false;
     }
@@ -83,16 +86,16 @@ void CReplaceDlg::Commit(Action action) {
     const bool searchHex  = IsDlgButtonChecked(IDC_REPL_SEARCH_HEX) != 0;
     const bool replaceHex = IsDlgButtonChecked(IDC_REPL_REPLACE_HEX) != 0;
 
-    std::vector<unsigned char> sbytes, rbytes;
-    if (!ResolveField(IDC_REPL_SEARCH_COMBO, searchHex, sbytes)) {
+    stirling::HexPattern spattern, rpattern;
+    if (!ResolveField(IDC_REPL_SEARCH_COMBO, searchHex, spattern)) {
         return;
     }
-    if (!ResolveField(IDC_REPL_REPLACE_COMBO, replaceHex, rbytes)) {
+    if (!ResolveField(IDC_REPL_REPLACE_COMBO, replaceHex, rpattern)) {
         return;   // 置換データ不正、または削除モード確認で No
     }
 
-    m_searchBytes = sbytes;
-    m_replaceBytes = rbytes;
+    m_searchPattern = spattern;
+    m_replaceBytes = rpattern.bytes;   // 置換データはワイルドカードを含まない
     m_range = CurrentRange();
     m_action = action;
     EndDialog(IDOK);

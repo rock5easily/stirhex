@@ -4,12 +4,12 @@
 #include "dialog/FindDlg.h"
 #include "dialog/DlgHexInput.h"
 #include "view/StirlingView.h"
-
-#include <vector>
+#include "core/HexPattern.h"
 
 BEGIN_MESSAGE_MAP(CFindDlg, CDialog)
     ON_BN_CLICKED(IDC_FIND_NEXT, &CFindDlg::OnFindNext)
     ON_BN_CLICKED(IDC_FIND_PREV, &CFindDlg::OnFindPrev)
+    ON_BN_CLICKED(IDC_FIND_ALL, &CFindDlg::OnFindAll)
 END_MESSAGE_MAP()
 
 CFindDlg::CFindDlg(CStirlingView* pView)
@@ -45,8 +45,22 @@ bool CFindDlg::IsHexType() const {
 void CFindDlg::OnFindNext() { DoFind(true); }
 void CFindDlg::OnFindPrev() { DoFind(false); }
 
-void CFindDlg::DoFind(bool forward) {
-    if (m_pView == nullptr) { return; }
+// [全て検索]（移植版で追加。Issue #236）: 入力を確定してダイアログを閉じる。
+//   結果一覧はモードレスのため、モーダルの検索ダイアログを開いたままでは操作できない。
+//   検索の開始は、戻り値 IDC_FIND_ALL を受けた所有ビューが行う。
+void CFindDlg::OnFindAll() {
+    stirling::HexPattern pattern;
+    CStringW display;
+    if (!ResolvePattern(pattern, display)) { return; }
+    m_findAll.pattern = pattern;
+    m_findAll.display = display;
+    m_findAll.isHex = IsHexType();
+    m_findAll.rangeMode = CurrentRange();
+    EndDialog(IDC_FIND_ALL);
+}
+
+bool CFindDlg::ResolvePattern(stirling::HexPattern& pattern, CStringW& display) {
+    if (m_pView == nullptr) { return false; }
     CStringW text;
     GetDlgItemText(IDC_FIND_COMBO, text);
 
@@ -55,23 +69,34 @@ void CFindDlg::DoFind(bool forward) {
     trimmed.Trim(L" \t");
     if (trimmed.IsEmpty()) {
         ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_SEARCH_EMPTY), MB_OK | MB_ICONEXCLAMATION);
-        return;
+        return false;
     }
 
-    std::vector<unsigned char> bytes;
     if (IsHexType()) {
-        if (!dlg::ParseHexStrict(text, bytes)) {
+        // 16進データはワイルドカード `??` を受け付ける（Issue #233）。
+        if (!stirling::ParseHexPattern(text.GetString(), static_cast<size_t>(text.GetLength()),
+                                       true, pattern)) {
             ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_INVALID_DATA), MB_OK | MB_ICONEXCLAMATION);
-            return;
+            return false;
         }
         // 正規化した16進をコンボへ反映（大文字・2桁スペース区切り）。
-        SetDlgItemText(IDC_FIND_COMBO, dlg::NormalizeHex(bytes));
+        display = stirling::FormatHexPattern(pattern).c_str();
+        SetDlgItemText(IDC_FIND_COMBO, display);
     } else {
-        bytes = m_pView->BuildTextBytes(text);
-        if (bytes.empty()) {
+        // 文字列は `?` も文字として扱う（ワイルドカードは16進データのみ）。
+        pattern = stirling::MakeExactPattern(m_pView->BuildTextBytes(text));
+        if (pattern.Empty()) {
             ui::MsgBox(GetSafeHwnd(), dlg::LoadWStr(IDS_INVALID_DATA), MB_OK | MB_ICONEXCLAMATION);
-            return;
+            return false;
         }
+        display = text;
     }
-    m_pView->FindWithBytes(bytes, CurrentRange(), forward);
+    return true;
+}
+
+void CFindDlg::DoFind(bool forward) {
+    stirling::HexPattern pattern;
+    CStringW display;
+    if (!ResolvePattern(pattern, display)) { return; }
+    m_pView->FindWithPattern(pattern, CurrentRange(), forward);
 }

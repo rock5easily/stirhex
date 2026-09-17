@@ -132,6 +132,7 @@ CStirlingDoc::CStirlingDoc() {}
 CStirlingDoc::~CStirlingDoc() { ReleaseLock(); }
 
 void CStirlingDoc::DeleteContents() {
+    ++m_dataChangeSeq;   // 内容を破棄する前に進め、走査中の検索が古いノードを読まないようにする
     ReleaseLock();   // 内容破棄（閉じる/再読込）時は排他ハンドルも解放
     m_blocks.Clear();
     ClearUndoHistory(false);
@@ -376,7 +377,9 @@ BOOL CStirlingDoc::OnSaveDocument(LPCTSTR lpszPathName) {
     m_cleanUndoSize = static_cast<int>(m_undoStack.size());   // 現在の編集状態を保存点に
     AcquireLock(lpszPathName);   // 保存後に共有モードで再ロック（別名保存時は新パス）
     m_diskTimeValid = ReadDiskTime(lpszPathName, m_diskTime);   // 保存後の時刻を基準に更新
+    m_savingContents = true;    // 保存は内容を変えないため、データ内容の変更シーケンスは進めない
     SetModifiedFlag(FALSE);
+    m_savingContents = false;
     return TRUE;
 }
 
@@ -388,6 +391,7 @@ void CStirlingDoc::Serialize(CArchive& ar) {
 // 変更フラグを設定。変化した時は子フレームのタイトル（編集マーク「*」）を更新する。
 void CStirlingDoc::SetModifiedFlag(BOOL bModified) {
     ++m_changeSeq;   // データ変更検出用（構造体編集バー等）。無条件に増加
+    if (!m_savingContents) { ++m_dataChangeSeq; }
     const bool was = (IsModified() != FALSE);
     CDocument::SetModifiedFlag(bModified);
     if ((bModified != FALSE) != was) {

@@ -95,8 +95,11 @@ public:
     //   direction=kForward/kBackward, start=開始位置, end=終端(0で全長, 前方時のみ自動補完)。
     //   一致すれば *outPos に位置を格納し true。対話検索/BGREP の共通コア。
     // patternLen はメモリ上の検索パターン長（ファイル位置ではない）ため int のまま。
+    // wildcard は patternLen 要素の表で、非0の位置は任意のバイトに一致する（Issue #233）。
+    //   nullptr なら従来どおりの完全一致検索（原と同一の動作）。
     bool SearchPattern(const unsigned char* pattern, int patternLen, FileOffset* outPos,
-                       int direction, FileOffset start, FileOffset end);
+                       int direction, FileOffset start, FileOffset end,
+                       const unsigned char* wildcard = nullptr);
 
     // 不一致検索（原 FUN_0041d6bf）: 指定 value に一致しない最初のバイトを走査。
     //   direction=kForward/kBackward, start=開始位置, end=終端(前方は0で全長)。

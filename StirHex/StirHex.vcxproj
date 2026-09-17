@@ -176,6 +176,13 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\core\HexText.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\core\HexPattern.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\core\FindAll.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\dialog\FindResultDlg.cpp" />
     <ClCompile Include="src\core\Utf8Text.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -247,6 +254,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\core\CharConv.h" />
     <ClInclude Include="src\core\Cp932Text.h" />
     <ClInclude Include="src\core\HexText.h" />
+    <ClInclude Include="src\core\HexPattern.h" />
+    <ClInclude Include="src\core\FindAll.h" />
+    <ClInclude Include="src\dialog\FindResultDlg.h" />
     <ClInclude Include="src\core\Utf8Text.h" />
     <ClInclude Include="src\core\Utf16Text.h" />
     <ClInclude Include="src\core\UndoBudget.h" />

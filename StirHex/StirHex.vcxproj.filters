@@ -51,6 +51,9 @@
     <ClCompile Include="src\core\BlockCursor.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\BlockFileIO.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\StreamFileWriter.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\core\HexPattern.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\core\FindAll.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\dialog\FindResultDlg.cpp"><Filter>dialog</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
@@ -102,6 +105,9 @@
     <ClInclude Include="src\core\BlockFileIO.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\StreamFileWriter.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\Win32FileHooks.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\HexPattern.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\FindAll.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\dialog\FindResultDlg.h"><Filter>dialog</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="StirHex.rc"><Filter>resource</Filter></ResourceCompile>

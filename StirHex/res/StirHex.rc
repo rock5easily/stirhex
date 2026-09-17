@@ -254,7 +254,7 @@ FONT 9, "ＭＳ Ｐゴシック"
 BEGIN
   CONTROL 128, -1, "STATIC", 0x50000003, 8, 9, 24, 24
   CONTROL "BinaryEditor  StirHex", 1027, "STATIC", 0x50020001, 38, 8, 164, 10
-  CONTROL "Version 2.2.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
+  CONTROL "Version 2.3.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
   CONTROL "Copyright (C) 2026 StirHex Project", 1093, "STATIC", 0x50020000, 38, 34, 164, 8
   CONTROL "https://github.com/rock5easily/stirhex", 1100, "STATIC", 0x50020000, 38, 47, 164, 8
   CONTROL "", -1, "STATIC", 0x50000010, 8, 63, 194, 1
@@ -475,8 +475,9 @@ BEGIN
   CONTROL "選択範囲内", 1044, "BUTTON", 0x50000009, 12, 94, 50, 10
   CONTROL "前検索(&P)", 1041, "BUTTON", 0x50030000, 166, 5, 50, 14
   CONTROL "次検索(&N)", 1042, "BUTTON", 0x50010001, 166, 25, 50, 14
-  CONTROL "閉じる(&C)", 2, "BUTTON", 0x50010000, 166, 45, 50, 14
-  CONTROL "ヘルプ(&H)", 9, "BUTTON", 0x50010000, 166, 65, 50, 14
+  CONTROL "全て検索(&A)", 1410, "BUTTON", 0x50010000, 166, 45, 50, 14
+  CONTROL "閉じる(&C)", 2, "BUTTON", 0x50010000, 166, 65, 50, 14
+  CONTROL "ヘルプ(&H)", 9, "BUTTON", 0x50010000, 166, 85, 50, 14
 END
 
 162 DIALOG 0, 0, 222, 178
@@ -1808,6 +1809,20 @@ BEGIN
   PUSHBUTTON "閉じる", IDCANCEL, 262, 153, 60, 15
 END
 
+261 DIALOGEX 0, 0, 262, 196
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "検索結果一覧"
+FONT 9, "ＭＳ Ｐゴシック"
+BEGIN
+  LTEXT "", 1411, 7, 7, 248, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+  LTEXT "", 1412, 7, 20, 248, 10, SS_ENDELLIPSIS | SS_NOPREFIX
+  CONTROL "", 1413, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_OWNERDATA | WS_BORDER | WS_TABSTOP, 7, 34, 190, 155
+  DEFPUSHBUTTON "ジャンプ(&J)", IDOK, 205, 34, 50, 14
+  PUSHBUTTON "再検索(&R)", 1414, 205, 54, 50, 14
+  PUSHBUTTON "中止(&T)", 1415, 205, 74, 50, 14, WS_DISABLED
+  PUSHBUTTON "閉じる(&C)", IDCANCEL, 205, 175, 50, 14
+END
+
 STRINGTABLE
 BEGIN
   1230, "CRC-32 (ISO-HDLC)"
@@ -1823,5 +1838,22 @@ BEGIN
   1240, "計算処理を開始できませんでした。"
   1241, "計算範囲が現在のデータ範囲を超えています。"
   1242, "計算方式を選択できませんでした。計算方式を選び直してください。"
+  1243, "検索結果一覧 - %s"
+  1244, "アドレス"
+  1245, "データ"
+  1246, "検索中… %llu 件"
+  1247, "%llu 件見つかりました。"
+  1248, "見つかりませんでした。"
+  1249, "%llu 件を超えたため、検索を打ち切りました。"
+  1250, "検索を中止しました（%llu 件）。"
+  1251, "内容が変更されました。[再検索]で検索し直してください。"
+  1252, "データを読み取れなかったため、検索を中止しました。"
+  1253, "検索データ: %s（16進データ、%s）"
+  1254, "検索データ: %s（文字列、%s）"
+  1255, "カーソル位置から"
+  1256, "データ全体"
+  1257, "選択範囲内"
+  1258, "検索処理を開始できませんでした。"
+  1259, "検索結果一覧を表示できませんでした。"
   33020, "ファイル全体または選択範囲のチェックサム・ハッシュ値を計算\nチェックサム・ハッシュ計算"
 END

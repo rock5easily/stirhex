@@ -5,6 +5,7 @@
 #pragma once
 
 #include "resource.h"
+#include "core/HexPattern.h"
 #include <vector>
 
 class CStirlingView;
@@ -18,7 +19,8 @@ public:
 
     Action GetAction() const { return m_action; }
     int    GetRange()  const { return m_range; }
-    const std::vector<unsigned char>& SearchBytes()  const { return m_searchBytes; }
+    // 検索データ（16進ではワイルドカード `??` を含み得る。Issue #233）。
+    const stirling::HexPattern&       SearchPattern() const { return m_searchPattern; }
     const std::vector<unsigned char>& ReplaceBytes() const { return m_replaceBytes; }
 
 protected:
@@ -30,13 +32,14 @@ protected:
     // 入力を検証・解決し、成功なら m_action を設定して EndDialog(IDOK)。失敗はエラー表示。
     void Commit(Action action);
     // 検索/置換データを解決（16進は検証+正規化、文字列は文字セット変換）。失敗で false。
-    bool ResolveField(int comboId, bool isHex, std::vector<unsigned char>& out);
+    //   ワイルドカード `??` を受け付けるのは検索データの16進だけ（置換データでは不正）。
+    bool ResolveField(int comboId, bool isHex, stirling::HexPattern& out);
     int  CurrentRange() const;
 
     CStirlingView* m_pView;
     Action m_action;
     int    m_range;
-    std::vector<unsigned char> m_searchBytes;
+    stirling::HexPattern       m_searchPattern;
     std::vector<unsigned char> m_replaceBytes;
     DECLARE_MESSAGE_MAP()
 };

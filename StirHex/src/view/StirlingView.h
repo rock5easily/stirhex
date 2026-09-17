@@ -5,6 +5,8 @@
 #pragma once
 
 #include "core/CoreTypes.h"   // stirling::FileOffset（アドレスの 64bit 化。Issue #21）
+#include "core/HexPattern.h"  // stirling::HexPattern（16進検索のワイルドカード。Issue #233）
+#include "dialog/FindDlg.h"   // CFindDlg::FindAllRequest（全て検索。Issue #236）
 
 #include <vector>
 #include <string>
@@ -17,6 +19,7 @@
 class CStirlingDoc;
 class CFindDlg;
 class CDiffListDlg;
+class CFindResultDlg;
 class CStirlingSettings;   // CurSettings() の参照戻り用（実体は app/StirlingSettings.h）
 
 class CStirlingView : public CView {
@@ -46,8 +49,8 @@ public:
     afx_msg void OnFilePrintPreview();
 
     // 検索ダイアログ（モーダル）の Next/Prev から呼ばれる公開I/F。
-    //   検索バイト列で検索を実行（直近条件を記録し、条件変更時は全体検索フラグをリセット）。
-    void FindWithBytes(const std::vector<unsigned char>& pattern, int rangeMode, bool forward);
+    //   検索パターンで検索を実行（直近条件を記録し、条件変更時は全体検索フラグをリセット）。
+    void FindWithPattern(const stirling::HexPattern& pattern, int rangeMode, bool forward);
     //   不一致検索（原 0x8032）: 指定1バイトに一致しない最初のバイトを検索（前/次）。
     void FindMismatchWithByte(unsigned char value, int rangeMode, bool forward);
     //   文字列入力→現文字セットのバイト列へ変換（16進の検証/正規化はダイアログ側で行う）。
@@ -102,6 +105,14 @@ public:
     void SetDiffDlg(CDiffListDlg* dlg) { m_pDiffDlg = dlg; }
     CDiffListDlg* DiffDlg() const { return m_pDiffDlg; }
     void OnDiffDlgClosed() { m_pDiffDlg = nullptr; }
+
+    // --- 検索結果一覧ダイアログ（CFindResultDlg。Issue #236）の公開I/F ---
+    //   一致範囲 [pos, pos+size) を選択し、キャレットを先頭へ置いて表示する（[次検索] の一致と同じ見え方）。
+    //   文書のフレームを前面に出し、ビューへフォーカスを移す。
+    void SelectFoundRange(stirling::FileOffset pos, stirling::FileOffset size);
+    // 一覧の [アドレス] 列の表記（アドレス欄と同じ基数・桁数）。
+    CStringW FormatListAddress(stirling::FileOffset pos) const;
+    void OnFindResultDlgClosed(CFindResultDlg* dlg) { if (m_pFindResultDlg == dlg) { m_pFindResultDlg = nullptr; } }
 
 protected:
     // --- 表示設定（原 view+0x248 相当。文書の拡張子別設定をビュー用にキャッシュ） ---
@@ -167,7 +178,7 @@ protected:
     COLORREF m_byteColorTable[256];
 
     // --- 検索状態（原 view+0x178..0x1d0/0x23c/0x240/0x244 相当） ---
-    std::vector<unsigned char> m_lastFindPattern; // 直近の検索バイト列（繰り返し検索用）
+    stirling::HexPattern m_lastFindPattern;     // 直近の検索パターン（繰り返し検索用。ワイルドカード位置を含む）
     int  m_lastFindRange;                       // 直近の検索範囲モード
     bool m_wholeSearchStarted;                  // 「データ全体」検索の初回通過フラグ
     // 直近の検索が不一致検索(0x8032)かどうか。true のとき次/前検索(0x8036/0x8037)は不一致で継続。
@@ -252,7 +263,11 @@ protected:
     bool HitTest(CPoint pt, stirling::FileOffset& row, int& col, int& pane) const;
 
     // pattern を direction 方向・rangeMode で検索し、見つかれば選択して true。
-    bool DoSearch(const std::vector<unsigned char>& pattern, bool forward, int rangeMode);
+    bool DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode);
+    // 一致範囲 [pos, pos+size) を選択しキャレットを先頭へ（DoSearch と検索結果一覧で共用）。
+    void SelectMatch(stirling::FileOffset pos, stirling::FileOffset size);
+    // [全て検索] の条件から検索範囲を決め、検索結果一覧を開いて検索を始める（Issue #236）。
+    void StartFindAll(const CFindDlg::FindAllRequest& request);
     // 指定1バイトに一致しない最初の位置を direction 方向・rangeMode で検索（不一致検索の実体）。
     //   範囲・セッション決定は DoSearch と同一（原 FUN_0044b654 の不一致分岐）。
     bool DoMismatchSearch(unsigned char value, bool forward, int rangeMode);
@@ -260,7 +275,7 @@ protected:
     //   有効ならメッセージ、無効ならビープ。found が true の時は何もしない。
     void NotifySearchResult(bool found);
     // [lo,hi) 内の search を repl で前方一括置換し、置換件数を返す（原 FUN_0044c0d1 相当）。
-    int  ReplaceAll(const std::vector<unsigned char>& search,
+    int  ReplaceAll(const stirling::HexPattern& search,
                     const std::vector<unsigned char>& repl,
                     stirling::FileOffset lo, stirling::FileOffset hi);
 
@@ -279,6 +294,7 @@ protected:
     //   グループは対称・完全連結（各メンバーの配列＝自分以外の全メンバー）。
     std::vector<CStirlingView*> m_syncGroup;
     CDiffListDlg*  m_pDiffDlg = nullptr;              // 所有する相違一覧ダイアログ（モードレス）
+    CFindResultDlg* m_pFindResultDlg = nullptr;       // 所有する検索結果一覧ダイアログ（モードレス。Issue #236）
     bool m_checkingFileChange = false;                // 外部変更通知の表示中（再入防止）
 
     // 構造体編集の表示範囲ハイライト（原 view+0x304/0x308/0x30c）。

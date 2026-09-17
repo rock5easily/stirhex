@@ -17,6 +17,8 @@
 #include "../../StirHex/src/core/StructDef.h"
 #include "../../StirHex/src/core/UndoBudget.h"
 #include "../../StirHex/src/core/HexText.h"
+#include "../../StirHex/src/core/HexPattern.h"
+#include "../../StirHex/src/core/FindAll.h"
 #include "../../StirHex/src/core/Utf8Text.h"
 #include "../../StirHex/src/core/Utf16Text.h"
 
@@ -945,6 +947,475 @@ static void TestSearchBackwardMissedMatch() {
         // ナイーブ参照とも突き合わせる（期待値そのものの検算）。
         CHECK(NaiveBackward(c.data, c.pat, start, 0) == c.expect, "naive reference agrees");
     }
+}
+
+// ---- 16進検索のワイルドカード `??`（Issue #233）----
+
+// ワイルドカード付きのナイーブ一致判定（wild[i] != 0 の位置は任意のバイトに一致）。
+static bool NaiveMatchAt(const std::vector<unsigned char>& d, const std::vector<unsigned char>& pat,
+                         const std::vector<unsigned char>& wild, int s) {
+    const int m = static_cast<int>(pat.size());
+    if (s < 0 || s + m > static_cast<int>(d.size())) return false;
+    for (int i = 0; i < m; ++i) {
+        if (wild[i] == 0 && d[s + i] != pat[i]) return false;
+    }
+    return true;
+}
+
+static int NaiveWildForward(const std::vector<unsigned char>& d, const std::vector<unsigned char>& pat,
+                            const std::vector<unsigned char>& wild, int start, int end) {
+    const int m = static_cast<int>(pat.size());
+    for (int s = (start < 0 ? 0 : start); s + m <= end; ++s) {
+        if (NaiveMatchAt(d, pat, wild, s)) return s;
+    }
+    return -1;
+}
+
+static int NaiveWildBackward(const std::vector<unsigned char>& d, const std::vector<unsigned char>& pat,
+                             const std::vector<unsigned char>& wild, int start, int end) {
+    const int m = static_cast<int>(pat.size());
+    for (int s = start - (m - 1); s >= end; --s) {
+        if (NaiveMatchAt(d, pat, wild, s)) return s;
+    }
+    return -1;
+}
+
+// ParseHexPattern / FormatHexPattern: 受理形式・拒否条件・整形結果。
+static void TestHexPatternParse() {
+    TestPrintf("[TestHexPatternParse]\n");
+    using stirling::FormatHexPattern;
+    using stirling::HexPattern;
+    using stirling::ParseHexPattern;
+
+    struct Accept {
+        const wchar_t* text;
+        std::vector<unsigned char> bytes;
+        std::vector<unsigned char> wildcard;   // 空 = ワイルドカード無し
+        const wchar_t* formatted;
+        const char* what;
+    };
+    const Accept accepts[] = {
+        { L"41 ?? 43",   {0x41, 0x00, 0x43}, {0, 1, 0}, L"41 ?? 43", "space separated wildcard" },
+        { L"41??43",     {0x41, 0x00, 0x43}, {0, 1, 0}, L"41 ?? 43", "wildcard without separator" },
+        { L"??41",       {0x00, 0x41},       {1, 0},    L"?? 41",    "leading wildcard" },
+        { L"41 ??",      {0x41, 0x00},       {0, 1},    L"41 ??",    "trailing wildcard" },
+        { L"?? ?? 4a ??", {0, 0, 0x4A, 0},   {1, 1, 0, 1}, L"?? ?? 4A ??", "consecutive wildcards" },
+        { L"  41  ?? \t", {0x41, 0x00},      {0, 1},    L"41 ??",    "trim and repeated spaces" },
+        { L"aBcD",       {0xAB, 0xCD},       {},        L"AB CD",    "no wildcard keeps table empty" },
+    };
+    for (const Accept& a : accepts) {
+        HexPattern p;
+        const bool ok = ParseHexPattern(a.text, std::wcslen(a.text), true, p);
+        CHECK(ok, a.what);
+        CHECK(p.bytes == a.bytes, a.what);
+        CHECK(p.wildcard == a.wildcard, a.what);
+        CHECK(p.HasWildcard() == !a.wildcard.empty(), a.what);
+        CHECK(FormatHexPattern(p) == a.formatted, a.what);
+    }
+
+    struct Reject { const wchar_t* text; bool allowWildcard; const char* what; };
+    const Reject rejects[] = {
+        { L"",           true,  "empty" },
+        { L"  \t ",      true,  "blank" },
+        { L"4?",         true,  "nibble wildcard low" },
+        { L"?4",         true,  "nibble wildcard high" },
+        { L"41 ? 43",    true,  "single question mark token" },
+        { L"41???",      true,  "odd question marks" },
+        { L"41 ??? 43",  true,  "three question marks token" },
+        { L"??",         true,  "wildcard only" },
+        { L"?? ??",      true,  "all wildcards" },
+        { L"41 4",       true,  "odd digit token" },
+        { L"414",        true,  "odd digit run" },
+        { L"41 4243",    true,  "token wider than two chars" },
+        { L"41\t42",     true,  "inner tab is not a separator" },
+        { L"41 GG",      true,  "non hex character" },
+        { L"41 ?? 43",   false, "wildcard is rejected when not allowed" },
+        { L"41??",       false, "wildcard without separator is rejected when not allowed" },
+    };
+    for (const Reject& r : rejects) {
+        HexPattern p;
+        p.bytes.assign(3, 0xEE);   // 失敗時に空へ戻ることを見るため詰めておく
+        p.wildcard.assign(3, 1);
+        CHECK(!ParseHexPattern(r.text, std::wcslen(r.text), r.allowWildcard, p), r.what);
+        CHECK(p.Empty() && !p.HasWildcard(), "failed parse leaves no partial result");
+    }
+
+    {   // ワイルドカードを許可しない場合の結果は、許可した場合と同じ（ワイルドカードが無い入力）
+        HexPattern a, b;
+        CHECK(ParseHexPattern(std::wstring(L"de ad BE EF"), false, a), "no-wildcard parse");
+        CHECK(ParseHexPattern(std::wstring(L"de ad BE EF"), true, b), "wildcard-allowed parse");
+        CHECK(a == b, "allowWildcard does not change a plain hex result");
+        CHECK(a.WildcardData() == nullptr, "plain hex passes no wildcard table");
+    }
+    {   // nullptr は不正
+        HexPattern p;
+        CHECK(!ParseHexPattern(nullptr, 0, true, p), "null input");
+    }
+    {   // 等値比較はワイルドカード位置も見る
+        HexPattern a, b;
+        ParseHexPattern(std::wstring(L"41 ?? 43"), true, a);
+        ParseHexPattern(std::wstring(L"41 00 43"), true, b);
+        CHECK(a.bytes == b.bytes, "same byte values");
+        CHECK(a != b, "wildcard position is part of equality");
+    }
+}
+
+// ワイルドカード付き検索の固定ケース（前方/後方、ブロック境界、先頭ワイルドカード）。
+static void TestSearchWildcard() {
+    TestPrintf("TestSearchWildcard\n");
+    std::vector<unsigned char> data;
+    const char* s = "aXc aYc abc";   // "a?c" は位置 0, 4, 8
+    for (const char* p = s; *p; ++p) data.push_back(static_cast<unsigned char>(*p));
+    BlockList list;
+    BuildDoc(list, data);
+    BlockCursor c(&list);
+    const unsigned char pat[] = {'a', 0, 'c'};
+    const unsigned char wild[] = {0, 1, 0};
+    FileOffset pos = -1;
+
+    CHECK(c.SearchPattern(pat, 3, &pos, BlockCursor::kForward, 0, 0, wild) && pos == 0, "wild fwd 0");
+    CHECK(c.SearchPattern(pat, 3, &pos, BlockCursor::kForward, 1, 0, wild) && pos == 4, "wild fwd 4");
+    CHECK(c.SearchPattern(pat, 3, &pos, BlockCursor::kForward, 5, 0, wild) && pos == 8, "wild fwd 8");
+    CHECK(!c.SearchPattern(pat, 3, &pos, BlockCursor::kForward, 9, 0, wild), "wild fwd none");
+    CHECK(c.SearchPattern(pat, 3, &pos, BlockCursor::kBackward, 10, 0, wild) && pos == 8, "wild bwd 8");
+    CHECK(c.SearchPattern(pat, 3, &pos, BlockCursor::kBackward, 9, 0, wild) && pos == 4, "wild bwd 4");
+    // 同じバイト値でもワイルドカード表が無ければ完全一致（0x00 を探すので見つからない）。
+    CHECK(!c.SearchPattern(pat, 3, &pos, BlockCursor::kForward, 0, 0), "no table means exact match");
+
+    // 先頭・末尾がワイルドカードのパターン（" a" の直前/直後を任意とする）。
+    const unsigned char headPat[] = {0, 'b', 'c'};
+    const unsigned char headWild[] = {1, 0, 0};
+    CHECK(c.SearchPattern(headPat, 3, &pos, BlockCursor::kForward, 0, 0, headWild) && pos == 8,
+          "leading wildcard fwd");
+    CHECK(c.SearchPattern(headPat, 3, &pos, BlockCursor::kBackward, 10, 0, headWild) && pos == 8,
+          "leading wildcard bwd");
+    const unsigned char tailPat[] = {'Y', 'c', 0};
+    const unsigned char tailWild[] = {0, 0, 1};
+    CHECK(c.SearchPattern(tailPat, 3, &pos, BlockCursor::kForward, 0, 0, tailWild) && pos == 5,
+          "trailing wildcard fwd");
+    CHECK(c.SearchPattern(tailPat, 3, &pos, BlockCursor::kBackward, 10, 0, tailWild) && pos == 5,
+          "trailing wildcard bwd");
+    // 末尾のワイルドカードがデータ末尾を越える位置には一致しない（"bc" の後ろは無い）。
+    const unsigned char eofPat[] = {'b', 'c', 0};
+    CHECK(!c.SearchPattern(eofPat, 3, &pos, BlockCursor::kForward, 0, 0, tailWild),
+          "wildcard never matches past EOF (fwd)");
+    CHECK(!c.SearchPattern(eofPat, 3, &pos, BlockCursor::kBackward, 10, 0, tailWild),
+          "wildcard never matches past EOF (bwd)");
+    // 呼出側が全長を超える終端を渡しても、末尾ワイルドカードは EOF の外に一致しない
+    //   （選択範囲内の対話置換で文書が縮んだ後、確定済みの範囲終端が古いまま渡る場合）。
+    CHECK(!c.SearchPattern(eofPat, 3, &pos, BlockCursor::kForward, 0, 100, tailWild),
+          "wildcard never matches past EOF even when end exceeds the length (fwd)");
+    const unsigned char eofPat2[] = {'c', 0};
+    const unsigned char tailWild2[] = {0, 1};
+    CHECK(c.SearchPattern(eofPat2, 2, &pos, BlockCursor::kForward, 3, 100, tailWild2) && pos == 6,
+          "oversized end still finds matches inside the data");
+    CHECK(!c.SearchPattern(eofPat2, 2, &pos, BlockCursor::kForward, 7, 100, tailWild2),
+          "last 'c' at EOF has no byte for the trailing wildcard");
+
+    // ブロック境界(16KB)を跨ぐ一致。ワイルドカードの位置がちょうど境界に来るように置く。
+    std::vector<unsigned char> big(40000);
+    for (size_t i = 0; i < big.size(); ++i) big[i] = static_cast<unsigned char>((i * 91) & 0xFF);
+    const std::vector<unsigned char> bpat = {0xDE, 0xAD, 0x00, 0x00, 0xBE, 0xEF};
+    const std::vector<unsigned char> bwild = {0, 0, 1, 1, 0, 0};
+    const int at = 16384 - 2;
+    for (size_t i = 0; i < bpat.size(); ++i) {
+        if (bwild[i] == 0) big[at + i] = bpat[i];
+    }
+    BlockList bigList;
+    BuildDoc(bigList, big);
+    BlockCursor bc(&bigList);
+    const int expFwd = NaiveWildForward(big, bpat, bwild, 0, static_cast<int>(big.size()));
+    const int expBwd = NaiveWildBackward(big, bpat, bwild, static_cast<int>(big.size()) - 1, 0);
+    CHECK(expFwd == at && expBwd == at, "naive reference finds the embedded pattern");
+    CHECK(bc.SearchPattern(bpat.data(), 6, &pos, BlockCursor::kForward, 0, 0, bwild.data()) && pos == at,
+          "cross-block wildcard fwd");
+    CHECK(bc.SearchPattern(bpat.data(), 6, &pos, BlockCursor::kBackward,
+                           static_cast<int>(big.size()) - 1, 0, bwild.data()) && pos == at,
+          "cross-block wildcard bwd");
+}
+
+// ワイルドカード付き検索をナイーブ参照と完全突合する（前方/後方、全体/範囲指定）。
+//   ワイルドカードはスキップ表の上限を変えるため、先頭・末尾・連続・大半がワイルドカードの
+//   パターンを意図的に混ぜる。
+static void TestSearchWildcardFuzz() {
+    TestPrintf("TestSearchWildcardFuzz\n");
+    std::mt19937 rng(0x233C4D);
+    int cases = 0, found = 0, mism = 0;
+    for (int iter = 0; iter < 200; ++iter) {
+        const int size = static_cast<int>(rng() % 24000) + 1;
+        std::vector<unsigned char> data(size);
+        const int alpha = 2 + static_cast<int>(rng() % 6);
+        for (int i = 0; i < size; ++i) data[i] = static_cast<unsigned char>(rng() % alpha);
+        BlockList list;
+        BuildDoc(list, data);
+        BlockCursor c(&list);
+
+        for (int t = 0; t < 6; ++t) {
+            int m = 1 + static_cast<int>(rng() % 8);
+            if ((rng() % 8) == 0) { m = 1 + static_cast<int>(rng() % (kBlockCapacity + 64)); }
+            std::vector<unsigned char> pat(m);
+            if ((rng() & 1) && size >= m) {
+                const int src = static_cast<int>(rng() % (size - m + 1));
+                std::memcpy(pat.data(), data.data() + src, m);
+            } else {
+                for (int i = 0; i < m; ++i) pat[i] = static_cast<unsigned char>(rng() % alpha);
+            }
+            // ワイルドカードの密度を 1/8〜7/8 で変える。最低 1 つは固定バイトを残す
+            //   （ダイアログはすべてワイルドカードの入力を受け付けないため）。
+            std::vector<unsigned char> wild(m, 0);
+            const unsigned density = 1 + (rng() % 7);
+            for (int i = 0; i < m; ++i) {
+                if ((rng() % 8) < density) { wild[i] = 1; pat[i] = static_cast<unsigned char>(rng()); }
+            }
+            wild[rng() % m] = 0;
+
+            for (int rangeCase = 0; rangeCase < 2; ++rangeCase) {
+                // 前方
+                const int start = static_cast<int>(rng() % (size + 1));
+                int fend = 0;
+                int naiveEnd = size;
+                if (rangeCase == 1 && start < size) {
+                    fend = start + 1 + static_cast<int>(rng() % (size - start));
+                    naiveEnd = fend;
+                    // 呼出側が全長を超える終端を渡す場合も混ぜる（一致は全長内に限られる）。
+                    if ((rng() % 4) == 0) {
+                        fend = size + 1 + static_cast<int>(rng() % 16);
+                        naiveEnd = size;
+                    }
+                }
+                FileOffset got = -1;
+                const bool f = c.SearchPattern(pat.data(), m, &got, BlockCursor::kForward, start, fend,
+                                               wild.data());
+                const int exp = (start < size) ? NaiveWildForward(data, pat, wild, start, naiveEnd) : -1;
+                ++cases;
+                if (f) ++found;
+                if ((f ? got : -1) != exp) {
+                    ++mism;
+                    if (mism <= 3)
+                        TestPrintf("  FAIL wild fwd: size=%d m=%d start=%d end=%d got=%lld exp=%d\n",
+                                    size, m, start, fend, static_cast<long long>(f ? got : -1), exp);
+                }
+
+                // 後方
+                int bstart = size - 1;
+                int bend = 0;
+                if (rangeCase == 1) {
+                    const int lo = static_cast<int>(rng() % size);
+                    const int hi = lo + 1 + static_cast<int>(rng() % (size - lo));
+                    bend = lo;
+                    bstart = hi - 1;
+                }
+                FileOffset got2 = -1;
+                const bool f2 = c.SearchPattern(pat.data(), m, &got2, BlockCursor::kBackward, bstart, bend,
+                                                wild.data());
+                const int exp2 = NaiveWildBackward(data, pat, wild, bstart, bend);
+                ++cases;
+                if (f2) ++found;
+                if ((f2 ? got2 : -1) != exp2) {
+                    ++mism;
+                    if (mism <= 3)
+                        TestPrintf("  FAIL wild bwd: size=%d m=%d start=%d end=%d got=%lld exp=%d\n",
+                                    size, m, bstart, bend, static_cast<long long>(f2 ? got2 : -1), exp2);
+                }
+            }
+        }
+    }
+    CHECK(mism == 0, "wildcard search matches naive reference");
+    CHECK(found > 0, "wildcard fuzz produced hits");
+    TestPrintf("  wildcard search fuzz: %d cases / %d found / %d mismatches\n", cases, found, mism);
+}
+
+// ---- 全件検索（Issue #236）----
+
+// [lo, hi) に完全に収まる一致の先頭位置をすべて返す（重なりも数える）ナイーブ参照。
+static std::vector<FileOffset> NaiveFindAll(const std::vector<unsigned char>& d,
+                                            const std::vector<unsigned char>& pat,
+                                            const std::vector<unsigned char>& wild,
+                                            int lo, int hi) {
+    std::vector<FileOffset> out;
+    const int m = static_cast<int>(pat.size());
+    for (int s = lo; s + m <= hi; ++s) {
+        if (NaiveMatchAt(d, pat, wild, s)) out.push_back(s);
+    }
+    return out;
+}
+
+static stirling::HexPattern MakePattern(const std::vector<unsigned char>& bytes,
+                                        const std::vector<unsigned char>& wild) {
+    stirling::HexPattern p;
+    p.bytes = bytes;
+    bool any = false;
+    for (unsigned char w : wild) { any = any || (w != 0); }
+    if (any) p.wildcard = wild;
+    return p;
+}
+
+// Step を最後まで回す。回した回数を返す（無限ループ防止の上限付き）。
+static int RunFindAll(stirling::FindAll& f, FileOffset budget) {
+    int steps = 0;
+    while (f.Running() && steps < 10000000) {
+        f.Step(budget);
+        ++steps;
+    }
+    return steps;
+}
+
+// 固定ケース: 重なり、範囲、空・不正な条件、上限、中止、文書の縮小。
+static void TestFindAllBasic() {
+    TestPrintf("TestFindAllBasic\n");
+    using stirling::FindAll;
+    using stirling::FindAllState;
+    std::vector<unsigned char> data;
+    for (const char* p = "aaaa-aXa-aa"; *p; ++p) data.push_back(static_cast<unsigned char>(*p));
+    //                      0123456789A
+    BlockList list;
+    BuildDoc(list, data);
+    const int n = static_cast<int>(data.size());
+
+    {   // 重なった一致も1件ずつ数える（"aa" は 0,1,2,9）
+        FindAll f;
+        CHECK(f.Start(list, MakePattern({'a', 'a'}, {}), 0, n) == FindAllState::Running, "start runs");
+        RunFindAll(f, 3);
+        const std::vector<FileOffset> expect = {0, 1, 2, 9};
+        CHECK(f.State() == FindAllState::Complete, "overlap complete");
+        CHECK(f.Hits() == expect, "overlapping hits are all reported");
+        CHECK(f.Scanned() == f.ScanTotal(), "progress reaches the total");
+    }
+    {   // ワイルドカード（"a?a" は 0,1,3,5,7）
+        FindAll f;
+        f.Start(list, MakePattern({'a', 0, 'a'}, {0, 1, 0}), 0, n);
+        RunFindAll(f, 1);
+        const std::vector<FileOffset> expect = {0, 1, 3, 5, 7};
+        CHECK(NaiveFindAll(data, {'a', 0, 'a'}, {0, 1, 0}, 0, n) == expect, "naive agrees on wildcard hits");
+        CHECK(f.Hits() == expect, "wildcard hits");
+    }
+    {   // 範囲 [1, 9): 一致は範囲に完全に収まるものだけ（"aa" の 9 は範囲外、2 は収まる）
+        FindAll f;
+        f.Start(list, MakePattern({'a', 'a'}, {}), 1, 9);
+        RunFindAll(f, 1000);
+        const std::vector<FileOffset> expect = {1, 2};
+        CHECK(f.Hits() == expect, "range limits hits to fully contained matches");
+        CHECK(f.RangeBegin() == 1 && f.RangeEnd() == 9, "range is kept");
+    }
+    {   // 範囲がパターンより短い・空パターンは走査せず完了
+        FindAll f;
+        CHECK(f.Start(list, MakePattern({'a', 'a'}, {}), 4, 5) == FindAllState::Complete, "short range");
+        CHECK(f.Hits().empty(), "short range has no hits");
+        CHECK(f.Start(list, stirling::HexPattern(), 0, n) == FindAllState::Complete, "empty pattern");
+        CHECK(f.Step(100) == FindAllState::Complete, "step after completion is a no-op");
+    }
+    {   // 文書の外の範囲は読み取りエラー
+        FindAll f;
+        CHECK(f.Start(list, MakePattern({'a'}, {}), -1, n) == FindAllState::ReadError, "negative lo");
+        CHECK(f.Start(list, MakePattern({'a'}, {}), 0, n + 1) == FindAllState::ReadError, "hi past EOF");
+        CHECK(f.Start(list, MakePattern({'a'}, {}), 5, 4) == FindAllState::ReadError, "hi before lo");
+    }
+    {   // 上限ちょうどは完了、超えると打ち切り（上限件数までを保持）
+        FindAll f;
+        f.Start(list, MakePattern({'a'}, {}), 0, n, 8);   // 'a' は 8 件
+        RunFindAll(f, 2);
+        CHECK(f.State() == FindAllState::Complete && f.Hits().size() == 8, "hits equal to limit complete");
+        f.Start(list, MakePattern({'a'}, {}), 0, n, 7);
+        RunFindAll(f, 2);
+        CHECK(f.State() == FindAllState::Truncated, "one more hit than the limit truncates");
+        CHECK(f.Hits().size() == 7, "truncated keeps exactly limit hits");
+        CHECK(f.Step(100) == FindAllState::Truncated, "truncated does not resume");
+        CHECK(f.Start(list, MakePattern({'a'}, {}), 0, n, 0) == FindAllState::Complete, "zero limit");
+    }
+    {   // 中止
+        FindAll f;
+        f.Start(list, MakePattern({'a'}, {}), 0, n);
+        f.Step(2);
+        f.Cancel();
+        CHECK(f.State() == FindAllState::Cancelled, "cancel stops the search");
+        const size_t kept = f.Hits().size();
+        CHECK(f.Step(100) == FindAllState::Cancelled && f.Hits().size() == kept, "cancelled does not resume");
+        f.Cancel();
+        CHECK(f.State() == FindAllState::Cancelled, "cancel twice is harmless");
+    }
+    {   // Step の合間に文書が縮んだら、範囲の外を読まずに打ち切る
+        BlockList shrink;
+        BuildDoc(shrink, data);
+        FindAll f;
+        f.Start(shrink, MakePattern({'a'}, {}), 0, n);
+        f.Step(1);
+        BlockCursor c(&shrink);
+        CHECK(c.DeleteRange(n - 3, 3) == 3, "shrink the document");
+        CHECK(f.Step(100) == FindAllState::ReadError, "shrunk document ends with read error");
+    }
+}
+
+// ナイーブ参照との突合。Step の予算（1, 小, ブロック長前後, 巨大）と範囲、ワイルドカード、
+//   上限を変え、分割の境界やブロック境界(16KB)をまたぐ一致を取りこぼさないことを確かめる。
+static void TestFindAllFuzz() {
+    TestPrintf("TestFindAllFuzz\n");
+    using stirling::FindAll;
+    using stirling::FindAllState;
+    std::mt19937 rng(0x236F1D);
+    int cases = 0, mism = 0;
+    long long totalHits = 0;
+    for (int iter = 0; iter < 120; ++iter) {
+        const int size = 1 + static_cast<int>(rng() % 40000);
+        std::vector<unsigned char> data(size);
+        const int alpha = 2 + static_cast<int>(rng() % 5);
+        for (int i = 0; i < size; ++i) data[i] = static_cast<unsigned char>(rng() % alpha);
+        BlockList list;
+        BuildDoc(list, data);
+
+        for (int t = 0; t < 4; ++t) {
+            int m = 1 + static_cast<int>(rng() % 6);
+            if ((rng() % 10) == 0) { m = 1 + static_cast<int>(rng() % (kBlockCapacity + 64)); }
+            std::vector<unsigned char> pat(m);
+            if ((rng() & 1) && size >= m) {
+                const int src = static_cast<int>(rng() % (size - m + 1));
+                std::memcpy(pat.data(), data.data() + src, m);
+            } else {
+                for (int i = 0; i < m; ++i) pat[i] = static_cast<unsigned char>(rng() % alpha);
+            }
+            std::vector<unsigned char> wild(m, 0);
+            if (rng() & 1) {
+                for (int i = 0; i < m; ++i) {
+                    if ((rng() % 4) == 0) { wild[i] = 1; pat[i] = 0; }
+                }
+                wild[rng() % m] = 0;
+            }
+            int lo = 0, hi = size;
+            if (rng() & 1) {
+                lo = static_cast<int>(rng() % (size + 1));
+                hi = lo + static_cast<int>(rng() % (size - lo + 1));
+            }
+            static const FileOffset kBudgets[] = {1, 7, 64, kBlockCapacity - 1, kBlockCapacity + 3, 1 << 30};
+            const FileOffset budget = kBudgets[rng() % (sizeof(kBudgets) / sizeof(kBudgets[0]))];
+            const std::vector<FileOffset> expect = NaiveFindAll(data, pat, wild, lo, hi);
+            const size_t limit = (rng() % 3 == 0) ? static_cast<size_t>(rng() % 50) : FindAll::kDefaultLimit;
+
+            FindAll f;
+            f.Start(list, MakePattern(pat, wild), lo, hi, limit);
+            RunFindAll(f, budget);
+            ++cases;
+            totalHits += static_cast<long long>(f.Hits().size());
+
+            bool ok;
+            if (limit == 0) {
+                ok = f.State() == FindAllState::Complete && f.Hits().empty();
+            } else if (expect.size() > limit) {
+                ok = f.State() == FindAllState::Truncated &&
+                     f.Hits() == std::vector<FileOffset>(expect.begin(), expect.begin() + limit);
+            } else {
+                ok = f.State() == FindAllState::Complete && f.Hits() == expect;
+            }
+            if (!ok) {
+                ++mism;
+                if (mism <= 3)
+                    TestPrintf("  FAIL find all: size=%d m=%d lo=%d hi=%d budget=%lld limit=%zu got=%zu exp=%zu\n",
+                                size, m, lo, hi, static_cast<long long>(budget), limit,
+                                f.Hits().size(), expect.size());
+            }
+        }
+    }
+    CHECK(mism == 0, "find all matches naive reference");
+    CHECK(totalHits > 0, "find all fuzz produced hits");
+    TestPrintf("  find all fuzz: %d cases / %lld hits / %d mismatches\n", cases, totalHits, mism);
 }
 
 
@@ -6506,6 +6977,11 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestSearchAcrossBlocks", g_checks, g_failures, TestSearchAcrossBlocks);
     g_report.Run("TestSearchFuzz", g_checks, g_failures, TestSearchFuzz);
     g_report.Run("TestSearchBackwardMissedMatch", g_checks, g_failures, TestSearchBackwardMissedMatch);
+    g_report.Run("TestHexPatternParse", g_checks, g_failures, TestHexPatternParse);
+    g_report.Run("TestSearchWildcard", g_checks, g_failures, TestSearchWildcard);
+    g_report.Run("TestSearchWildcardFuzz", g_checks, g_failures, TestSearchWildcardFuzz);
+    g_report.Run("TestFindAllBasic", g_checks, g_failures, TestFindAllBasic);
+    g_report.Run("TestFindAllFuzz", g_checks, g_failures, TestFindAllFuzz);
     g_report.Run("TestSetByteAt", g_checks, g_failures, TestSetByteAt);
     g_report.Run("TestLargeOffsetSeek", g_checks, g_failures, TestLargeOffsetSeek);
     g_report.Run("TestLargeOffsetDataOps", g_checks, g_failures, TestLargeOffsetDataOps);

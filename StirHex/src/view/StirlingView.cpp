@@ -22,6 +22,7 @@
 #include "frame/MainFrame.h"
 #include "frame/UserMenuCatalog.h"   // ユーザーメニュー構築（rawID→cmdID/名称・BuildUserPopup）
 #include "dialog/FindDlg.h"
+#include "dialog/FindResultDlg.h"   // 検索結果一覧（Issue #236）
 #include "dialog/FindMismatchDlg.h"
 #include "dialog/ReplaceDlg.h"
 #include "dialog/ReplaceConfirmDlg.h"
@@ -2924,6 +2925,12 @@ void CStirlingView::OnDestroy() {
         m_pDiffDlg->DestroyWindow();   // Cleanup→PostNcDestroy（自己破棄・参照クリア）
     }
     m_pDiffDlg = nullptr;
+    // 検索結果一覧はこのビューを参照するため、ビューより先に閉じる（Issue #236）。
+    if (m_pFindResultDlg != nullptr) {
+        CFindResultDlg* pFindResult = m_pFindResultDlg;
+        m_pFindResultDlg = nullptr;
+        pFindResult->OnViewDestroyed();   // 自己破棄。以降 pFindResult へ触れない
+    }
 
     // 対象ビューとして参照されている一覧も閉じる。OnViewDestroyed() は対象外を
     // 無視するため、全ビューを走査し、自己破棄後は各反復でポインターを再取得する。
@@ -4617,11 +4624,11 @@ std::vector<unsigned char> CStirlingView::EncodeText(int charset, LPCWSTR text) 
     return out;
 }
 
-bool CStirlingView::DoSearch(const std::vector<unsigned char>& pattern, bool forward, int rangeMode) {
+bool CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode) {
     CStirlingDoc* pDoc = GetDocument();
-    if (pDoc == nullptr || pattern.empty()) { return false; }
+    if (pDoc == nullptr || pattern.Empty()) { return false; }
     const stirling::FileOffset total = Total();
-    const int plen = static_cast<int>(pattern.size());
+    const int plen = static_cast<int>(pattern.Size());
     if (plen > total) { return false; }
 
     // 検索範囲 [start, end] の決定。core SearchPattern:
@@ -4663,20 +4670,24 @@ bool CStirlingView::DoSearch(const std::vector<unsigned char>& pattern, bool for
     stirling::FileOffset foundPos = -1;   // core は 64bit 位置を返す（Issue #19）
     const int dir = forward ? stirling::BlockCursor::kForward
                             : stirling::BlockCursor::kBackward;
-    const bool found = cur.SearchPattern(pattern.data(), plen, &foundPos, dir, start, end);
+    const bool found = cur.SearchPattern(pattern.bytes.data(), plen, &foundPos, dir, start, end,
+                                         pattern.WildcardData());
     if (!found) {
         return false;   // 未発見は無反応（原は beep しない）
     }
-    const stirling::FileOffset outPos = foundPos;
-    // 一致範囲 [outPos, outPos+plen) を選択。キャレットは一致先頭に置き、次回検索を継続可能に。
+    SelectMatch(foundPos, plen);
+    return true;
+}
+
+// 一致範囲 [pos, pos+size) を選択。キャレットは一致先頭に置き、次回検索を継続可能に。
+void CStirlingView::SelectMatch(stirling::FileOffset pos, stirling::FileOffset size) {
     m_selActive = true;
-    m_selAnchor = outPos + plen;
-    m_caretPos  = outPos;
+    m_selAnchor = pos + size;
+    m_caretPos  = pos;
     m_nibbleLow = false;
     CenterCaretRow();   // 画面外なら一致箇所を縦中央へ（原挙動）
     Invalidate(FALSE);
     UpdateCaret();
-    return true;
 }
 
 // 不一致検索の実体（原 FUN_0044b654 の不一致分岐 + コア FUN_0041d6bf）。
@@ -4753,9 +4764,9 @@ void CStirlingView::CenterCaretRow() {
     }
 }
 
-void CStirlingView::FindWithBytes(const std::vector<unsigned char>& pattern,
-                                  int rangeMode, bool forward) {
-    if (pattern.empty()) { return; }
+void CStirlingView::FindWithPattern(const stirling::HexPattern& pattern,
+                                    int rangeMode, bool forward) {
+    if (pattern.Empty()) { return; }
     // 検索条件が変わったら（種別=不一致→通常の切替含む）「データ全体」初回フラグをリセット。
     if (m_lastFindMismatch || pattern != m_lastFindPattern || rangeMode != m_lastFindRange) {
         m_wholeSearchStarted = false;
@@ -4806,7 +4817,69 @@ void CStirlingView::ResetFindSession() {
 void CStirlingView::OnEditFind() {
     ResetFindSession();   // 新規セッション: 範囲固定を初期化（原は閉じるまで固定）
     CFindDlg dlg(this);   // モーダル（原と同じ。Next/Prev で検索、閉じるで終了）
-    dlg.DoModal();
+    if (dlg.DoModal() == IDC_FIND_ALL) {
+        StartFindAll(dlg.GetFindAllRequest());   // [全て検索]（移植版で追加。Issue #236）
+    }
+}
+
+// [全て検索]: 検索範囲を決めて検索結果一覧を開く（既存の一覧があれば内容を置き換える）。
+void CStirlingView::StartFindAll(const CFindDlg::FindAllRequest& request) {
+    CStirlingDoc* pDoc = GetDocument();
+    if (pDoc == nullptr || request.pattern.Empty()) { return; }
+    const stirling::FileOffset total = Total();
+    CFindResultDlg::Condition condition;
+    condition.pattern = request.pattern;
+    condition.display = request.display;
+    condition.isHex = request.isHex;
+    condition.rangeMode = request.rangeMode;
+    if (request.rangeMode == CFindDlg::kSelection && m_selActive) {
+        condition.lo = SelLo();
+        condition.hi = SelHi();
+    } else if (request.rangeMode == CFindDlg::kFromCursor) {
+        condition.lo = (m_caretPos < total) ? m_caretPos : total;   // キャレット位置から末尾まで
+        condition.hi = total;
+    } else {
+        condition.lo = 0;
+        condition.hi = total;
+    }
+
+    if (m_pFindResultDlg == nullptr || !::IsWindow(m_pFindResultDlg->GetSafeHwnd())) {
+        m_pFindResultDlg = nullptr;
+        auto* pDlg = new CFindResultDlg(this);
+        if (!pDlg->CreateModeless(AfxGetMainWnd())) {
+            delete pDlg;   // Create 失敗時は PostNcDestroy が呼ばれないため自前で解放する
+            ui::MsgBoxRes(GetSafeHwnd(), IDS_FINDRESULT_CREATE_ERROR);
+            return;
+        }
+        m_pFindResultDlg = pDlg;
+    }
+    m_pFindResultDlg->ShowWindow(SW_SHOW);
+    m_pFindResultDlg->SetActiveWindow();
+    m_pFindResultDlg->StartSearch(condition);
+}
+
+void CStirlingView::SelectFoundRange(stirling::FileOffset pos, stirling::FileOffset size) {
+    if (CFrameWnd* pFrame = GetParentFrame()) {
+        if (CMDIFrameWnd* pMainFrame = DYNAMIC_DOWNCAST(CMDIFrameWnd, AfxGetMainWnd())) {
+            if (CMDIChildWnd* pChild = DYNAMIC_DOWNCAST(CMDIChildWnd, pFrame)) {
+                pMainFrame->MDIActivate(pChild);
+            }
+        }
+    }
+    const stirling::FileOffset total = Total();
+    if (pos < 0 || size <= 0 || pos + size > total) { ::MessageBeep(0); return; }
+    SelectMatch(pos, size);
+    SetFocus();
+}
+
+CStringW CStirlingView::FormatListAddress(stirling::FileOffset pos) const {
+    CStringW text;
+    if (m_addrRadix) {
+        text.Format(L"%0*llX", AddrDigits(), static_cast<long long>(pos));
+    } else {
+        text.Format(L"%0*llu", AddrDigits(), static_cast<long long>(pos));
+    }
+    return text;
 }
 
 // 不一致検索ダイアログを開く（0x8032, 原 CStirlingView_OnFindMismatch）。
@@ -4817,12 +4890,12 @@ void CStirlingView::OnFindMismatch() {
 }
 
 // [lo,hi) 内の search を repl で前方一括置換（原 FUN_0044c0d1）。返り値=置換件数。
-int CStirlingView::ReplaceAll(const std::vector<unsigned char>& search,
+int CStirlingView::ReplaceAll(const stirling::HexPattern& search,
                               const std::vector<unsigned char>& repl,
                               stirling::FileOffset lo, stirling::FileOffset hi) {
     CStirlingDoc* pDoc = GetDocument();
-    if (pDoc == nullptr || search.empty()) { return 0; }
-    const int slen = static_cast<int>(search.size());
+    if (pDoc == nullptr || search.Empty()) { return 0; }
+    const int slen = static_cast<int>(search.Size());
     int count = 0;
     stirling::FileOffset p = (lo < 0) ? 0 : lo;
     stirling::FileOffset endBound = hi;
@@ -4832,8 +4905,9 @@ int CStirlingView::ReplaceAll(const std::vector<unsigned char>& search,
         if (p + slen > endBound) { break; }
         stirling::BlockCursor cur(&pDoc->Blocks());   // 置換で構造が変わるため毎回作り直す
         stirling::FileOffset foundPos = -1;   // core は 64bit 位置を返す（Issue #19）
-        if (!cur.SearchPattern(search.data(), slen, &foundPos,
-                               stirling::BlockCursor::kForward, p, endBound)) {
+        if (!cur.SearchPattern(search.bytes.data(), slen, &foundPos,
+                               stirling::BlockCursor::kForward, p, endBound,
+                               search.WildcardData())) {
             break;
         }
         const stirling::FileOffset outPos = foundPos;
@@ -4863,11 +4937,11 @@ void CStirlingView::OnEditReplace() {
     if (dlg.DoModal() != IDOK || dlg.GetAction() == CReplaceDlg::kNone) {
         return;
     }
-    const std::vector<unsigned char> sbytes = dlg.SearchBytes();
+    const stirling::HexPattern spattern = dlg.SearchPattern();
     const std::vector<unsigned char> rbytes = dlg.ReplaceBytes();
     const int range = dlg.GetRange();
     const CReplaceDlg::Action act = dlg.GetAction();
-    m_lastFindPattern = sbytes;
+    m_lastFindPattern = spattern;
     m_lastFindRange = range;
 
     // 置換対象範囲 [rlo, rhi) を決定。
@@ -4883,7 +4957,7 @@ void CStirlingView::OnEditReplace() {
     }
 
     if (act == CReplaceDlg::kAll) {
-        const int n = ReplaceAll(sbytes, rbytes, rlo, rhi);
+        const int n = ReplaceAll(spattern, rbytes, rlo, rhi);
         CStringW msg;
         msg.Format(ui::LoadW(IDS_REPLACE_COUNT), n);   // "%d個置換しました"
         ui::MsgBox(GetSafeHwnd(), msg, MB_OK | MB_ICONINFORMATION);
@@ -4893,14 +4967,14 @@ void CStirlingView::OnEditReplace() {
     // 対話置換（次検索=前方 / 前検索=後方）。一致→確認→実行/スキップ/一括/キャンセルのループ。
     const bool forward = (act == CReplaceDlg::kNext);
     for (;;) {
-        if (!DoSearch(sbytes, forward, range)) {
+        if (!DoSearch(spattern, forward, range)) {
             break;   // これ以上一致が無い
         }
         CReplaceConfirmDlg confirm(this);
         const int r = static_cast<int>(confirm.DoModal());
         if (r == CReplaceConfirmDlg::kExec) {
             const stirling::FileOffset pos = SelLo();
-            if (!pDoc->ReplaceRange(pos, static_cast<int>(sbytes.size()), rbytes)) {
+            if (!pDoc->ReplaceRange(pos, static_cast<int>(spattern.Size()), rbytes)) {
                 break;   // 置換できなかった（中止等）
             }
             m_selActive = false;
@@ -4913,7 +4987,7 @@ void CStirlingView::OnEditReplace() {
             // 何もしない（キャレットは一致先頭。次の DoSearch が先へ進む）。
         } else if (r == CReplaceConfirmDlg::kAll) {
             // 残りを一括置換（現在位置から範囲終端まで、前方）。
-            const int n = ReplaceAll(sbytes, rbytes, m_caretPos, rhi);
+            const int n = ReplaceAll(spattern, rbytes, m_caretPos, rhi);
             CStringW msg;   // 原 1017「%d個置換しました」（wsprintf は長さ制限なしのため不使用）
             msg.Format(ui::LoadW(IDS_REPLACE_COUNT), n);
             ui::MsgBox(GetSafeHwnd(), msg, MB_OK | MB_ICONINFORMATION);
@@ -4932,12 +5006,12 @@ void CStirlingView::OnEditReplace() {
 //   何も起きなかった（Issue #72）。原に合わせて更新ハンドラを持たない。
 void CStirlingView::OnFindNextCmd() {
     if (m_lastFindMismatch) { NotifySearchResult(DoMismatchSearch(m_lastFindByte, true, m_lastFindRange)); return; }
-    if (m_lastFindPattern.empty()) { OnEditFind(); return; }
+    if (m_lastFindPattern.Empty()) { OnEditFind(); return; }
     NotifySearchResult(DoSearch(m_lastFindPattern, true, m_lastFindRange));
 }
 
 void CStirlingView::OnFindPrevCmd() {
     if (m_lastFindMismatch) { NotifySearchResult(DoMismatchSearch(m_lastFindByte, false, m_lastFindRange)); return; }
-    if (m_lastFindPattern.empty()) { OnEditFind(); return; }
+    if (m_lastFindPattern.Empty()) { OnEditFind(); return; }
     NotifySearchResult(DoSearch(m_lastFindPattern, false, m_lastFindRange));
 }
