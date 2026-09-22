@@ -1,0 +1,163 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>StirHex core tests</title><style>body{font-family:system-ui;margin:2em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:.5em;text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere}.FAIL{background:#ffe0e0}.SKIP{background:#fff3cd}</style><h1>StirHex core tests</h1><p>x86 | 76 tests | 0 failed | 3 skipped | 5311 checks | 12.938 seconds</p><table><thead><tr><th>Test</th><th>Result</th><th>Seconds</th><th>Checks</th><th>Details</th></tr></thead><tbody>
+<tr class="PASS"><td>TestBlockListBasics</td><td>PASS</td><td>0.000</td><td>21</td><td><details><summary>Output</summary><pre>TestBlockListBasics
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMultiByteInsert</td><td>PASS</td><td>0.000</td><td>49</td><td><details><summary>Output</summary><pre>TestMultiByteInsert
+</pre></details></td></tr>
+<tr class="PASS"><td>TestRead</td><td>PASS</td><td>0.000</td><td>27</td><td><details><summary>Output</summary><pre>TestRead
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSeek</td><td>PASS</td><td>0.000</td><td>35</td><td><details><summary>Output</summary><pre>TestSeek
+</pre></details></td></tr>
+<tr class="PASS"><td>TestInsertByteSplit</td><td>PASS</td><td>0.001</td><td>120</td><td><details><summary>Output</summary><pre>TestInsertByteSplit
+</pre></details></td></tr>
+<tr class="PASS"><td>TestInsertByteFullBlockLastPos</td><td>PASS</td><td>0.000</td><td>19</td><td><details><summary>Output</summary><pre>TestInsertByteFullBlockLastPos
+</pre></details></td></tr>
+<tr class="PASS"><td>TestInsertOverflowAtLastByte</td><td>PASS</td><td>0.002</td><td>143</td><td><details><summary>Output</summary><pre>TestInsertOverflowAtLastByte
+</pre></details></td></tr>
+<tr class="PASS"><td>TestDelete</td><td>PASS</td><td>0.000</td><td>115</td><td><details><summary>Output</summary><pre>TestDelete
+</pre></details></td></tr>
+<tr class="PASS"><td>TestDeleteLastByteSingleBlock</td><td>PASS</td><td>0.000</td><td>6</td><td><details><summary>Output</summary><pre>TestDeleteLastByteSingleBlock
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFuzz</td><td>PASS</td><td>2.489</td><td>17</td><td><details><summary>Output</summary><pre>TestFuzz
+  fuzz grew to 47812 bytes, 4 blocks
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFileRoundTrip</td><td>PASS</td><td>0.140</td><td>267</td><td><details><summary>Output</summary><pre>TestFileRoundTrip
+</pre></details></td></tr>
+<tr class="PASS"><td>TestBinaryPatch</td><td>PASS</td><td>0.585</td><td>97</td><td><details><summary>Output</summary><pre>TestBinaryPatch
+</pre></details></td></tr>
+<tr class="PASS"><td>TestLoadEditSave</td><td>PASS</td><td>0.019</td><td>7</td><td><details><summary>Output</summary><pre>TestLoadEditSave
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchBasic</td><td>PASS</td><td>0.000</td><td>12</td><td><details><summary>Output</summary><pre>TestSearchBasic
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchEofBounds</td><td>PASS</td><td>0.000</td><td>13</td><td><details><summary>Output</summary><pre>TestSearchEofBounds
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchMismatch</td><td>PASS</td><td>0.000</td><td>10</td><td><details><summary>Output</summary><pre>TestSearchMismatch
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchAcrossBlocks</td><td>PASS</td><td>0.000</td><td>5</td><td><details><summary>Output</summary><pre>TestSearchAcrossBlocks
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchFuzz</td><td>PASS</td><td>0.171</td><td>2</td><td><details><summary>Output</summary><pre>TestSearchFuzz
+  search fuzz: fwd 2400 cases / 0 mismatches, bwd 2400 cases / 1823 found / 0 mismatches
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchBackwardMissedMatch</td><td>PASS</td><td>0.000</td><td>6</td><td><details><summary>Output</summary><pre>TestSearchBackwardMissedMatch
+</pre></details></td></tr>
+<tr class="PASS"><td>TestHexPatternParse</td><td>PASS</td><td>0.000</td><td>74</td><td><details><summary>Output</summary><pre>[TestHexPatternParse]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchWildcard</td><td>PASS</td><td>0.001</td><td>19</td><td><details><summary>Output</summary><pre>TestSearchWildcard
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchWildcardFuzz</td><td>PASS</td><td>0.673</td><td>2</td><td><details><summary>Output</summary><pre>TestSearchWildcardFuzz
+  wildcard search fuzz: 4800 cases / 1866 found / 0 mismatches
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFindAllBasic</td><td>PASS</td><td>0.000</td><td>25</td><td><details><summary>Output</summary><pre>TestFindAllBasic
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFindAllFuzz</td><td>PASS</td><td>2.179</td><td>2</td><td><details><summary>Output</summary><pre>TestFindAllFuzz
+  find all fuzz: 480 cases / 253346 hits / 0 mismatches
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSetByteAt</td><td>PASS</td><td>0.000</td><td>25</td><td><details><summary>Output</summary><pre>TestSetByteAt
+</pre></details></td></tr>
+<tr class="PASS"><td>TestLargeOffsetSeek</td><td>PASS</td><td>0.088</td><td>125</td><td><details><summary>Output</summary><pre>TestLargeOffsetSeek
+</pre></details></td></tr>
+<tr class="PASS"><td>TestLargeOffsetDataOps</td><td>PASS</td><td>0.122</td><td>108</td><td><details><summary>Output</summary><pre>TestLargeOffsetDataOps
+</pre></details></td></tr>
+<tr class="PASS"><td>TestLargeOffsetBulkOps</td><td>PASS</td><td>0.099</td><td>57</td><td><details><summary>Output</summary><pre>TestLargeOffsetBulkOps
+  boundary 2GB
+  boundary 4GB
+</pre></details></td></tr>
+<tr class="SKIP"><td>TestLargeRealData</td><td>SKIP</td><td>0.000</td><td>0</td><td>set STIRLING_CORE_TEST_LARGE=1 to run<details><summary>Output</summary><pre>TestLargeRealData
+  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFileIoStatus</td><td>PASS</td><td>0.028</td><td>63</td><td><details><summary>Output</summary><pre>TestFileIoStatus
+</pre></details></td></tr>
+<tr class="SKIP"><td>TestLargeFileRoundTrip</td><td>SKIP</td><td>0.000</td><td>0</td><td>set STIRLING_CORE_TEST_LARGE=1 to run<details><summary>Output</summary><pre>TestLargeFileRoundTrip
+  skipped (set STIRLING_CORE_TEST_LARGE=1 to run)
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsCodec</td><td>PASS</td><td>0.000</td><td>56</td><td><details><summary>Output</summary><pre>TestSettingsCodec
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsCodecWide</td><td>PASS</td><td>0.000</td><td>53</td><td><details><summary>Output</summary><pre>TestSettingsCodecWide
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsMigration</td><td>PASS</td><td>0.000</td><td>29</td><td><details><summary>Output</summary><pre>TestSettingsMigration
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsStoreUtf8</td><td>PASS</td><td>0.000</td><td>16</td><td><details><summary>Output</summary><pre>TestSettingsStoreUtf8
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsStoreValueEscape</td><td>PASS</td><td>0.000</td><td>17</td><td><details><summary>Output</summary><pre>TestSettingsStoreValueEscape
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkFileRoundTrip</td><td>PASS</td><td>0.000</td><td>9</td><td><details><summary>Output</summary><pre>[TestMarkFileRoundTrip]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkFileEmptyAndComments</td><td>PASS</td><td>0.000</td><td>10</td><td><details><summary>Output</summary><pre>[TestMarkFileEmptyAndComments]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkFileRejects</td><td>PASS</td><td>0.000</td><td>9</td><td><details><summary>Output</summary><pre>[TestMarkFileRejects]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkFileHugeDecimals</td><td>PASS</td><td>0.000</td><td>15</td><td><details><summary>Output</summary><pre>[TestMarkFileHugeDecimals]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkListRoundTrip</td><td>PASS</td><td>0.000</td><td>8</td><td><details><summary>Output</summary><pre>[TestMarkListRoundTrip]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestMarkListLimitAndRejects</td><td>PASS</td><td>0.001</td><td>11</td><td><details><summary>Output</summary><pre>[TestMarkListLimitAndRejects]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsStoreIni</td><td>PASS</td><td>0.000</td><td>24</td><td><details><summary>Output</summary><pre>TestSettingsStoreIni
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsStoreChangeLog</td><td>PASS</td><td>0.000</td><td>12</td><td><details><summary>Output</summary><pre>TestSettingsStoreChangeLog
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsFileMergedSave</td><td>PASS</td><td>0.088</td><td>17</td><td><details><summary>Output</summary><pre>TestSettingsFileMergedSave
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsFileConcurrentSave</td><td>PASS</td><td>0.457</td><td>11</td><td><details><summary>Output</summary><pre>TestSettingsFileConcurrentSave
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsFileErrors</td><td>PASS</td><td>0.188</td><td>50</td><td><details><summary>Output</summary><pre>TestSettingsFileErrors
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFolderToReveal</td><td>PASS</td><td>0.000</td><td>17</td><td><details><summary>Output</summary><pre>[TestFolderToReveal]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSettingsStoreBinary</td><td>PASS</td><td>0.000</td><td>8</td><td><details><summary>Output</summary><pre>TestSettingsStoreBinary
+</pre></details></td></tr>
+<tr class="PASS"><td>TestCp932Text</td><td>PASS</td><td>0.000</td><td>30</td><td><details><summary>Output</summary><pre>TestCp932Text
+</pre></details></td></tr>
+<tr class="PASS"><td>TestCp932LeadByte</td><td>PASS</td><td>0.000</td><td>780</td><td><details><summary>Output</summary><pre>TestCp932LeadByte
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFormatStructCharArrayCp932</td><td>PASS</td><td>0.000</td><td>15</td><td><details><summary>Output</summary><pre>[TestFormatStructCharArrayCp932]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestFormatStructCharArrayW</td><td>PASS</td><td>0.000</td><td>28</td><td><details><summary>Output</summary><pre>[TestFormatStructCharArrayW]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStructDefParse</td><td>PASS</td><td>0.000</td><td>28</td><td><details><summary>Output</summary><pre>[TestStructDefParse]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStructScalarFormat</td><td>PASS</td><td>0.000</td><td>64</td><td><details><summary>Output</summary><pre>[TestStructScalarFormat]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStructScalarEncode</td><td>PASS</td><td>0.000</td><td>98</td><td><details><summary>Output</summary><pre>[TestStructScalarEncode]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStructTree</td><td>PASS</td><td>0.000</td><td>65</td><td><details><summary>Output</summary><pre>[TestStructTree]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestHexTextParse</td><td>PASS</td><td>0.000</td><td>71</td><td><details><summary>Output</summary><pre>[TestHexTextParse]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestChecksum</td><td>PASS</td><td>0.001</td><td>72</td><td></td></tr>
+<tr class="PASS"><td>TestUtf8Text</td><td>PASS</td><td>0.000</td><td>113</td><td><details><summary>Output</summary><pre>[TestUtf8Text]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestUtf16Text</td><td>PASS</td><td>0.000</td><td>62</td><td><details><summary>Output</summary><pre>[TestUtf16Text]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestClipboardUtil</td><td>PASS</td><td>0.000</td><td>24</td><td><details><summary>Output</summary><pre>[TestClipboardUtil]
+</pre></details></td></tr>
+<tr class="SKIP"><td>TestClipboardTransferOs</td><td>SKIP</td><td>0.000</td><td>0</td><td>set STIRLING_CORE_TEST_OS=1 to run (it replaces the clipboard)<details><summary>Output</summary><pre>[TestClipboardTransferOs]
+  skipped (set STIRLING_CORE_TEST_OS=1 to run (it replaces the clipboard))
+</pre></details></td></tr>
+<tr class="PASS"><td>TestUndoBudget</td><td>PASS</td><td>0.000</td><td>18</td><td><details><summary>Output</summary><pre>[TestUndoBudget]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestDeleteRange</td><td>PASS</td><td>4.279</td><td>1053</td><td><details><summary>Output</summary><pre>[TestDeleteRange]
+</pre></details></td></tr>
+<tr class="PASS"><td>TestWriteAndFillRange</td><td>PASS</td><td>0.001</td><td>29</td><td><details><summary>Output</summary><pre>TestWriteAndFillRange
+</pre></details></td></tr>
+<tr class="PASS"><td>TestSearchForwardRange</td><td>PASS</td><td>0.000</td><td>17</td><td><details><summary>Output</summary><pre>TestSearchForwardRange
+</pre></details></td></tr>
+<tr class="PASS"><td>TestEditFuzzMixed</td><td>PASS</td><td>0.507</td><td>248</td><td><details><summary>Output</summary><pre>TestEditFuzzMixed
+  mixed fuzz: 696719 bytes, 115 blocks, ops ib=1013 in=1014 db=963 dr=1001 wr=992 fi=1017
+</pre></details></td></tr>
+<tr class="PASS"><td>TestCursorAbsCacheAfterEdit</td><td>PASS</td><td>0.001</td><td>177</td><td><details><summary>Output</summary><pre>TestCursorAbsCacheAfterEdit
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStreamFileWriter</td><td>PASS</td><td>0.106</td><td>41</td><td><details><summary>Output</summary><pre>TestStreamFileWriter
+</pre></details></td></tr>
+<tr class="PASS"><td>TestBinaryPatchIoFaults</td><td>PASS</td><td>0.304</td><td>45</td><td><details><summary>Output</summary><pre>TestBinaryPatchIoFaults
+</pre></details></td></tr>
+<tr class="PASS"><td>TestStreamFileWriterFaults</td><td>PASS</td><td>0.109</td><td>76</td><td><details><summary>Output</summary><pre>TestStreamFileWriterFaults
+</pre></details></td></tr>
+<tr class="PASS"><td>TestBlockFileIoReadFaults</td><td>PASS</td><td>0.061</td><td>150</td><td><details><summary>Output</summary><pre>TestBlockFileIoReadFaults
+</pre></details></td></tr>
+<tr class="PASS"><td>TestAtomicSave</td><td>PASS</td><td>0.223</td><td>53</td><td><details><summary>Output</summary><pre>TestAtomicSave
+</pre></details></td></tr>
+<tr class="PASS"><td>TestBgrepNotify</td><td>PASS</td><td>0.000</td><td>12</td><td><details><summary>Output</summary><pre>TestBgrepNotify
+</pre></details></td></tr>
+<tr class="PASS"><td>TestAllocFailureRollback</td><td>PASS</td><td>0.012</td><td>99</td><td><details><summary>Output</summary><pre>TestAllocFailureRollback
+</pre></details></td></tr>
+</tbody></table></html>
