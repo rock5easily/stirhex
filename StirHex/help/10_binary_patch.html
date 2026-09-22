@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10. バイナリパッチ - StirHex ヘルプ</title>
+<style>
+:root { color-scheme: light; }
+body { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; color: #182433;
+       background: #fff; font-family: "Yu Gothic UI", "Meiryo", sans-serif; line-height: 1.75; }
+h1, h2, h3, h4 { color: #073e69; line-height: 1.4; }
+h1 { border-bottom: 2px solid #19bad2; padding-bottom: .3rem; }
+h2 { margin-top: 2.4rem; border-bottom: 1px solid #cfe2ee; padding-bottom: .2rem; }
+h3 { margin-top: 1.8rem; }
+code { background: #edf4f8; padding: .1rem .3rem; font-family: "Consolas", monospace; }
+pre { background: #edf4f8; padding: .8rem 1rem; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #cfe2ee; padding: .35rem .7rem; text-align: left; vertical-align: top; }
+th { background: #f0fbfd; }
+blockquote { border-left: .3rem solid #19bad2; margin: 1rem 0; padding: .5rem 1rem;
+             background: #f0fbfd; }
+hr { border: none; border-top: 1px solid #cfe2ee; margin: 2rem 0; }
+a { color: #0b6ba8; }
+nav.toc { background: #f7fafc; border: 1px solid #e0eaf1; padding: .8rem 1.2rem; margin: 1.5rem 0; }
+nav.toc ul { margin: .3rem 0; padding-left: 1.2rem; }
+nav.chapters { margin: 2.5rem 0 0; padding-top: 1rem; border-top: 1px solid #cfe2ee;
+               display: flex; justify-content: space-between; gap: 1rem; font-size: .95rem; }
+.home { font-size: .95rem; margin-bottom: 1rem; }
+.wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="home"><a href="index.html">StirHex ヘルプ 目次</a></div><nav class="toc"><strong>このページの内容</strong><ul><li><a href="#パッチを作成する">パッチを作成する</a></li><li><a href="#パッチを適用する">パッチを適用する</a></li><li><a href="#共通の制限">共通の制限</a></li></ul></nav><h1>10. バイナリパッチ</h1>
+<p>バイナリパッチは、ディスク上のファイル全体を比較して差分ファイルを作成し、元ファイルへ差分を適用する機能です。開いている文書の未保存内容は対象になりません。</p>
+<h2 id="パッチを作成する">パッチを作成する</h2>
+<ol><li>[ツール]→[パッチを作成]を選びます。文書を開いていなくても実行できます。</li><li>[元ファイル]へ変更前のディスク上のファイルを指定します。</li><li>[変更後ファイル]へ変更後のディスク上のファイルを指定します。</li><li>[形式]で BPS または IPS を選びます。</li><li>[パッチファイル]へ保存先を指定します。形式に応じて保存ダイアログの既定の拡張子が変わります。</li><li>[作成]を押します。</li></ol>
+<p>BPS は既定の形式で、ファイルサイズが変わる差分にも対応します。元ファイルの内容とサイズを検証できる情報をパッチへ含めます。</p>
+<p>互換性を重視し、IPS の生成は元ファイルと変更後ファイルが同じサイズで、双方が16MiB以下の場合に制限しています。条件を満たさない場合は BPS を使用してください。IPS は通常レコードと RLE（同じ値の繰り返し）を使って作成し、EOF の後ろに結果長を指定する拡張は生成しません。</p>
+<h2 id="パッチを適用する">パッチを適用する</h2>
+<ol><li>[ツール]→[パッチを適用]を選びます。文書を開いていなくても実行できます。</li><li>[元ファイル]へパッチ適用前のディスク上のファイルを指定します。</li><li>[パッチファイル]へ IPS または BPS のパッチを指定します。</li><li>[結果ファイル]へ出力先を指定します。</li><li>適用後に結果を開く場合は、[成功時に結果ファイルを開く]を有効にします。</li><li>[適用]を押します。</li></ol>
+<p>パッチ形式はファイルのマジックから自動判別します。[形式]の表示は選択できません。IPS は元ファイルの内容を検証しないため、ダイアログに注意が表示されます。元ファイルを確認してから[適用]を実行してください。IPS は16MiBを超える元ファイルにも適用できます。異なるサイズの出力や、EOFの後ろに拡張長を指定したパッチにも対応します。</p>
+<p>BPS は4種類の命令を処理し、元ファイル・パッチ・作成結果のCRCを検証します。検証に失敗した場合、結果ファイルは公開されません。</p>
+<h2 id="共通の制限">共通の制限</h2>
+<ul><li>入力はディスク上のファイル全体です。編集中で未保存の内容、選択範囲、マーク、アンドゥ履歴は使いません。</li><li>パッチ作成では[パッチファイル]の保存先を元ファイル、変更後ファイル、または開いている文書と同じファイルへ指定できません。パッチ適用では[結果ファイル]の保存先を元ファイル、パッチファイル、または開いている文書と同じファイルへ指定できません。ハードリンクも同じファイルとして扱います。</li><li>結果は一時ファイルへ作成してから保存先へ転送します。転送中は[中止]でキャンセルできます。保存先への最終確定中は中止できません。</li><li>保存先のファイルが既に存在する場合は、[適用]または[作成]の開始時に上書き確認が表示されます。</li><li>適用後に結果を開く操作は通常のファイルオープンです。元ファイルや開いている文書の内容、マーク、アンドゥ履歴は変更しません。</li><li>保存先への置換に特定の障害が起きて回復用ファイルのパスが表示された場合は、そのファイルを自動削除しません。メッセージに表示された場所から手動で回復してください。</li></ul>
+<p>ファイルサイズが大きい場合は処理に時間がかかります。現在の制限は次のとおりです。</p>
+<ul><li>IPS の生成は、元ファイルと変更後ファイルが同じサイズで、双方16MiB以下です。</li><li>BPS の生成は、元ファイルと変更後ファイルがそれぞれ256MiB以下です。</li><li>IPS または BPS の適用は、元ファイルと結果ファイルがそれぞれ512MiB以下、パッチファイルが512MiB以下です。IPS は16MiBを超える元ファイルにも適用できます。</li><li>BPS の命令数は約1600万、IPS のレコード数は約400万です。IPS の展開データ、BPSの探索メモリ、処理用一時ファイル（1GiB）にも上限があります。</li></ul>
+<p>これらの制限を超える場合や、必要なメモリ・ディスク領域を確保できない場合は処理を実行できません。進捗表示が更新されている間は、ダイアログを閉じずに完了または[中止]を待ちます。</p><nav class="chapters"><span><a href="09_credits.html">&laquo; 9. クレジット・免責</a></span><span></span></nav>
+</body>
+</html>

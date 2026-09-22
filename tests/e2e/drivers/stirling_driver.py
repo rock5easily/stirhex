@@ -2383,6 +2383,14 @@ class StirlingDriver:
                 result.append((_control_text(child), child, views[0]))
         return result
 
+    def activate_mdi_child(self, child_hwnd: int):
+        """Activate one of the MDI child windows returned by get_mdi_views()."""
+        mdi = self.get_mdi_client()
+        if not mdi:
+            raise RuntimeError("MDI client not found")
+        win32gui.SendMessage(mdi, 0x0222, child_hwnd, 0)  # WM_MDIACTIVATE
+        time.sleep(0.2)
+
     def active_mdi_title(self) -> str:
         # EnumChildWindows does not return handles; query the MDI client explicitly.
         mdi_clients: list[int] = []
@@ -2410,6 +2418,19 @@ class StirlingDriver:
             win32gui.GetDlgItem(dialog_hwnd, IDC_SYNC_REGISTERED)
         )
         return candidates, registered
+
+    def sync_scroll_select_candidate(self, dialog_hwnd: int, title_fragment: str):
+        """Select a synchronization candidate by a unique title fragment."""
+        box = win32gui.GetDlgItem(dialog_hwnd, IDC_SYNC_CANDIDATE)
+        matches = [
+            index for index, title in enumerate(_listbox_texts(box))
+            if title_fragment in title
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"sync candidate {title_fragment!r} is not unique: {matches}"
+            )
+        win32gui.SendMessage(box, win32con.LB_SETCURSEL, matches[0], 0)
 
     def open_print_range_dialog(self) -> tuple[int, int]:
         self.post_command(ID_PRINT_RANGE)

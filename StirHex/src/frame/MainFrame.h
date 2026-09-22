@@ -114,5 +114,8 @@ protected:
     afx_msg void OnSettingsEnv();
     // 拡張子別設定（0x8051）: 拡張子レコード一覧を編集し、全ビューへ再適用＋保存。
     afx_msg void OnSettingsExt();
+    // バイナリパッチの作成／適用（Issue #259）。文書がなくても起動できる。
+    afx_msg void OnBinaryPatchCreate();
+    afx_msg void OnBinaryPatchApply();
     DECLARE_MESSAGE_MAP()
 };

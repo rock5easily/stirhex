@@ -21,6 +21,7 @@
 #include "../../StirHex/src/core/FindAll.h"
 #include "../../StirHex/src/core/Utf8Text.h"
 #include "../../StirHex/src/core/Utf16Text.h"
+#include "../../StirHex/src/core/BinaryPatch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -614,6 +615,496 @@ static void TestFileRoundTrip() {
 
         fs::remove(in);
         fs::remove(out);
+    }
+}
+
+static void AppendBpsVar(std::vector<unsigned char>& bytes, std::uint64_t value) {
+    for (;;) {
+        unsigned char part = static_cast<unsigned char>(value & 0x7Fu);
+        value >>= 7;
+        if (value == 0) {
+            bytes.push_back(static_cast<unsigned char>(part | 0x80u));
+            return;
+        }
+        bytes.push_back(part);
+        --value;
+    }
+}
+
+static std::uint32_t TestCrc32(const unsigned char* data, size_t size) {
+    std::uint32_t crc = 0xffffffffu;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        }
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static void AppendLe32(std::vector<unsigned char>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<unsigned char>(value & 0xffu));
+    bytes.push_back(static_cast<unsigned char>((value >> 8) & 0xffu));
+    bytes.push_back(static_cast<unsigned char>((value >> 16) & 0xffu));
+    bytes.push_back(static_cast<unsigned char>((value >> 24) & 0xffu));
+}
+
+static void AppendBe16(std::vector<unsigned char>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<unsigned char>((value >> 8) & 0xffu));
+    bytes.push_back(static_cast<unsigned char>(value & 0xffu));
+}
+
+static void AppendBe24(std::vector<unsigned char>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<unsigned char>((value >> 16) & 0xffu));
+    bytes.push_back(static_cast<unsigned char>((value >> 8) & 0xffu));
+    bytes.push_back(static_cast<unsigned char>(value & 0xffu));
+}
+
+static void TestBinaryPatch() {
+    TestPrintf("TestBinaryPatch\n");
+    using stirling::ApplyBinaryPatch;
+    using stirling::BinaryPatchFormat;
+    using stirling::BinaryPatchStatus;
+    using stirling::GenerateBinaryPatch;
+
+    const std::vector<unsigned char> sourceData = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+    std::vector<unsigned char> targetData = sourceData;
+    targetData[2] = 0xa0;
+    targetData[3] = 0xa1;
+    targetData[12] = 0xf0;
+    const fs::path source = TempFile("patch_source");
+    const fs::path target = TempFile("patch_target");
+    const fs::path ips = TempFile("patch_ips");
+    const fs::path bps = TempFile("patch_bps");
+    const fs::path ipsOut = TempFile("patch_ips_out");
+    const fs::path bpsOut = TempFile("patch_bps_out");
+    WriteFile(source, sourceData);
+    WriteFile(target, targetData);
+
+    const auto ipsResult = GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                                ips.wstring().c_str(), BinaryPatchFormat::kIps);
+    CHECK(ipsResult.Ok(), "basic IPS generation succeeds");
+    const std::vector<unsigned char> ipsBytes = ReadFileBytes(ips);
+    CHECK(ipsBytes.size() >= 8 && std::memcmp(ipsBytes.data(), "PATCH", 5) == 0,
+          "generated IPS has PATCH header");
+    CHECK(ipsBytes.size() >= 3 && std::memcmp(ipsBytes.data() + ipsBytes.size() - 3, "EOF", 3) == 0,
+          "generated IPS has standard EOF without truncation extension");
+    const auto ipsApply = ApplyBinaryPatch(source.wstring().c_str(), ips.wstring().c_str(),
+                                            ipsOut.wstring().c_str());
+    CHECK(ipsApply.Ok(), "generated IPS applies");
+    CHECK(ReadFileBytes(ipsOut) == targetData, "IPS round trip bytes");
+
+    // Basic IPS splits a 65,536-byte changed run at the 16-bit record limit.
+    const fs::path splitSource = TempFile("patch_ips_split_source");
+    const fs::path splitTarget = TempFile("patch_ips_split_target");
+    const fs::path splitPatch = TempFile("patch_ips_split_patch");
+    const fs::path splitOutput = TempFile("patch_ips_split_output");
+    const std::vector<unsigned char> splitBefore(65536, 0x10);
+    std::vector<unsigned char> splitAfter(65536, 0xe1);
+    for (size_t i = 0; i < splitAfter.size(); i += 2) { splitAfter[i] = 0xe2; }
+    WriteFile(splitSource, splitBefore);
+    WriteFile(splitTarget, splitAfter);
+    CHECK(GenerateBinaryPatch(splitSource.wstring().c_str(), splitTarget.wstring().c_str(),
+                              splitPatch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
+          "IPS generates a 65535-byte record split");
+    const std::vector<unsigned char> splitBytes = ReadFileBytes(splitPatch);
+    CHECK(splitBytes.size() >= 5 + 5 + 65535 + 5 + 1 + 3,
+          "split IPS contains both records");
+    CHECK(splitBytes.size() >= 10 && splitBytes[8] == 0xff && splitBytes[9] == 0xff,
+          "first IPS record uses the maximum normal length");
+    CHECK(ApplyBinaryPatch(splitSource.wstring().c_str(), splitPatch.wstring().c_str(),
+                           splitOutput.wstring().c_str()).Ok() &&
+          ReadFileBytes(splitOutput) == splitAfter,
+          "split IPS applies byte-identically");
+
+    // Long repeated runs use the interoperable IPS RLE record form.
+    const fs::path rleSource = TempFile("patch_ips_rle_source");
+    const fs::path rleTarget = TempFile("patch_ips_rle_target");
+    const fs::path rlePatch = TempFile("patch_ips_rle_patch");
+    const fs::path rleOutput = TempFile("patch_ips_rle_output");
+    std::vector<unsigned char> rleBefore(12000, 0x11);
+    std::vector<unsigned char> rleAfter = rleBefore;
+    std::fill(rleAfter.begin() + 100, rleAfter.begin() + 1100,
+              static_cast<unsigned char>(0xcc));
+    WriteFile(rleSource, rleBefore);
+    WriteFile(rleTarget, rleAfter);
+    CHECK(GenerateBinaryPatch(rleSource.wstring().c_str(), rleTarget.wstring().c_str(),
+                              rlePatch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
+          "IPS generates RLE records");
+    const std::vector<unsigned char> rleBytes = ReadFileBytes(rlePatch);
+    bool hasRleRecord = false;
+    for (size_t i = 5; i + 7 < rleBytes.size(); ++i) {
+        if (rleBytes[i + 3] == 0 && rleBytes[i + 4] == 0 &&
+            (static_cast<unsigned>(rleBytes[i + 5]) << 8 | rleBytes[i + 6]) != 0) {
+            hasRleRecord = true;
+            break;
+        }
+    }
+    CHECK(hasRleRecord, "generated IPS contains an RLE record");
+    CHECK(ApplyBinaryPatch(rleSource.wstring().c_str(), rlePatch.wstring().c_str(),
+                           rleOutput.wstring().c_str()).Ok() &&
+          ReadFileBytes(rleOutput) == rleAfter,
+          "generated IPS RLE applies byte-identically");
+
+    // A changed run beginning at the literal EOF marker offset is shifted one
+    // byte earlier so every standard IPS reader sees a real record.
+    const fs::path collisionSource = TempFile("patch_ips_eof_source");
+    const fs::path collisionTarget = TempFile("patch_ips_eof_target");
+    const fs::path collisionPatch = TempFile("patch_ips_eof_patch");
+    const fs::path collisionOutput = TempFile("patch_ips_eof_output");
+    const size_t eofOffset = 0x454f46;
+    std::vector<unsigned char> collisionBefore(eofOffset + 65536, 0);
+    std::vector<unsigned char> collisionAfter = collisionBefore;
+    for (size_t i = 0; i < 65536; ++i) {
+        collisionAfter[eofOffset + i] = (i & 1) ? 0xa5 : 0xa6;
+    }
+    WriteFile(collisionSource, collisionBefore);
+    WriteFile(collisionTarget, collisionAfter);
+    CHECK(GenerateBinaryPatch(collisionSource.wstring().c_str(), collisionTarget.wstring().c_str(),
+                              collisionPatch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
+          "IPS generation handles EOF-marker offset");
+    const std::vector<unsigned char> collisionBytes = ReadFileBytes(collisionPatch);
+    CHECK(collisionBytes.size() >= 8 &&
+          !(collisionBytes[5] == 'E' && collisionBytes[6] == 'O' && collisionBytes[7] == 'F'),
+          "IPS generated record does not collide with EOF marker");
+    CHECK(ApplyBinaryPatch(collisionSource.wstring().c_str(), collisionPatch.wstring().c_str(),
+                           collisionOutput.wstring().c_str()).Ok() &&
+          ReadFileBytes(collisionOutput) == collisionAfter,
+          "EOF-marker-offset IPS applies byte-identically");
+
+    const fs::path tooLargeSource = TempFile("patch_ips_too_large_source");
+    const fs::path tooLargeTarget = TempFile("patch_ips_too_large_target");
+    const fs::path tooLargePatch = TempFile("patch_ips_too_large_patch");
+    const size_t ipsGenerationLimit = static_cast<size_t>(
+        stirling::BinaryPatchLimits::kIpsGenerateMaxBytes) + 1;
+    std::vector<unsigned char> tooLarge(ipsGenerationLimit, 0x00);
+    WriteFile(tooLargeSource, tooLarge);
+    tooLarge.back() = 0x01;
+    WriteFile(tooLargeTarget, tooLarge);
+    const auto tooLargeResult = GenerateBinaryPatch(tooLargeSource.wstring().c_str(),
+                                                     tooLargeTarget.wstring().c_str(),
+                                                     tooLargePatch.wstring().c_str(),
+                                                     BinaryPatchFormat::kIps);
+    CHECK(tooLargeResult.status == BinaryPatchStatus::kLimitExceeded &&
+          !fs::exists(tooLargePatch), "IPS rejects generation above 16 MiB");
+
+    const fs::path ipsEofCollision = TempFile("patch_ips_eof_collision");
+    const fs::path ipsEofCollisionOut = TempFile("patch_ips_eof_collision_out");
+    std::vector<unsigned char> eofCollision = {'P', 'A', 'T', 'C', 'H',
+                                                'E', 'O', 'F', 0, 1, 0x7f,
+                                                'E', 'O', 'F'};
+    WriteFile(ipsEofCollision, eofCollision);
+    const auto eofCollisionResult = ApplyBinaryPatch(source.wstring().c_str(),
+                                                      ipsEofCollision.wstring().c_str(),
+                                                      ipsEofCollisionOut.wstring().c_str());
+    CHECK(!eofCollisionResult.Ok() && !fs::exists(ipsEofCollisionOut),
+          "IPS EOF marker collision is rejected safely");
+
+    const auto bpsResult = GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                                bps.wstring().c_str(), BinaryPatchFormat::kBps);
+    CHECK(bpsResult.Ok(), "BPS generation succeeds");
+    const std::vector<unsigned char> bpsBytes = ReadFileBytes(bps);
+    CHECK(bpsBytes.size() >= 16 && std::memcmp(bpsBytes.data(), "BPS1", 4) == 0,
+          "generated BPS has BPS1 header");
+    const auto bpsApply = ApplyBinaryPatch(source.wstring().c_str(), bps.wstring().c_str(),
+                                            bpsOut.wstring().c_str());
+    CHECK(bpsApply.Ok(), "generated BPS applies");
+    CHECK(ReadFileBytes(bpsOut) == targetData, "BPS round trip bytes");
+
+    // Every truncated prefix of either format is rejected without publishing.
+    for (const auto& patchAndPrefix : {std::pair<const std::vector<unsigned char>*, const char*>{&ipsBytes, "ips"},
+                                       {&bpsBytes, "bps"}}) {
+        for (size_t prefix = 0; prefix < patchAndPrefix.first->size(); ++prefix) {
+            const fs::path truncated = TempFile((std::string("patch_truncated_") + patchAndPrefix.second).c_str());
+            const fs::path truncatedOut = TempFile("patch_truncated_out");
+            WriteFile(truncated, std::vector<unsigned char>(patchAndPrefix.first->begin(),
+                                                             patchAndPrefix.first->begin() + prefix));
+            const auto truncatedResult = ApplyBinaryPatch(source.wstring().c_str(),
+                                                           truncated.wstring().c_str(),
+                                                           truncatedOut.wstring().c_str());
+            CHECK(!truncatedResult.Ok() && !fs::exists(truncatedOut),
+                  "truncated binary patch is rejected without output");
+            std::error_code ec;
+            fs::remove(truncated, ec);
+            fs::remove(truncatedOut, ec);
+        }
+    }
+    const fs::path shortIps = TempFile("patch_short_ips");
+    const fs::path shortBps = TempFile("patch_short_bps");
+    const fs::path shortOut = TempFile("patch_short_out");
+    WriteFile(shortIps, std::vector<unsigned char>{'P', 'A', 'T', 'C', 'H'});
+    const auto shortIpsResult = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  shortIps.wstring().c_str(),
+                                                  shortOut.wstring().c_str());
+    CHECK(shortIpsResult.status == BinaryPatchStatus::kInvalidPatch,
+          "short IPS is invalid rather than over-limit");
+    WriteFile(shortBps, std::vector<unsigned char>{'B', 'P', 'S', '1'});
+    const auto shortBpsResult = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  shortBps.wstring().c_str(),
+                                                  shortOut.wstring().c_str());
+    CHECK(shortBpsResult.status == BinaryPatchStatus::kInvalidPatch,
+          "short BPS is invalid rather than over-limit");
+
+    stirling::BinaryPatchOptions cancelledOptions;
+    cancelledOptions.progress = [](FileOffset, FileOffset) { return false; };
+    const fs::path cancelledPatch = TempFile("patch_cancelled");
+    const auto cancelledResult = GenerateBinaryPatch(source.wstring().c_str(),
+                                                      target.wstring().c_str(),
+                                                      cancelledPatch.wstring().c_str(),
+                                                      BinaryPatchFormat::kBps,
+                                                      cancelledOptions);
+    CHECK(cancelledResult.status == BinaryPatchStatus::kCancelled &&
+          !fs::exists(cancelledPatch), "cancelled generation leaves no patch");
+
+    stirling::BinaryPatchOptions tinyTempOptions;
+    tinyTempOptions.limits.maxTemporaryBytes = 1;
+    const fs::path tinyTempPatch = TempFile("patch_tiny_temp");
+    const auto tinyTempResult = GenerateBinaryPatch(source.wstring().c_str(),
+                                                     target.wstring().c_str(),
+                                                     tinyTempPatch.wstring().c_str(),
+                                                     BinaryPatchFormat::kBps,
+                                                     tinyTempOptions);
+    CHECK(tinyTempResult.status == BinaryPatchStatus::kLimitExceeded &&
+          !fs::exists(tinyTempPatch), "temporary disk budget is enforced");
+
+    // IPS: normal, RLE, duplicate record (last wins), zero-filled holes, and
+    // the supported EOF-after-3-byte target-size extension.
+    std::vector<unsigned char> ipsFixture = {'P', 'A', 'T', 'C', 'H'};
+    AppendBe24(ipsFixture, 2); AppendBe16(ipsFixture, 2);
+    ipsFixture.push_back(0xaa); ipsFixture.push_back(0xbb);
+    AppendBe24(ipsFixture, 2); AppendBe16(ipsFixture, 0);
+    AppendBe16(ipsFixture, 3); ipsFixture.push_back(0xcc);
+    AppendBe24(ipsFixture, 10); AppendBe16(ipsFixture, 1); ipsFixture.push_back(0xee);
+    ipsFixture.push_back('E'); ipsFixture.push_back('O'); ipsFixture.push_back('F');
+    AppendBe24(ipsFixture, 12);
+    const fs::path ipsFixturePath = TempFile("patch_ips_fixture");
+    const fs::path ipsFixtureOut = TempFile("patch_ips_fixture_out");
+    const fs::path ipsHoleSource = TempFile("patch_ips_hole_source");
+    const std::vector<unsigned char> ipsHoleData = {1, 2, 3, 4, 5, 6};
+    WriteFile(ipsHoleSource, ipsHoleData);
+    WriteFile(ipsFixturePath, ipsFixture);
+    const auto fixtureResult = ApplyBinaryPatch(ipsHoleSource.wstring().c_str(),
+                                                 ipsFixturePath.wstring().c_str(),
+                                                 ipsFixtureOut.wstring().c_str());
+    CHECK(fixtureResult.Ok(), "IPS fixture applies");
+    std::vector<unsigned char> fixtureExpected = ipsHoleData;
+    fixtureExpected.resize(12, 0);
+    fixtureExpected[2] = fixtureExpected[3] = fixtureExpected[4] = 0xcc;
+    fixtureExpected[10] = 0xee;
+    CHECK(ReadFileBytes(ipsFixtureOut) == fixtureExpected,
+          "IPS RLE/duplicate/hole/extension semantics");
+
+    const fs::path overlapSource = TempFile("patch_ips_overlap_source");
+    const fs::path overlapPatch = TempFile("patch_ips_overlap_patch");
+    const fs::path overlapOut = TempFile("patch_ips_overlap_out");
+    const std::vector<unsigned char> overlapSourceBytes(25, 0);
+    std::vector<unsigned char> overlapPatchBytes = {'P', 'A', 'T', 'C', 'H'};
+    AppendBe24(overlapPatchBytes, 10); AppendBe16(overlapPatchBytes, 10);
+    overlapPatchBytes.insert(overlapPatchBytes.end(), 10, 0xaa);
+    AppendBe24(overlapPatchBytes, 5); AppendBe16(overlapPatchBytes, 10);
+    overlapPatchBytes.insert(overlapPatchBytes.end(), 10, 0xbb);
+    overlapPatchBytes.insert(overlapPatchBytes.end(), {'E', 'O', 'F'});
+    WriteFile(overlapSource, overlapSourceBytes);
+    WriteFile(overlapPatch, overlapPatchBytes);
+    std::vector<unsigned char> overlapExpected = overlapSourceBytes;
+    std::fill(overlapExpected.begin() + 5, overlapExpected.begin() + 15,
+              static_cast<unsigned char>(0xbb));
+    std::fill(overlapExpected.begin() + 15, overlapExpected.begin() + 20,
+              static_cast<unsigned char>(0xaa));
+    CHECK(ApplyBinaryPatch(overlapSource.wstring().c_str(), overlapPatch.wstring().c_str(),
+                           overlapOut.wstring().c_str()).Ok() &&
+          ReadFileBytes(overlapOut) == overlapExpected,
+          "IPS overlapping records preserve file order (last wins)");
+
+    const fs::path ipsShrink = TempFile("patch_ips_shrink");
+    const fs::path ipsShrinkOut = TempFile("patch_ips_shrink_out");
+    std::vector<unsigned char> shrinkFixture = {'P', 'A', 'T', 'C', 'H',
+                                                 0, 0, 10, 0, 4, 0xde, 0xad, 0xbe, 0xef,
+                                                 'E', 'O', 'F', 0, 0, 4};
+    WriteFile(ipsShrink, shrinkFixture);
+    const auto shrinkResult = ApplyBinaryPatch(source.wstring().c_str(), ipsShrink.wstring().c_str(),
+                                                ipsShrinkOut.wstring().c_str());
+    CHECK(shrinkResult.Ok() && ReadFileBytes(ipsShrinkOut) ==
+          std::vector<unsigned char>(sourceData.begin(), sourceData.begin() + 4),
+          "IPS extension can truncate the source");
+
+    // A hand-written BPS exercises SourceRead, TargetRead, SourceCopy and
+    // overlapping TargetCopy, including the BPS patch CRC coverage rule.
+    const std::vector<unsigned char> bpsSource = {'A','B','C','D','E','F','G','H'};
+    const std::vector<unsigned char> bpsTarget = {'A','B','X','A','B','A','B','A','B'};
+    std::vector<unsigned char> bpsFixture = {'B','P','S','1'};
+    AppendBpsVar(bpsFixture, bpsSource.size());
+    AppendBpsVar(bpsFixture, bpsTarget.size());
+    AppendBpsVar(bpsFixture, 0);
+    AppendBpsVar(bpsFixture, 4);  // SourceRead length 2
+    AppendBpsVar(bpsFixture, 1);  // TargetRead length 1
+    bpsFixture.push_back('X');
+    AppendBpsVar(bpsFixture, 6);  // SourceCopy length 2
+    AppendBpsVar(bpsFixture, 0);  // source-relative offset 0
+    AppendBpsVar(bpsFixture, 15); // TargetCopy length 4
+    AppendBpsVar(bpsFixture, 6);  // target-relative delta +3: distance 2, overlap
+    AppendLe32(bpsFixture, TestCrc32(bpsSource.data(), bpsSource.size()));
+    AppendLe32(bpsFixture, TestCrc32(bpsTarget.data(), bpsTarget.size()));
+    AppendLe32(bpsFixture, TestCrc32(bpsFixture.data(), bpsFixture.size()));
+    const fs::path bpsFixtureSource = TempFile("patch_bps_fixture_source");
+    const fs::path bpsFixturePath = TempFile("patch_bps_fixture");
+    const fs::path bpsFixtureOut = TempFile("patch_bps_fixture_out");
+    WriteFile(bpsFixtureSource, bpsSource);
+    WriteFile(bpsFixturePath, bpsFixture);
+    const auto fixtureBpsResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
+                                                    bpsFixturePath.wstring().c_str(),
+                                                    bpsFixtureOut.wstring().c_str());
+    CHECK(fixtureBpsResult.Ok(), "BPS all-instruction fixture applies");
+    CHECK(ReadFileBytes(bpsFixtureOut) == bpsTarget, "BPS TargetCopy overlap bytes");
+
+    int applyProgressCalls = 0;
+    stirling::BinaryPatchOptions targetCopyCancelOptions;
+    targetCopyCancelOptions.progress = [&applyProgressCalls](FileOffset, FileOffset) {
+        return ++applyProgressCalls < 7;
+    };
+    const fs::path targetCopyCancelledOut = TempFile("patch_bps_targetcopy_cancelled");
+    const auto targetCopyCancelled = ApplyBinaryPatch(
+        bpsFixtureSource.wstring().c_str(), bpsFixturePath.wstring().c_str(),
+        targetCopyCancelledOut.wstring().c_str(), targetCopyCancelOptions);
+    CHECK(targetCopyCancelled.status == BinaryPatchStatus::kCancelled &&
+          !fs::exists(targetCopyCancelledOut),
+          "BPS cancellation during instruction copying leaves no output");
+
+    const size_t largeCopyLength = 2u * 1024u * 1024u;
+    const fs::path largeCopySource = TempFile("patch_bps_large_copy_source");
+    const fs::path largeCopyPatch = TempFile("patch_bps_large_copy_patch");
+    const fs::path largeCopyOut = TempFile("patch_bps_large_copy_out");
+    const std::vector<unsigned char> largeCopySourceBytes = {'A'};
+    const std::vector<unsigned char> largeCopyTarget(largeCopyLength + 1, 'A');
+    std::vector<unsigned char> largeCopyFixture = {'B', 'P', 'S', '1'};
+    AppendBpsVar(largeCopyFixture, largeCopySourceBytes.size());
+    AppendBpsVar(largeCopyFixture, largeCopyTarget.size());
+    AppendBpsVar(largeCopyFixture, 0);
+    AppendBpsVar(largeCopyFixture, 0);  // SourceRead length 1
+    AppendBpsVar(largeCopyFixture, (largeCopyLength * 4) - 1); // TargetCopy
+    AppendBpsVar(largeCopyFixture, 0);
+    AppendLe32(largeCopyFixture, TestCrc32(largeCopySourceBytes.data(), largeCopySourceBytes.size()));
+    AppendLe32(largeCopyFixture, TestCrc32(largeCopyTarget.data(), largeCopyTarget.size()));
+    AppendLe32(largeCopyFixture, TestCrc32(largeCopyFixture.data(), largeCopyFixture.size()));
+    WriteFile(largeCopySource, largeCopySourceBytes);
+    WriteFile(largeCopyPatch, largeCopyFixture);
+    const std::vector<std::wstring> largeCopyEntriesBefore = DirEntryNames(TestTempRoot());
+    stirling::BinaryPatchOptions largeCopyCancelOptions;
+    largeCopyCancelOptions.progress = [](FileOffset processed, FileOffset total) {
+        return total <= 1 || processed < total / 2;
+    };
+    const auto largeCopyCancelled = ApplyBinaryPatch(
+        largeCopySource.wstring().c_str(), largeCopyPatch.wstring().c_str(),
+        largeCopyOut.wstring().c_str(), largeCopyCancelOptions);
+    CHECK(largeCopyCancelled.status == BinaryPatchStatus::kCancelled &&
+          !fs::exists(largeCopyOut) && DirEntryNames(TestTempRoot()) == largeCopyEntriesBefore,
+          "large BPS TargetCopy cancellation cleans temp output");
+
+    // Independently perturb each BPS CRC field: source, target, and patch.
+    const size_t bpsFooter = bpsFixture.size() - 12;
+    for (const size_t crcOffset : {bpsFooter, bpsFooter + 4, bpsFooter + 8}) {
+        std::vector<unsigned char> bad = bpsFixture;
+        bad[crcOffset] ^= 0x01;
+        const fs::path badPath = TempFile("patch_bps_crc_field");
+        const fs::path badOut = TempFile("patch_bps_crc_field_out");
+        WriteFile(badPath, bad);
+        WriteFile(badOut, std::vector<unsigned char>{0xca, 0xfe});
+        const auto badFieldResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
+                                                      badPath.wstring().c_str(),
+                                                      badOut.wstring().c_str());
+        CHECK(!badFieldResult.Ok() && ReadFileBytes(badOut) ==
+              std::vector<unsigned char>({0xca, 0xfe}),
+              "each BPS CRC field mismatch preserves existing output");
+        std::error_code ec;
+        fs::remove(badPath, ec);
+        fs::remove(badOut, ec);
+    }
+
+    // SourceRead outside the source and a future TargetCopy are rejected
+    // before the temporary result can be published.
+    std::vector<unsigned char> rangeBps = {'B', 'P', 'S', '1'};
+    AppendBpsVar(rangeBps, bpsSource.size());
+    AppendBpsVar(rangeBps, bpsSource.size() + 1);
+    AppendBpsVar(rangeBps, 0);
+    AppendBpsVar(rangeBps, (bpsSource.size() * 4) - 4); // SourceRead len source+1
+    AppendLe32(rangeBps, TestCrc32(bpsSource.data(), bpsSource.size()));
+    AppendLe32(rangeBps, 0);
+    AppendLe32(rangeBps, 0);
+    const fs::path rangeBpsPath = TempFile("patch_bps_range");
+    const fs::path rangeBpsOut = TempFile("patch_bps_range_out");
+    WriteFile(rangeBpsPath, rangeBps);
+    const auto rangeResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
+                                               rangeBpsPath.wstring().c_str(),
+                                               rangeBpsOut.wstring().c_str());
+    CHECK(!rangeResult.Ok() && !fs::exists(rangeBpsOut), "BPS SourceRead range is rejected");
+
+    std::vector<unsigned char> futureCopy = {'B', 'P', 'S', '1'};
+    AppendBpsVar(futureCopy, 0);
+    AppendBpsVar(futureCopy, 1);
+    AppendBpsVar(futureCopy, 0);
+    AppendBpsVar(futureCopy, 3);  // TargetCopy length 1
+    AppendBpsVar(futureCopy, 0);
+    AppendLe32(futureCopy, 0);
+    AppendLe32(futureCopy, 0);
+    AppendLe32(futureCopy, 0);
+    const fs::path futureCopyPath = TempFile("patch_bps_future_copy");
+    const fs::path futureCopyOut = TempFile("patch_bps_future_copy_out");
+    const fs::path emptySource = TempFile("patch_bps_empty_source");
+    WriteFile(emptySource, {});
+    WriteFile(futureCopyPath, futureCopy);
+    const auto futureCopyResult = ApplyBinaryPatch(emptySource.wstring().c_str(),
+                                                   futureCopyPath.wstring().c_str(),
+                                                   futureCopyOut.wstring().c_str());
+    CHECK(!futureCopyResult.Ok() && !fs::exists(futureCopyOut), "future BPS TargetCopy is rejected");
+
+    // Bad source/patch CRCs must never publish an output.
+    std::vector<unsigned char> badBps = bpsFixture;
+    badBps.back() ^= 0x01;
+    const fs::path badBpsPath = TempFile("patch_bps_bad_crc");
+    const fs::path badBpsOut = TempFile("patch_bps_bad_crc_out");
+    WriteFile(badBpsOut, std::vector<unsigned char>{0xde, 0xad});
+    WriteFile(badBpsPath, badBps);
+    const auto badResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
+                                             badBpsPath.wstring().c_str(),
+                                             badBpsOut.wstring().c_str());
+    CHECK(!badResult.Ok() && ReadFileBytes(badBpsOut) == std::vector<unsigned char>({0xde, 0xad}),
+          "bad BPS patch CRC is rejected before publish");
+
+    const fs::path wrongSource = TempFile("patch_wrong_source");
+    WriteFile(wrongSource, std::vector<unsigned char>(bpsSource.size(), 0));
+    const fs::path wrongOut = TempFile("patch_wrong_source_out");
+    const auto wrongResult = ApplyBinaryPatch(wrongSource.wstring().c_str(),
+                                               bpsFixturePath.wstring().c_str(),
+                                               wrongOut.wstring().c_str());
+    CHECK(wrongResult.status == BinaryPatchStatus::kSourceMismatch && !fs::exists(wrongOut),
+          "BPS source CRC mismatch is rejected");
+
+    CHECK(ApplyBinaryPatch(source.wstring().c_str(), ips.wstring().c_str(),
+                           source.wstring().c_str()).status == BinaryPatchStatus::kConflict,
+          "patch application rejects overwriting source file");
+    for (const fs::path& path : {source, target, ips, bps, ipsOut, bpsOut,
+                                 ipsFixturePath, ipsFixtureOut, ipsShrink,
+                                 ipsShrinkOut, bpsFixtureSource, bpsFixturePath,
+                                 bpsFixtureOut, badBpsPath, badBpsOut,
+                                 wrongSource, wrongOut, ipsHoleSource,
+                                 overlapSource, overlapPatch, overlapOut,
+                                 shortIps, shortBps, shortOut,
+                                 cancelledPatch, tinyTempPatch, splitSource,
+                                 splitTarget, splitPatch, splitOutput,
+                                 rleSource, rleTarget, rlePatch, rleOutput,
+                                 collisionSource, collisionTarget,
+                                 collisionPatch, collisionOutput,
+                                 targetCopyCancelledOut,
+                                 largeCopySource, largeCopyPatch, largeCopyOut,
+                                 tooLargeSource, tooLargeTarget, tooLargePatch,
+                                 ipsEofCollision, ipsEofCollisionOut,
+                                 rangeBpsPath, rangeBpsOut, futureCopyPath,
+                                 futureCopyOut, emptySource}) {
+        std::error_code ec;
+        fs::remove(path, ec);
     }
 }
 
@@ -5988,6 +6479,9 @@ struct Plan {
     int   readFailAtCall = -1;         // この回数目の ReadFile を失敗させる（-1=しない）
     DWORD readError = 0;
     int   readEofAtCall = -1;          // この回数目の ReadFile を EOF（0 バイト成功）にする
+    std::wstring readFailFileName;     // このファイル名のハンドルに限り、下記の回数目以降を失敗させる
+    int   readFailFileFromCall = -1;   // readFailFileName への ReadFile の何回目から失敗させるか
+    int   readFailFileCalls = 0;       // readFailFileName への ReadFile の呼び出し回数（記録）
 
     // --- FlushFileBuffers ---
     bool  flushFail = false;
@@ -6050,8 +6544,27 @@ bool WriteHook(HANDLE h, const void* buf, DWORD want,
 
 // ReadFile の肩代わり。readCap で 1 回に返す量を絞り、指定回で失敗や EOF を起こす。
 //   絞る場合も実データは本物の ReadFile で読むため、読み継いだ結果の内容まで確認できる。
+bool HandleHasFileName(HANDLE h, const std::wstring& name) {
+    wchar_t path[MAX_PATH * 2] = {};
+    const DWORD length = ::GetFinalPathNameByHandleW(h, path, static_cast<DWORD>(std::size(path)),
+                                                     FILE_NAME_NORMALIZED);
+    if (length == 0 || length >= std::size(path) || length < name.size()) { return false; }
+    return _wcsicmp(path + (length - name.size()), name.c_str()) == 0 &&
+           (length == name.size() || path[length - name.size() - 1] == L'\\');
+}
+
 bool ReadHook(HANDLE h, void* buf, DWORD want, DWORD* outRead, DWORD* outError, BOOL* outResult) {
     const int call = g_plan.readCalls++;
+    if (!g_plan.readFailFileName.empty() && HandleHasFileName(h, g_plan.readFailFileName)) {
+        const int fileCall = g_plan.readFailFileCalls++;
+        if (g_plan.readFailFileFromCall >= 0 && fileCall >= g_plan.readFailFileFromCall) {
+            *outRead = 0;
+            *outError = g_plan.readError;
+            *outResult = FALSE;
+            return true;
+        }
+        return false;
+    }
     if (g_plan.readFailAtCall >= 0 && call == g_plan.readFailAtCall) {
         *outRead = 0;
         *outError = g_plan.readError;
@@ -6137,6 +6650,181 @@ struct ScopedHooks {
 };
 
 }  // namespace io_fault
+
+static void TestBinaryPatchIoFaults() {
+    TestPrintf("TestBinaryPatchIoFaults\n");
+    using stirling::ApplyBinaryPatch;
+    using stirling::BinaryPatchFormat;
+    using stirling::GenerateBinaryPatch;
+
+    const std::vector<unsigned char> before = {0, 1, 2, 3, 4, 5, 6, 7};
+    const std::vector<unsigned char> after = {0, 0xa1, 2, 3, 0xb4, 5, 6, 7};
+    const fs::path source = TempFile("patch_io_source");
+    const fs::path target = TempFile("patch_io_target");
+    const fs::path ips = TempFile("patch_io_ips");
+    const fs::path bps = TempFile("patch_io_bps");
+    WriteFile(source, before);
+    WriteFile(target, after);
+    CHECK(GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                              ips.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
+          "fault fixture IPS generation");
+    CHECK(GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                              bps.wstring().c_str(), BinaryPatchFormat::kBps).Ok(),
+          "fault fixture BPS generation");
+
+    for (const auto& formatAndPatch : {
+             std::pair<stirling::BinaryPatchFormat, fs::path>{BinaryPatchFormat::kIps, ips},
+             std::pair<stirling::BinaryPatchFormat, fs::path>{BinaryPatchFormat::kBps, bps}}) {
+        const fs::path readOut = TempFile("patch_io_read_out");
+        WriteFile(readOut, std::vector<unsigned char>{0xd0, 0xd1});
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.readFailAtCall = 0;
+            io_fault::g_plan.readError = ERROR_CRC;
+            const auto result = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  formatAndPatch.second.wstring().c_str(),
+                                                  readOut.wstring().c_str());
+            CHECK(!result.Ok() && ReadFileBytes(readOut) ==
+                  std::vector<unsigned char>({0xd0, 0xd1}),
+                  "binary patch read fault preserves existing output");
+        }
+
+        const fs::path midReadOut = TempFile("patch_io_mid_read_out");
+        WriteFile(midReadOut, std::vector<unsigned char>{0xd2, 0xd3});
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.readCap = 2;
+            io_fault::g_plan.readFailAtCall = 5;
+            io_fault::g_plan.readError = ERROR_DEVICE_NOT_CONNECTED;
+            const auto result = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  formatAndPatch.second.wstring().c_str(),
+                                                  midReadOut.wstring().c_str());
+            CHECK(!result.Ok() && ReadFileBytes(midReadOut) ==
+                  std::vector<unsigned char>({0xd2, 0xd3}),
+                  "mid-stream binary patch read fault preserves existing output");
+        }
+
+        const fs::path writeOut = TempFile("patch_io_write_out");
+        WriteFile(writeOut, std::vector<unsigned char>{0xe0, 0xe1});
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.writeCallsBeforeFault = 0;
+            io_fault::g_plan.writeFail = true;
+            io_fault::g_plan.writeError = ERROR_DISK_FULL;
+            const auto result = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  formatAndPatch.second.wstring().c_str(),
+                                                  writeOut.wstring().c_str());
+            CHECK(!result.Ok() && result.systemError == ERROR_DISK_FULL &&
+                  ReadFileBytes(writeOut) == std::vector<unsigned char>({0xe0, 0xe1}),
+                  "binary patch write fault preserves existing output");
+        }
+
+        const fs::path commitOut = TempFile("patch_io_commit_out");
+        WriteFile(commitOut, std::vector<unsigned char>{0xf0, 0xf1});
+        std::wstring kept;
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.replaceFailures = 5;
+            io_fault::g_plan.replaceError = ERROR_UNABLE_TO_MOVE_REPLACEMENT;
+            io_fault::g_plan.replaceDeletesTarget = true;
+            io_fault::g_plan.moveFailures = 5;
+            io_fault::g_plan.moveError = ERROR_ACCESS_DENIED;
+            const auto result = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  formatAndPatch.second.wstring().c_str(),
+                                                  commitOut.wstring().c_str());
+            kept = result.keptTempPath;
+            CHECK(!result.Ok() && !kept.empty(),
+                  "binary patch commit failure reports keptTempPath");
+            CHECK(!fs::exists(commitOut) && fs::exists(kept),
+                  "keptTempPath is the unpublished replacement");
+        }
+        if (!kept.empty()) { std::error_code ec; fs::remove(kept, ec); }
+        for (const fs::path& path : {readOut, midReadOut, writeOut, commitOut}) {
+            std::error_code ec;
+            fs::remove(path, ec);
+        }
+    }
+
+    // A larger IPS fixture proves that a read fault can arrive after the
+    // first replacement-temp write, rather than only during parsing.
+    const fs::path largeReadSource = TempFile("patch_io_large_read_source");
+    const fs::path largeReadTarget = TempFile("patch_io_large_read_target");
+    const fs::path largeReadPatch = TempFile("patch_io_large_read_patch");
+    const fs::path largeReadOut = TempFile("patch_io_large_read_out");
+    std::vector<unsigned char> largeReadBefore(2u * 1024u * 1024u);
+    for (size_t i = 0; i < largeReadBefore.size(); ++i) {
+        largeReadBefore[i] = static_cast<unsigned char>(i * 13u + 7u);
+    }
+    std::vector<unsigned char> largeReadAfter = largeReadBefore;
+    largeReadAfter.back() ^= 0x5a;
+    WriteFile(largeReadSource, largeReadBefore);
+    WriteFile(largeReadTarget, largeReadAfter);
+    CHECK(GenerateBinaryPatch(largeReadSource.wstring().c_str(),
+                              largeReadTarget.wstring().c_str(),
+                              largeReadPatch.wstring().c_str(),
+                              stirling::BinaryPatchFormat::kIps).Ok(),
+          "large read-fault fixture generation");
+    bool largeReadFaultAfterWrite = false;
+    for (int failCall = 0; failCall < 256 && !largeReadFaultAfterWrite; ++failCall) {
+        WriteFile(largeReadOut, std::vector<unsigned char>{0xd4, 0xd5});
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 65536;
+        io_fault::g_plan.readFailAtCall = failCall;
+        io_fault::g_plan.readError = ERROR_DEVICE_NOT_CONNECTED;
+        const auto result = ApplyBinaryPatch(largeReadSource.wstring().c_str(),
+                                              largeReadPatch.wstring().c_str(),
+                                              largeReadOut.wstring().c_str());
+        largeReadFaultAfterWrite = !result.Ok() && io_fault::g_plan.writeCalls > 0;
+        if (largeReadFaultAfterWrite) {
+            CHECK(ReadFileBytes(largeReadOut) == std::vector<unsigned char>({0xd4, 0xd5}),
+                  "large mid-read fault preserves existing output after writing");
+        }
+        std::error_code ec;
+        fs::remove(largeReadOut, ec);
+    }
+    CHECK(largeReadFaultAfterWrite, "large read fault reached after a real temp write");
+
+    // 生成時の読込失敗は、失敗したファイル（ソース/ターゲット）の OS エラー付きで
+    //   kReadFailed として報告する（メモリ不足・書込失敗・他方のエラーコードにしない）。
+    //   N 回目以降の読込を失敗させる N を 0 から増やし、全読込箇所を順に通す。
+    for (const auto format : {BinaryPatchFormat::kIps, BinaryPatchFormat::kBps}) {
+        for (const fs::path& faulty : {source, target}) {
+            const fs::path out = TempFile("patch_io_generate_read_out");
+            int faults = 0;
+            bool reachedOk = false;
+            for (int fromCall = 0; fromCall < 32 && !reachedOk; ++fromCall) {
+                io_fault::ScopedHooks hooks;
+                io_fault::g_plan.readFailFileName = faulty.filename().wstring();
+                io_fault::g_plan.readFailFileFromCall = fromCall;
+                io_fault::g_plan.readError = ERROR_DEVICE_NOT_CONNECTED;
+                const auto result = GenerateBinaryPatch(source.wstring().c_str(),
+                                                         target.wstring().c_str(),
+                                                         out.wstring().c_str(), format);
+                if (result.Ok()) {
+                    reachedOk = true;
+                    continue;
+                }
+                ++faults;
+                CHECK(result.status == stirling::BinaryPatchStatus::kReadFailed &&
+                      result.systemError == ERROR_DEVICE_NOT_CONNECTED,
+                      "generation read fault reports kReadFailed with the failing file's error");
+                CHECK(!fs::exists(out), "generation read fault leaves no output");
+            }
+            CHECK(faults > 0 && reachedOk, "generation read faults covered every read");
+            std::error_code ec;
+            fs::remove(out, ec);
+        }
+    }
+    for (const fs::path& path : {largeReadSource, largeReadTarget,
+                                 largeReadPatch, largeReadOut}) {
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+    for (const fs::path& path : {source, target, ips, bps}) {
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+}
 
 static void TestStreamFileWriterFaults() {
     TestPrintf("TestStreamFileWriterFaults\n");
@@ -6970,6 +7658,7 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestDeleteLastByteSingleBlock", g_checks, g_failures, TestDeleteLastByteSingleBlock);
     g_report.Run("TestFuzz", g_checks, g_failures, TestFuzz);
     g_report.Run("TestFileRoundTrip", g_checks, g_failures, TestFileRoundTrip);
+    g_report.Run("TestBinaryPatch", g_checks, g_failures, TestBinaryPatch);
     g_report.Run("TestLoadEditSave", g_checks, g_failures, TestLoadEditSave);
     g_report.Run("TestSearchBasic", g_checks, g_failures, TestSearchBasic);
     g_report.Run("TestSearchEofBounds", g_checks, g_failures, TestSearchEofBounds);
@@ -7029,6 +7718,7 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestCursorAbsCacheAfterEdit", g_checks, g_failures, TestCursorAbsCacheAfterEdit);
     g_report.Run("TestStreamFileWriter", g_checks, g_failures, TestStreamFileWriter);
 #ifdef STIRLING_TEST_IO_HOOK
+    g_report.Run("TestBinaryPatchIoFaults", g_checks, g_failures, TestBinaryPatchIoFaults);
     g_report.Run("TestStreamFileWriterFaults", g_checks, g_failures, TestStreamFileWriterFaults);
     g_report.Run("TestBlockFileIoReadFaults", g_checks, g_failures, TestBlockFileIoReadFaults);
 #endif

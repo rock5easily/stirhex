@@ -132,6 +132,7 @@ class TestHelpCoreBehavior:
             "07_ext.html",
             "08_differences.html",
             "09_credits.html",
+            "10_binary_patch.html",
         ]
 
         assert exe.is_file()

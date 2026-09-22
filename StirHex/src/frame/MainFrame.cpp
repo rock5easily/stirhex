@@ -8,6 +8,7 @@
 #include "dialog/ExtSettingsDlg.h"
 #include "dialog/EnvSettingsDlg.h"
 #include "dialog/RunDlg.h"
+#include "dialog/BinaryPatchDlg.h"
 #include "frame/ToolbarCatalog.h"
 #include "doc/StirlingDoc.h"
 #include "view/StirlingView.h"
@@ -105,6 +106,8 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWnd)
     ON_COMMAND(ID_SETTINGS_ENV, &CMainFrame::OnSettingsEnv)
     // 拡張子別設定（0x8051）。一覧で拡張子レコードを編集し、全ビューへ再適用＋保存。
     ON_COMMAND(ID_SETTINGS_EXT, &CMainFrame::OnSettingsExt)
+    ON_COMMAND(ID_BINARY_PATCH_CREATE, &CMainFrame::OnBinaryPatchCreate)
+    ON_COMMAND(ID_BINARY_PATCH_APPLY, &CMainFrame::OnBinaryPatchApply)
     // ステータスバー各ペインのフォールバック更新（未オープン時に空欄化。ビュー活性時はビュー側が処理）。
     //   カタログ全20項目のうち Caps/Num/Scroll ロック(0xE701-0xE703)は MFC 標準処理に委ねる。
     ON_UPDATE_COMMAND_UI(ID_INDICATOR_MODE,      &CMainFrame::OnUpdateIndicatorEmpty)
@@ -690,4 +693,14 @@ void CMainFrame::OnSettingsExt() {
     if (m_wndBitImageBar.GetSafeHwnd() != nullptr && m_wndBitImageBar.IsWindowVisible()) {
         m_wndBitImageBar.Refresh(ActiveStirlingDoc());
     }
+}
+
+void CMainFrame::OnBinaryPatchCreate() {
+    CBinaryPatchDlg dialog(CBinaryPatchDlg::Mode::Generate, this);
+    dialog.DoModal();
+}
+
+void CMainFrame::OnBinaryPatchApply() {
+    CBinaryPatchDlg dialog(CBinaryPatchDlg::Mode::Apply, this);
+    dialog.DoModal();
 }

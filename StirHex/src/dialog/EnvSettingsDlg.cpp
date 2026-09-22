@@ -1043,6 +1043,8 @@ const STbItem kUmCat7[] = {   // その他（表示順 DAT_004b5424 cat7: 0,11,1
     {0x0708},{0x070A},{0x0709},
     {0x070D},   // 16進テキスト貼り付け（移植で追加。Issue #97）
     {0x0710},   // チェックサム・ハッシュ計算（Issue #228）
+    {0x0711},   // パッチを作成（Issue #259）
+    {0x0712},   // パッチを適用（Issue #259）
 };
 const STbCat kUmCatalog[] = {
     { kUmCat0, _countof(kUmCat0) },

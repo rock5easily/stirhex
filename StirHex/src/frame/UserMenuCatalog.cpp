@@ -131,6 +131,8 @@ const Entry kEntries[] = {
     { 0x070E, 0x80FA },   // マークの書き出し...
     { 0x070F, 0x80FB },   // マークの読み込み...
     { 0x0710, ID_TOOLS_CHECKSUM }, // チェックサム・ハッシュ計算（Issue #228）
+    { 0x0711, ID_BINARY_PATCH_CREATE }, // パッチを作成（Issue #259）
+    { 0x0712, ID_BINARY_PATCH_APPLY },  // パッチを適用（Issue #259）
 };
 
 const Entry* Find(UINT raw) {

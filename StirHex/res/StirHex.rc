@@ -45,6 +45,8 @@ BEGIN
   POPUP "ツール(&T)"
   BEGIN
     MENUITEM "チェックサム・ハッシュ計算(&H)...", 33020
+    MENUITEM "パッチを作成(&P)...", 33021
+    MENUITEM "パッチを適用(&A)...", 33022
   END
   POPUP "設定(&O)"
   BEGIN
@@ -131,6 +133,8 @@ BEGIN
   POPUP "ツール(&T)"
   BEGIN
     MENUITEM "チェックサム・ハッシュ計算(&H)...", 33020
+    MENUITEM "パッチを作成(&P)...", 33021
+    MENUITEM "パッチを適用(&A)...", 33022
   END
   POPUP "設定(&O)"
   BEGIN
@@ -254,7 +258,7 @@ FONT 9, "ＭＳ Ｐゴシック"
 BEGIN
   CONTROL 128, -1, "STATIC", 0x50000003, 8, 9, 24, 24
   CONTROL "BinaryEditor  StirHex", 1027, "STATIC", 0x50020001, 38, 8, 164, 10
-  CONTROL "Version 2.3.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
+  CONTROL "Version 2.4.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
   CONTROL "Copyright (C) 2026 StirHex Project", 1093, "STATIC", 0x50020000, 38, 34, 164, 8
   CONTROL "https://github.com/rock5easily/stirhex", 1100, "STATIC", 0x50020000, 38, 47, 164, 8
   CONTROL "", -1, "STATIC", 0x50000010, 8, 63, 194, 1
@@ -1386,6 +1390,8 @@ BEGIN
   5814, "マークの書き出し..."
   5815, "マークの読み込み..."
   5816, "チェックサム・ハッシュ計算..."
+  5817, "パッチを作成..."
+  5818, "パッチを適用..."
   6000, "StirlingKeyDefineFile Ver.1.00"
   6001, "Struct.def"
   6002, "char"
@@ -1823,6 +1829,35 @@ BEGIN
   PUSHBUTTON "閉じる(&C)", IDCANCEL, 205, 175, 50, 14
 END
 
+262 DIALOGEX 0, 0, 430, 220
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "バイナリパッチ"
+FONT 9, "ＭＳ Ｐゴシック"
+BEGIN
+  GROUPBOX "操作", -1, 8, 6, 414, 28
+  CONTROL "パッチを作成(&C)", IDC_BP_MODE_CREATE, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 18, 17, 92, 10
+  CONTROL "パッチを適用(&A)", IDC_BP_MODE_APPLY, "BUTTON", BS_AUTORADIOBUTTON | WS_TABSTOP, 124, 17, 92, 10
+  LTEXT "元ファイル:", IDC_BP_SOURCE_LABEL, 10, 43, 72, 12
+  EDITTEXT IDC_BP_SOURCE_EDIT, 88, 41, 284, 14, ES_AUTOHSCROLL | WS_TABSTOP
+  PUSHBUTTON "参照...", IDC_BP_SOURCE_BROWSE, 378, 41, 42, 14
+  LTEXT "変更後ファイル:", IDC_BP_SECOND_LABEL, 10, 64, 72, 12
+  EDITTEXT IDC_BP_SECOND_EDIT, 88, 62, 284, 14, ES_AUTOHSCROLL | WS_TABSTOP
+  PUSHBUTTON "参照...", IDC_BP_SECOND_BROWSE, 378, 62, 42, 14
+  LTEXT "パッチ保存先:", IDC_BP_RESULT_LABEL, 10, 85, 72, 12
+  EDITTEXT IDC_BP_RESULT_EDIT, 88, 83, 284, 14, ES_AUTOHSCROLL | WS_TABSTOP
+  PUSHBUTTON "参照...", IDC_BP_RESULT_BROWSE, 378, 83, 42, 14
+  LTEXT "形式:", IDC_BP_FORMAT_LABEL, 10, 106, 72, 12
+  CONTROL "BPS", IDC_BP_FORMAT_BPS, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 88, 106, 42, 10
+  CONTROL "IPS", IDC_BP_FORMAT_IPS, "BUTTON", BS_AUTORADIOBUTTON | WS_TABSTOP, 140, 106, 42, 10
+  LTEXT "", IDC_BP_FORMAT_NOTE, 190, 104, 230, 18, SS_LEFT | SS_NOPREFIX
+  LTEXT "", IDC_BP_STATUS, 10, 125, 410, 25, SS_LEFT | SS_NOPREFIX
+  CONTROL "成功時に結果ファイルを開く(&O)", IDC_BP_OPEN_RESULT, "BUTTON", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 154, 180, 10
+  CONTROL "", IDC_BP_PROGRESS, "msctls_progress32", PBS_SMOOTH, 10, 169, 410, 14
+  DEFPUSHBUTTON "作成", IDC_BP_START, 10, 190, 60, 16
+  PUSHBUTTON "中止", IDC_BP_STOP, 76, 190, 60, 16, WS_DISABLED
+  PUSHBUTTON "閉じる", IDCANCEL, 360, 190, 60, 16
+END
+
 STRINGTABLE
 BEGIN
   1230, "CRC-32 (ISO-HDLC)"
@@ -1855,5 +1890,56 @@ BEGIN
   1257, "選択範囲内"
   1258, "検索処理を開始できませんでした。"
   1259, "検索結果一覧を表示できませんでした。"
+  1260, "バイナリパッチ"
+  1261, "パッチを作成"
+  1262, "パッチを適用"
+  1263, "元ファイル"
+  1264, "変更後ファイル"
+  1265, "パッチファイル"
+  1266, "結果ファイル"
+  1267, "形式"
+  1268, "BPS"
+  1269, "IPS"
+  1270, "自動判別（IPS/BPS）"
+  1271, "参照..."
+  1272, "作成"
+  1273, "適用"
+  1274, "中止"
+  1275, "閉じる"
+  1276, "入力ファイルと保存先を指定してください。"
+  1277, "処理中: %lld / %lld バイト"
+  1278, "処理を中止しました。"
+  1279, "パッチを作成しました。\n\n%s"
+  1280, "結果ファイルを作成しました。\n\n%s"
+  1281, "IPS は元ファイルと変更後ファイルが同じサイズで、双方16MiB以下の場合だけ使用できます。条件外ではBPSを使用してください。"
+  1282, "IPS は元ファイルの内容を検証しません。内容を確認してから適用してください。"
+  1283, "BPS は元ファイルのCRCを検証してから適用します。"
+  1284, "入力ファイルと保存先を指定してください。"
+  1285, "入力ファイルを読み込めません。"
+  1286, "保存先を指定してください。"
+  1287, "結果ファイルは入力ファイル、パッチファイル、または開いている文書と別のファイルを指定してください。\n\n%s"
+  1288, "IPS は元ファイルと変更後ファイルが同じサイズで、双方16MiB以下の場合だけ使用できます。"
+  1289, "バイナリパッチ処理に失敗しました。\n\n%s"
+  1290, "ファイルを開けませんでした。"
+  1291, "ファイルを読み取れませんでした。"
+  1292, "ファイルを書き込めませんでした。"
+  1293, "パッチ形式が不正です。"
+  1294, "元ファイルがパッチ作成時の内容と一致しません。"
+  1295, "作成した結果のCRCが一致しません。"
+  1296, "処理を中止しました。"
+  1297, "ファイルまたはパッチが製品上限を超えています。"
+  1298, "メモリが不足しています。"
+  1299, "結果ファイルを安全に公開できませんでした。"
+  1300, "このパッチ形式には対応していません。"
+  1301, "パッチの指定が不正です。"
+  1302, "原因を特定できないエラーが発生しました。"
+  1303, "結果ファイルを開けませんでした。\n\n%s"
+  1304, "すべてのファイル (*.*)|*.*||"
+  1305, "パッチファイル (*.ips;*.bps)|*.ips;*.bps|すべてのファイル (*.*)|*.*||"
+  1306, "BPS パッチ (*.bps)|*.bps|すべてのファイル (*.*)|*.*||"
+  1307, "IPS パッチ (*.ips)|*.ips|すべてのファイル (*.*)|*.*||"
+  1308, "%s は既に存在します。上書きしますか？"
   33020, "ファイル全体または選択範囲のチェックサム・ハッシュ値を計算\nチェックサム・ハッシュ計算"
+  33021, "ディスク上の2つのファイルからBPS/IPSパッチを作成\nパッチを作成"
+  33022, "ディスク上の元ファイルへIPS/BPSパッチを適用\nパッチを適用"
 END

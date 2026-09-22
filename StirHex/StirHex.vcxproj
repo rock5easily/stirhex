@@ -135,6 +135,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\frame\ChildFrame.cpp" />
     <ClCompile Include="src\doc\StirlingDoc.cpp" />
     <ClCompile Include="src\dialog\ChecksumDlg.cpp" />
+    <ClCompile Include="src\dialog\BinaryPatchDlg.cpp" />
     <ClCompile Include="src\core\Checksum.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -153,6 +154,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\dialog\CompareDlg.cpp" />
     <ClCompile Include="src\dialog\DiffListDlg.cpp" />
     <ClCompile Include="src\core\BlockList.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\core\BinaryPatch.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\core\BlockCursor.cpp">
@@ -224,7 +228,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\frame\ChildFrame.h" />
     <ClInclude Include="src\doc\StirlingDoc.h" />
     <ClInclude Include="src\dialog\ChecksumDlg.h" />
+    <ClInclude Include="src\dialog\BinaryPatchDlg.h" />
     <ClInclude Include="src\core\Checksum.h" />
+    <ClInclude Include="src\core\BinaryPatch.h" />
     <ClInclude Include="src\view\StirlingView.h" />
     <ClInclude Include="src\dialog\FindDlg.h" />
     <ClInclude Include="src\dialog\ReplaceDlg.h" />
@@ -286,6 +292,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <Content Include="help\07_ext.html" />
     <Content Include="help\08_differences.html" />
     <Content Include="help\09_credits.html" />
+    <Content Include="help\10_binary_patch.html" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

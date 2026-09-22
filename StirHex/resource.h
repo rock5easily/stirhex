@@ -108,6 +108,7 @@
 #define IDD_SELECT_RANGE        202
 #define IDD_CHECKSUM            260     // Checksum dialog (Issue #226)
 #define IDD_FIND_RESULT         261     // Find-all result list dialog, modeless (Issue #236)
+#define IDD_BINARY_PATCH        262     // Binary patch create/apply dialog (Issue #259)
 
 // ---------------------------------------------------------------------------
 // Stirling-specific command IDs (0x8000 range). Standard MFC commands
@@ -216,6 +217,30 @@
 #define ID_MARK_EXPORT         33018   // 0x80fa マークの書き出し（原には無い。Issue #99）
 #define ID_MARK_IMPORT         33019   // 0x80fb マークの読み込み（原には無い。Issue #99）
 #define ID_TOOLS_CHECKSUM      33020   // 0x80fc Checksum / hash (Issue #226)
+#define ID_BINARY_PATCH_CREATE 33021   // 0x80fd Binary patch creation (Issue #259)
+#define ID_BINARY_PATCH_APPLY  33022   // 0x80fe Binary patch application (Issue #259)
+
+// --- Binary patch dialog controls (IDD_BINARY_PATCH=262, Issue #259) ---
+#define IDC_BP_MODE_CREATE      1500
+#define IDC_BP_MODE_APPLY       1501
+#define IDC_BP_SOURCE_EDIT      1502
+#define IDC_BP_SOURCE_BROWSE    1503
+#define IDC_BP_SECOND_EDIT      1504
+#define IDC_BP_SECOND_BROWSE    1505
+#define IDC_BP_RESULT_EDIT      1506
+#define IDC_BP_RESULT_BROWSE    1507
+#define IDC_BP_FORMAT_BPS       1508
+#define IDC_BP_FORMAT_IPS       1509
+#define IDC_BP_STATUS            1510
+#define IDC_BP_PROGRESS          1511
+#define IDC_BP_START             1512
+#define IDC_BP_STOP              1513
+#define IDC_BP_SOURCE_LABEL      1514
+#define IDC_BP_SECOND_LABEL      1515
+#define IDC_BP_RESULT_LABEL      1516
+#define IDC_BP_FORMAT_LABEL      1517
+#define IDC_BP_OPEN_RESULT       1518
+#define IDC_BP_FORMAT_NOTE       1519
 
 // ---------------------------------------------------------------------------
 // Checksum dialog controls (Issue #226).
@@ -735,6 +760,57 @@
 #define IDS_FINDRESULT_RANGE_SEL     1257
 #define IDS_FINDRESULT_TIMER_ERROR   1258
 #define IDS_FINDRESULT_CREATE_ERROR  1259
+
+// Binary patch strings (Issue #259).
+#define IDS_BP_TITLE                1260
+#define IDS_BP_CREATE               1261
+#define IDS_BP_APPLY                1262
+#define IDS_BP_SOURCE               1263
+#define IDS_BP_TARGET               1264
+#define IDS_BP_PATCH                1265
+#define IDS_BP_RESULT               1266
+#define IDS_BP_FORMAT               1267
+#define IDS_BP_BPS                  1268
+#define IDS_BP_IPS                  1269
+#define IDS_BP_AUTO                 1270
+#define IDS_BP_BROWSE               1271
+#define IDS_BP_START_CREATE        1272
+#define IDS_BP_START_APPLY         1273
+#define IDS_BP_STOP                1274
+#define IDS_BP_CLOSE               1275
+#define IDS_BP_READY               1276
+#define IDS_BP_PROGRESS             1277
+#define IDS_BP_CANCELLED            1278
+#define IDS_BP_CREATE_DONE          1279
+#define IDS_BP_APPLY_DONE           1280
+#define IDS_BP_IPS_CONDITION        1281
+#define IDS_BP_IPS_UNVERIFIED       1282
+#define IDS_BP_BPS_VERIFIED         1283
+#define IDS_BP_PATH_REQUIRED        1284
+#define IDS_BP_INPUT_NOT_FOUND      1285
+#define IDS_BP_OUTPUT_REQUIRED      1286
+#define IDS_BP_OUTPUT_CONFLICT      1287
+#define IDS_BP_IPS_NOT_ALLOWED      1288
+#define IDS_BP_OPERATION_FAILED     1289
+#define IDS_BP_STATUS_OPEN_FAILED   1290
+#define IDS_BP_STATUS_READ_FAILED   1291
+#define IDS_BP_STATUS_WRITE_FAILED  1292
+#define IDS_BP_STATUS_INVALID_PATCH 1293
+#define IDS_BP_STATUS_SOURCE_MISMATCH 1294
+#define IDS_BP_STATUS_TARGET_MISMATCH 1295
+#define IDS_BP_STATUS_CANCELLED     1296
+#define IDS_BP_STATUS_LIMIT         1297
+#define IDS_BP_STATUS_MEMORY        1298
+#define IDS_BP_STATUS_CONFLICT      1299
+#define IDS_BP_STATUS_UNSUPPORTED   1300
+#define IDS_BP_STATUS_INVALID_ARG   1301
+#define IDS_BP_STATUS_UNKNOWN       1302
+#define IDS_BP_RESULT_OPEN_FAILED   1303
+#define IDS_BP_FILTER_INPUT         1304
+#define IDS_BP_FILTER_PATCH         1305
+#define IDS_BP_FILTER_BPS           1306
+#define IDS_BP_FILTER_IPS           1307
+#define IDS_BP_OVERWRITE            1308
 
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 

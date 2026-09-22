@@ -2801,20 +2801,38 @@ void CStirlingView::SetSyncPartner(CStirlingView* partner, bool enabled) {
 
 // 同期グループを確定する（原 OnSyncScroll: FUN_0044d6a9 のグループ再構成ロジック）。
 //   members は自分を含む全メンバー。
-//   1) 旧グループの各相手の同期配列を解除する。
+//   1) 新メンバーが所属する旧グループをすべて解除する。
 //   2) 新メンバー全員の同期配列を「自分以外の全メンバー」に設定する（対称・完全連結）。
 void CStirlingView::ApplySyncGroup(const std::vector<CStirlingView*>& members) {
-    // 1) 旧相手を解除（このビューの旧配列＝旧グループの全メンバー）。
-    for (CStirlingView* old : m_syncGroup) {
-        if (old != nullptr) { old->m_syncGroup.clear(); }
+    // null と重複を除いた新メンバーを作る。同じビューを複数回登録すると、同期伝播も
+    //   重複するため、呼び出し元に依存せずここで正規化する。
+    std::vector<CStirlingView*> newMembers;
+    for (CStirlingView* member : members) {
+        if (member != nullptr &&
+            std::find(newMembers.begin(), newMembers.end(), member) == newMembers.end()) {
+            newMembers.push_back(member);
+        }
     }
-    m_syncGroup.clear();
+
+    // 1) 新メンバーごとに旧グループを収集してから解除する。収集中に clear すると、
+    //   後続メンバーの旧相手を失い、その相手側に片方向参照が残るため、二段階で行う。
+    std::vector<CStirlingView*> oldMembers = newMembers;
+    for (CStirlingView* member : newMembers) {
+        for (CStirlingView* old : member->m_syncGroup) {
+            if (old != nullptr &&
+                std::find(oldMembers.begin(), oldMembers.end(), old) == oldMembers.end()) {
+                oldMembers.push_back(old);
+            }
+        }
+    }
+    for (CStirlingView* old : oldMembers) {
+        old->m_syncGroup.clear();
+    }
+
     // 2) 新メンバー全員へ「自分以外」を設定。
-    for (CStirlingView* m : members) {
-        if (m == nullptr) { continue; }
-        m->m_syncGroup.clear();
-        for (CStirlingView* other : members) {
-            if (other != nullptr && other != m) {
+    for (CStirlingView* m : newMembers) {
+        for (CStirlingView* other : newMembers) {
+            if (other != m) {
                 m->m_syncGroup.push_back(other);
             }
         }

@@ -455,7 +455,7 @@ BOOL CStirlingApp::InitInstance() {
     }
 
     // 相違一覧ダイアログ（IDD_DIFF_LIST）等で使う SysListView32 のため共通コントロールを初期化。
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES };
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS };
     ::InitCommonControlsEx(&icc);
 
     // MDI ドキュメントテンプレート（Doc/View/ChildFrame の結線）

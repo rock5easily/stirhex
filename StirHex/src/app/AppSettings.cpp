@@ -66,6 +66,8 @@ void CAppSettings::Load() {
     if (undoMemoryLimitMB <= 0) {
         undoMemoryLimit   = false;
         undoMemoryLimitMB = kUndoMemoryLimitDefaultMB;
+    } else if (undoMemoryLimitMB > kUndoMemoryLimitMaxMB) {
+        undoMemoryLimitMB = kUndoMemoryLimitMaxMB;
     }
     subCaret          = GetBool(_T("SubCaret"), subCaret);
     highlightBoth     = GetBool(_T("HighlightBoth"), highlightBoth);
@@ -162,13 +164,19 @@ void CAppSettings::Load() {
         }
     }
 
-    // 範囲補正。
-    if (scrollLines < 1) { scrollLines = 1; }
-    if (twoStrokeTimeoutMs < 0) { twoStrokeTimeoutMs = 0; }
+    // 範囲補正。環境設定ダイアログからは生成されない手編集値も、UI と同じ範囲へ正規化する。
+    if (scrollLines < 1)   { scrollLines = 1; }
+    if (scrollLines > 999) { scrollLines = 999; }
+    if (twoStrokeTimeoutMs < 0)    { twoStrokeTimeoutMs = 0; }
+    if (twoStrokeTimeoutMs > 2000) { twoStrokeTimeoutMs = 2000; }
+    // スライダーと同じく0.1秒刻みへ四捨五入する。
+    twoStrokeTimeoutMs = ((twoStrokeTimeoutMs + 50) / 100) * 100;
     if (fileHistoryCount < 0)  { fileHistoryCount = 0; }
     if (fileHistoryCount > 16) { fileHistoryCount = 16; }
     if (backupGenerations < 1)   { backupGenerations = 1; }
     if (backupGenerations > 999) { backupGenerations = 999; }
+    if (largeFileWarnMB <= 0)          { largeFileWarnMB = 512; }
+    if (largeFileWarnMB > 1024 * 1024) { largeFileWarnMB = 1024 * 1024; }
     if (exclusiveControl < 0 || exclusiveControl > 2) { exclusiveControl = 0; }
     if (winPlacement < 0 || winPlacement > 3) { winPlacement = 1; }
     if (structBarPos < 0 || structBarPos > 2) { structBarPos = 0; }
