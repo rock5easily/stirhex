@@ -660,6 +660,50 @@ static void AppendBe24(std::vector<unsigned char>& bytes, std::uint32_t value) {
     bytes.push_back(static_cast<unsigned char>(value & 0xffu));
 }
 
+// IPS パッチのレコード（Issue #269）。rle のとき value が繰り返す値。
+struct TestIpsRecord {
+    std::uint32_t offset = 0;
+    std::uint32_t length = 0;
+    bool rle = false;
+    unsigned char value = 0;
+};
+
+// IPS パッチを先頭から EOF までレコード単位で解析する。形式が崩れていれば false。
+static bool ParseIpsRecords(const std::vector<unsigned char>& patch,
+                            std::vector<TestIpsRecord>& records) {
+    records.clear();
+    if (patch.size() < 8 || std::memcmp(patch.data(), "PATCH", 5) != 0) { return false; }
+    const auto be16 = [&patch](size_t pos) {
+        return (static_cast<std::uint32_t>(patch[pos]) << 8) | patch[pos + 1];
+    };
+    size_t pos = 5;
+    for (;;) {
+        if (pos + 3 > patch.size()) { return false; }
+        if (std::memcmp(patch.data() + pos, "EOF", 3) == 0) {
+            // EOF の後ろは無し、または 3 バイトの結果長だけ。
+            return pos + 3 == patch.size() || pos + 6 == patch.size();
+        }
+        TestIpsRecord record;
+        record.offset = (static_cast<std::uint32_t>(patch[pos]) << 16) | be16(pos + 1);
+        pos += 3;
+        if (pos + 2 > patch.size()) { return false; }
+        const std::uint32_t length = be16(pos);
+        pos += 2;
+        if (length != 0) {
+            if (pos + length > patch.size()) { return false; }
+            record.length = length;
+            pos += length;
+        } else {
+            if (pos + 3 > patch.size()) { return false; }
+            record.rle = true;
+            record.length = be16(pos);
+            record.value = patch[pos + 2];
+            pos += 3;
+        }
+        records.push_back(record);
+    }
+}
+
 static void TestBinaryPatch() {
     TestPrintf("TestBinaryPatch\n");
     using stirling::ApplyBinaryPatch;
@@ -735,15 +779,13 @@ static void TestBinaryPatch() {
                               rlePatch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
           "IPS generates RLE records");
     const std::vector<unsigned char> rleBytes = ReadFileBytes(rlePatch);
-    bool hasRleRecord = false;
-    for (size_t i = 5; i + 7 < rleBytes.size(); ++i) {
-        if (rleBytes[i + 3] == 0 && rleBytes[i + 4] == 0 &&
-            (static_cast<unsigned>(rleBytes[i + 5]) << 8 | rleBytes[i + 6]) != 0) {
-            hasRleRecord = true;
-            break;
-        }
-    }
-    CHECK(hasRleRecord, "generated IPS contains an RLE record");
+    // Parse the records instead of scanning for a byte pattern (Issue #269):
+    // the 1000-byte run of 0xcc at offset 100 is exactly one RLE record.
+    std::vector<TestIpsRecord> rleRecords;
+    CHECK(ParseIpsRecords(rleBytes, rleRecords) && rleRecords.size() == 1 &&
+          rleRecords[0].rle && rleRecords[0].offset == 100 &&
+          rleRecords[0].length == 1000 && rleRecords[0].value == 0xcc,
+          "generated IPS contains an RLE record");
     CHECK(ApplyBinaryPatch(rleSource.wstring().c_str(), rlePatch.wstring().c_str(),
                            rleOutput.wstring().c_str()).Ok() &&
           ReadFileBytes(rleOutput) == rleAfter,
@@ -800,7 +842,8 @@ static void TestBinaryPatch() {
     const auto eofCollisionResult = ApplyBinaryPatch(source.wstring().c_str(),
                                                       ipsEofCollision.wstring().c_str(),
                                                       ipsEofCollisionOut.wstring().c_str());
-    CHECK(!eofCollisionResult.Ok() && !fs::exists(ipsEofCollisionOut),
+    CHECK(eofCollisionResult.status == BinaryPatchStatus::kInvalidPatch &&
+          !fs::exists(ipsEofCollisionOut),
           "IPS EOF marker collision is rejected safely");
 
     const auto bpsResult = GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
@@ -1004,8 +1047,16 @@ static void TestBinaryPatch() {
           "large BPS TargetCopy cancellation cleans temp output");
 
     // Independently perturb each BPS CRC field: source, target, and patch.
+    //   The dialog chooses its message from the status, so each field must map to
+    //   its own status (Issue #265).
     const size_t bpsFooter = bpsFixture.size() - 12;
-    for (const size_t crcOffset : {bpsFooter, bpsFooter + 4, bpsFooter + 8}) {
+    const std::pair<size_t, BinaryPatchStatus> crcFields[] = {
+        {bpsFooter, BinaryPatchStatus::kSourceMismatch},
+        {bpsFooter + 4, BinaryPatchStatus::kTargetMismatch},
+        {bpsFooter + 8, BinaryPatchStatus::kInvalidPatch},
+    };
+    for (const auto& crcField : crcFields) {
+        const size_t crcOffset = crcField.first;
         std::vector<unsigned char> bad = bpsFixture;
         bad[crcOffset] ^= 0x01;
         const fs::path badPath = TempFile("patch_bps_crc_field");
@@ -1018,6 +1069,8 @@ static void TestBinaryPatch() {
         CHECK(!badFieldResult.Ok() && ReadFileBytes(badOut) ==
               std::vector<unsigned char>({0xca, 0xfe}),
               "each BPS CRC field mismatch preserves existing output");
+        CHECK(badFieldResult.status == crcField.second,
+              "each BPS CRC field mismatch reports its own status");
         std::error_code ec;
         fs::remove(badPath, ec);
         fs::remove(badOut, ec);
@@ -1029,7 +1082,10 @@ static void TestBinaryPatch() {
     AppendBpsVar(rangeBps, bpsSource.size());
     AppendBpsVar(rangeBps, bpsSource.size() + 1);
     AppendBpsVar(rangeBps, 0);
-    AppendBpsVar(rangeBps, (bpsSource.size() * 4) - 4); // SourceRead len source+1
+    // SourceRead len source+1: ((length - 1) << 2) | 0.  The previous value
+    // (size * 4 - 4) encoded length == source size, which stayed in range and
+    // only failed later on the target CRC (Issue #265).
+    AppendBpsVar(rangeBps, bpsSource.size() * 4);
     AppendLe32(rangeBps, TestCrc32(bpsSource.data(), bpsSource.size()));
     AppendLe32(rangeBps, 0);
     AppendLe32(rangeBps, 0);
@@ -1039,7 +1095,8 @@ static void TestBinaryPatch() {
     const auto rangeResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
                                                rangeBpsPath.wstring().c_str(),
                                                rangeBpsOut.wstring().c_str());
-    CHECK(!rangeResult.Ok() && !fs::exists(rangeBpsOut), "BPS SourceRead range is rejected");
+    CHECK(rangeResult.status == BinaryPatchStatus::kInvalidPatch && !fs::exists(rangeBpsOut),
+          "BPS SourceRead range is rejected");
 
     std::vector<unsigned char> futureCopy = {'B', 'P', 'S', '1'};
     AppendBpsVar(futureCopy, 0);
@@ -1058,7 +1115,8 @@ static void TestBinaryPatch() {
     const auto futureCopyResult = ApplyBinaryPatch(emptySource.wstring().c_str(),
                                                    futureCopyPath.wstring().c_str(),
                                                    futureCopyOut.wstring().c_str());
-    CHECK(!futureCopyResult.Ok() && !fs::exists(futureCopyOut), "future BPS TargetCopy is rejected");
+    CHECK(futureCopyResult.status == BinaryPatchStatus::kInvalidPatch && !fs::exists(futureCopyOut),
+          "future BPS TargetCopy is rejected");
 
     // Bad source/patch CRCs must never publish an output.
     std::vector<unsigned char> badBps = bpsFixture;
@@ -1070,7 +1128,7 @@ static void TestBinaryPatch() {
     const auto badResult = ApplyBinaryPatch(bpsFixtureSource.wstring().c_str(),
                                              badBpsPath.wstring().c_str(),
                                              badBpsOut.wstring().c_str());
-    CHECK(!badResult.Ok() && ReadFileBytes(badBpsOut) == std::vector<unsigned char>({0xde, 0xad}),
+    CHECK(badResult.status == BinaryPatchStatus::kInvalidPatch && ReadFileBytes(badBpsOut) == std::vector<unsigned char>({0xde, 0xad}),
           "bad BPS patch CRC is rejected before publish");
 
     const fs::path wrongSource = TempFile("patch_wrong_source");
@@ -1105,6 +1163,1176 @@ static void TestBinaryPatch() {
                                  futureCopyOut, emptySource}) {
         std::error_code ec;
         fs::remove(path, ec);
+    }
+}
+
+// ---- BPS: 独立した参照デコーダとサイズ変更・負の相対オフセット（Issue #265）----
+// 製品の ApplyBps とは別に仕様から書いた参照デコーダ。生成パッチを製品の適用処理だけで
+//   検証すると、符号化と復号が同じように誤った場合（負の差分の符号など）に相殺されて
+//   検出できないため、生成結果はこちらでも復号して突き合わせる。
+struct BpsReferenceStats {
+    size_t sourceRead = 0;
+    size_t targetRead = 0;
+    size_t sourceCopy = 0;
+    size_t targetCopy = 0;
+    size_t negativeSourceCopy = 0;
+    size_t negativeTargetCopy = 0;
+};
+
+static bool ReadReferenceBpsVar(const std::vector<unsigned char>& patch, size_t& pos,
+                                size_t end, std::uint64_t& value) {
+    value = 0;
+    std::uint64_t shift = 1;
+    for (int i = 0; i < 10; ++i) {
+        if (pos >= end) { return false; }
+        const unsigned char byte = patch[pos++];
+        value += static_cast<std::uint64_t>(byte & 0x7fu) * shift;
+        if ((byte & 0x80u) != 0) { return true; }
+        shift <<= 7;
+        value += shift;
+    }
+    return false;
+}
+
+static bool ReadReferenceBpsSigned(const std::vector<unsigned char>& patch, size_t& pos,
+                                   size_t end, long long& value) {
+    std::uint64_t encoded = 0;
+    if (!ReadReferenceBpsVar(patch, pos, end, encoded)) { return false; }
+    const long long magnitude = static_cast<long long>(encoded >> 1);
+    value = (encoded & 1u) != 0 ? -magnitude : magnitude;
+    return true;
+}
+
+static std::uint32_t ReadLe32At(const std::vector<unsigned char>& bytes, size_t pos) {
+    return static_cast<std::uint32_t>(bytes[pos]) |
+           (static_cast<std::uint32_t>(bytes[pos + 1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[pos + 2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[pos + 3]) << 24);
+}
+
+static bool DecodeBpsReference(const std::vector<unsigned char>& patch,
+                               const std::vector<unsigned char>& source,
+                               std::vector<unsigned char>& out,
+                               BpsReferenceStats& stats) {
+    out.clear();
+    stats = BpsReferenceStats();
+    if (patch.size() < 16 || std::memcmp(patch.data(), "BPS1", 4) != 0) { return false; }
+    const size_t end = patch.size() - 12;
+    size_t pos = 4;
+    std::uint64_t sourceSize = 0, targetSize = 0, metadataSize = 0;
+    if (!ReadReferenceBpsVar(patch, pos, end, sourceSize) ||
+        !ReadReferenceBpsVar(patch, pos, end, targetSize) ||
+        !ReadReferenceBpsVar(patch, pos, end, metadataSize)) {
+        return false;
+    }
+    if (sourceSize != source.size() || metadataSize > end - pos) { return false; }
+    pos += static_cast<size_t>(metadataSize);
+    long long sourceRelative = 0;
+    long long targetRelative = 0;
+    while (pos < end) {
+        std::uint64_t instruction = 0;
+        if (!ReadReferenceBpsVar(patch, pos, end, instruction)) { return false; }
+        const unsigned action = static_cast<unsigned>(instruction & 3u);
+        const std::uint64_t length = (instruction >> 2) + 1;
+        if (length > targetSize - out.size()) { return false; }
+        const size_t count = static_cast<size_t>(length);
+        if (action == 0) {
+            const size_t start = out.size();
+            if (start + count > source.size()) { return false; }
+            out.insert(out.end(), source.begin() + start, source.begin() + start + count);
+            ++stats.sourceRead;
+        } else if (action == 1) {
+            if (count > end - pos) { return false; }
+            out.insert(out.end(), patch.begin() + pos, patch.begin() + pos + count);
+            pos += count;
+            ++stats.targetRead;
+        } else {
+            long long delta = 0;
+            if (!ReadReferenceBpsSigned(patch, pos, end, delta)) { return false; }
+            if (action == 2) {
+                sourceRelative += delta;
+                if (sourceRelative < 0 ||
+                    static_cast<std::uint64_t>(sourceRelative) + length > source.size()) {
+                    return false;
+                }
+                const size_t start = static_cast<size_t>(sourceRelative);
+                out.insert(out.end(), source.begin() + start, source.begin() + start + count);
+                sourceRelative += static_cast<long long>(count);
+                ++stats.sourceCopy;
+                if (delta < 0) { ++stats.negativeSourceCopy; }
+            } else {
+                targetRelative += delta;
+                if (targetRelative < 0 ||
+                    static_cast<std::uint64_t>(targetRelative) >= out.size()) {
+                    return false;
+                }
+                // 1 バイトずつ追記するので、コピー元とコピー先が重なる場合も仕様どおり。
+                for (size_t i = 0; i < count; ++i) {
+                    out.push_back(out[static_cast<size_t>(targetRelative++)]);
+                }
+                ++stats.targetCopy;
+                if (delta < 0) { ++stats.negativeTargetCopy; }
+            }
+        }
+    }
+    return out.size() == targetSize &&
+           ReadLe32At(patch, end) == TestCrc32(source.data(), source.size()) &&
+           ReadLe32At(patch, end + 4) == TestCrc32(out.data(), out.size()) &&
+           ReadLe32At(patch, end + 8) == TestCrc32(patch.data(), patch.size() - 4);
+}
+
+// body（命令列）の前後にヘッダとフッタを付けた BPS を組み立てる。targetCrcData は
+//   フッタへ書く変更後データ（不正命令のパッチでは意図した結果を渡す）。
+static std::vector<unsigned char> BuildTestBps(const std::vector<unsigned char>& source,
+                                               const std::vector<unsigned char>& targetCrcData,
+                                               const std::vector<unsigned char>& body) {
+    std::vector<unsigned char> patch = {'B', 'P', 'S', '1'};
+    AppendBpsVar(patch, source.size());
+    AppendBpsVar(patch, targetCrcData.size());
+    AppendBpsVar(patch, 0);
+    patch.insert(patch.end(), body.begin(), body.end());
+    AppendLe32(patch, TestCrc32(source.data(), source.size()));
+    AppendLe32(patch, TestCrc32(targetCrcData.data(), targetCrcData.size()));
+    AppendLe32(patch, TestCrc32(patch.data(), patch.size()));
+    return patch;
+}
+
+static void AppendBpsSigned(std::vector<unsigned char>& bytes, long long value) {
+    const std::uint64_t magnitude = static_cast<std::uint64_t>(value < 0 ? -value : value);
+    AppendBpsVar(bytes, (magnitude << 1) | (value < 0 ? 1u : 0u));
+}
+
+// 決定的で周期を持たないデータ（4 バイトの窓がほぼ一意になり、SourceCopy の探索先が
+//   一つに定まる）。
+static std::vector<unsigned char> NonPeriodicBytes(size_t size, std::uint32_t seed) {
+    std::vector<unsigned char> bytes(size);
+    std::uint32_t state = seed;
+    for (unsigned char& value : bytes) {
+        state = state * 1664525u + 1013904223u;
+        value = static_cast<unsigned char>(state >> 24);
+    }
+    return bytes;
+}
+
+static void TestBinaryPatchBpsCoverage() {
+    TestPrintf("TestBinaryPatchBpsCoverage\n");
+    using stirling::ApplyBinaryPatch;
+    using stirling::BinaryPatchFormat;
+    using stirling::BinaryPatchStatus;
+    using stirling::GenerateBinaryPatch;
+
+    // サイズ変更を含む生成→適用の往復。製品の適用結果と参照デコーダの結果の両方を
+    //   変更後ファイルと突き合わせる。
+    const std::vector<unsigned char> base = NonPeriodicBytes(4096, 0x265u);
+    const auto slice = [&base](size_t begin, size_t end) {
+        return std::vector<unsigned char>(base.begin() + begin, base.begin() + end);
+    };
+    const auto concat = [](std::initializer_list<std::vector<unsigned char>> parts) {
+        std::vector<unsigned char> joined;
+        for (const auto& part : parts) { joined.insert(joined.end(), part.begin(), part.end()); }
+        return joined;
+    };
+    const auto bytesOf = [](const char* text) {
+        return std::vector<unsigned char>(text, text + std::strlen(text));
+    };
+    std::vector<unsigned char> repeated;
+    for (int i = 0; i < 1024; ++i) { repeated.insert(repeated.end(), {'A', 'B', 'C', 'D'}); }
+    std::vector<unsigned char> repeatedShifted(repeated.begin(), repeated.begin() + 2048);
+    const std::vector<unsigned char> repeatedInsert = bytesOf("INSERTED-265");
+    repeatedShifted.insert(repeatedShifted.end(), repeatedInsert.begin(), repeatedInsert.end());
+    repeatedShifted.insert(repeatedShifted.end(), repeated.begin() + 2048, repeated.end());
+
+    struct RoundTripCase {
+        const char* name;
+        std::vector<unsigned char> source;
+        std::vector<unsigned char> target;
+        bool expectNegativeSourceCopy;
+    };
+    const std::vector<RoundTripCase> cases = {
+        {"insert_middle", base, concat({slice(0, 2000), bytesOf("INSERTED-265"), slice(2000, 4096)}), false},
+        {"delete_middle", base, concat({slice(0, 1500), slice(1800, 4096)}), false},
+        {"prepend", base, concat({bytesOf("HDR"), base}), false},
+        {"grow_tail", base, concat({base, NonPeriodicBytes(300, 0x77u)}), false},
+        {"shrink_tail", base, slice(0, 3000), false},
+        // 後半→前半の順に並べ替えると、2 つ目の SourceCopy は元ファイルの先頭へ戻る
+        //   （負の相対オフセット）。
+        {"swap_halves", base, concat({slice(2048, 4096), slice(0, 2048)}), true},
+        {"identical", base, base, false},
+        {"empty_to_empty", {}, {}, false},
+        {"empty_to_data", {}, bytesOf("new data"), false},
+        {"data_to_empty", base, {}, false},
+        {"repeated_shift", repeated, repeatedShifted, false},
+        // 1MiB を超える TargetRead は 1MiB ごとに分割される。
+        {"large_literal", {}, NonPeriodicBytes(0x100000 + 100, 0x1234u), false},
+    };
+
+    // 既定の探索設定に加え、ハッシュ索引を間引き（stride > 1）・候補探索を 1 件に絞った
+    //   設定でも往復が壊れないことを確かめる。
+    stirling::BinaryPatchOptions constrained;
+    constrained.limits.bpsHashMemoryBytes = 256;
+    constrained.limits.bpsHashSearchLimit = 1;
+    constrained.limits.bpsHashCompareBytes = 4096;
+    const std::pair<const char*, stirling::BinaryPatchOptions> optionSets[] = {
+        {"default", stirling::BinaryPatchOptions()},
+        {"constrained", constrained},
+    };
+
+    for (const auto& c : cases) {
+        for (const auto& optionSet : optionSets) {
+            char where[160];
+            const fs::path source = TempFile("bps_cov_source");
+            const fs::path target = TempFile("bps_cov_target");
+            const fs::path patch = TempFile("bps_cov_patch");
+            const fs::path output = TempFile("bps_cov_output");
+            WriteFile(source, c.source);
+            WriteFile(target, c.target);
+
+            const auto generated = GenerateBinaryPatch(source.wstring().c_str(),
+                                                       target.wstring().c_str(),
+                                                       patch.wstring().c_str(),
+                                                       BinaryPatchFormat::kBps,
+                                                       optionSet.second);
+            std::snprintf(where, sizeof(where), "BPS %s/%s generation succeeds",
+                          c.name, optionSet.first);
+            CHECK(generated.Ok() && generated.sourceVerified && generated.targetVerified &&
+                  generated.sourceSize == static_cast<FileOffset>(c.source.size()) &&
+                  generated.targetSize == static_cast<FileOffset>(c.target.size()), where);
+
+            const auto applied = ApplyBinaryPatch(source.wstring().c_str(),
+                                                  patch.wstring().c_str(),
+                                                  output.wstring().c_str());
+            std::snprintf(where, sizeof(where), "BPS %s/%s applies byte-identically",
+                          c.name, optionSet.first);
+            CHECK(applied.Ok() && applied.sourceVerified && applied.targetVerified &&
+                  ReadFileBytes(output) == c.target, where);
+
+            std::vector<unsigned char> decoded;
+            BpsReferenceStats stats;
+            const bool decodedOk = DecodeBpsReference(ReadFileBytes(patch), c.source,
+                                                      decoded, stats);
+            std::snprintf(where, sizeof(where), "BPS %s/%s decodes with the reference decoder",
+                          c.name, optionSet.first);
+            CHECK(decodedOk && decoded == c.target, where);
+            if (c.expectNegativeSourceCopy && std::strcmp(optionSet.first, "default") == 0) {
+                std::snprintf(where, sizeof(where), "BPS %s emits a negative SourceCopy", c.name);
+                CHECK(stats.negativeSourceCopy > 0, where);
+            }
+            if (std::strcmp(c.name, "large_literal") == 0) {
+                CHECK(stats.targetRead == 2 && stats.sourceRead == 0 && stats.sourceCopy == 0,
+                      "BPS literal longer than 1MiB is split into two TargetReads");
+            }
+
+            std::error_code ec;
+            for (const fs::path& path : {source, target, patch, output}) { fs::remove(path, ec); }
+        }
+    }
+
+    // 負の相対オフセットを使う手書き BPS（製品のエンコーダに依存しない）。
+    //   source "ABCDEFGH" -> target "EFCDZCDZFC"
+    const std::vector<unsigned char> negSource = bytesOf("ABCDEFGH");
+    const std::vector<unsigned char> negTarget = bytesOf("EFCDZCDZFC");
+    std::vector<unsigned char> negBody;
+    AppendBpsVar(negBody, ((2 - 1) << 2) | 2); AppendBpsSigned(negBody, +4);  // SourceCopy "EF"
+    AppendBpsVar(negBody, ((2 - 1) << 2) | 2); AppendBpsSigned(negBody, -4);  // SourceCopy "CD"
+    AppendBpsVar(negBody, ((1 - 1) << 2) | 1); negBody.push_back('Z');        // TargetRead "Z"
+    AppendBpsVar(negBody, ((3 - 1) << 2) | 3); AppendBpsSigned(negBody, +2);  // TargetCopy "CDZ"
+    AppendBpsVar(negBody, ((2 - 1) << 2) | 3); AppendBpsSigned(negBody, -4);  // TargetCopy "FC"
+    const std::vector<unsigned char> negPatch = BuildTestBps(negSource, negTarget, negBody);
+    {
+        std::vector<unsigned char> decoded;
+        BpsReferenceStats stats;
+        CHECK(DecodeBpsReference(negPatch, negSource, decoded, stats) && decoded == negTarget &&
+              stats.negativeSourceCopy == 1 && stats.negativeTargetCopy == 1,
+              "negative-delta BPS fixture is valid for the reference decoder");
+    }
+    const fs::path negSourcePath = TempFile("bps_neg_source");
+    const fs::path negPatchPath = TempFile("bps_neg_patch");
+    const fs::path negOutput = TempFile("bps_neg_output");
+    WriteFile(negSourcePath, negSource);
+    WriteFile(negPatchPath, negPatch);
+    const auto negResult = ApplyBinaryPatch(negSourcePath.wstring().c_str(),
+                                            negPatchPath.wstring().c_str(),
+                                            negOutput.wstring().c_str());
+    CHECK(negResult.Ok() && ReadFileBytes(negOutput) == negTarget,
+          "BPS negative SourceCopy/TargetCopy deltas apply");
+
+    // 負の差分で相対位置が 0 を下回る SourceCopy / TargetCopy は不正なパッチとして拒否する。
+    std::vector<unsigned char> sourceUnderflowBody;
+    AppendBpsVar(sourceUnderflowBody, ((1 - 1) << 2) | 2); AppendBpsSigned(sourceUnderflowBody, -1);
+    std::vector<unsigned char> targetUnderflowBody;
+    AppendBpsVar(targetUnderflowBody, ((1 - 1) << 2) | 1); targetUnderflowBody.push_back('Z');
+    AppendBpsVar(targetUnderflowBody, ((1 - 1) << 2) | 3); AppendBpsSigned(targetUnderflowBody, -1);
+    const std::pair<const char*, std::vector<unsigned char>> underflows[] = {
+        {"BPS SourceCopy before the source start is rejected",
+         BuildTestBps(negSource, bytesOf("A"), sourceUnderflowBody)},
+        {"BPS TargetCopy before the target start is rejected",
+         BuildTestBps(negSource, bytesOf("ZZ"), targetUnderflowBody)},
+    };
+    for (const auto& underflow : underflows) {
+        const fs::path underflowPatch = TempFile("bps_underflow_patch");
+        const fs::path underflowOut = TempFile("bps_underflow_out");
+        WriteFile(underflowPatch, underflow.second);
+        const auto result = ApplyBinaryPatch(negSourcePath.wstring().c_str(),
+                                             underflowPatch.wstring().c_str(),
+                                             underflowOut.wstring().c_str());
+        CHECK(result.status == BinaryPatchStatus::kInvalidPatch && !fs::exists(underflowOut),
+              underflow.first);
+        std::error_code ec;
+        fs::remove(underflowPatch, ec);
+        fs::remove(underflowOut, ec);
+    }
+
+    // ヘッダの元ファイルサイズが実際の元ファイルと異なる場合は、CRC を計算する前に
+    //   元ファイルの不一致として拒否する。
+    const fs::path shortSource = TempFile("bps_short_source");
+    const fs::path shortSourceOut = TempFile("bps_short_source_out");
+    WriteFile(shortSource, bytesOf("ABCDEFG"));
+    const auto sizeMismatch = ApplyBinaryPatch(shortSource.wstring().c_str(),
+                                               negPatchPath.wstring().c_str(),
+                                               shortSourceOut.wstring().c_str());
+    CHECK(sizeMismatch.status == BinaryPatchStatus::kSourceMismatch &&
+          !fs::exists(shortSourceOut),
+          "BPS header source-size mismatch is reported as a source mismatch");
+
+    std::error_code ec;
+    for (const fs::path& path : {negSourcePath, negPatchPath, negOutput, shortSource,
+                                 shortSourceOut}) {
+        fs::remove(path, ec);
+    }
+}
+
+// ---- 上限値・不正入力・失敗時の後始末（Issue #267）----
+// 入力と出力先を 1 シナリオ 1 ディレクトリに置き、実行前後でディレクトリの内容と既存の
+//   出力ファイルを比べる。失敗時に一時ファイル（STP*/STT*/置換用の一時ファイル）が
+//   残らないこと、既存の出力が置き換わらないことを同時に確かめる。
+static const std::vector<unsigned char> kExistingPatchOutput = {0x5a, 0xa5, 0x3c};
+
+struct PatchScenario {
+    fs::path dir;
+    fs::path first;   // apply: 元ファイル / generate: 元ファイル
+    fs::path second;  // apply: パッチ     / generate: 変更後ファイル
+    fs::path output;  // 既存ファイルとして kExistingPatchOutput を置く
+};
+
+static PatchScenario PreparePatchScenario(const std::vector<unsigned char>& first,
+                                          const std::vector<unsigned char>& second) {
+    static int counter = 0;
+    PatchScenario s;
+    s.dir = TestTempRoot() / ("patch_scenario_" + std::to_string(counter++));
+    std::error_code ec;
+    fs::create_directories(s.dir, ec);
+    s.first = s.dir / L"first.bin";
+    s.second = s.dir / L"second.bin";
+    s.output = s.dir / L"output.bin";
+    WriteFile(s.first, first);
+    WriteFile(s.second, second);
+    WriteFile(s.output, kExistingPatchOutput);
+    return s;
+}
+
+static stirling::BinaryPatchResult RunPatchScenario(const PatchScenario& s, bool generate,
+                                                    stirling::BinaryPatchFormat format,
+                                                    const stirling::BinaryPatchOptions& options) {
+    return generate
+        ? stirling::GenerateBinaryPatch(s.first.wstring().c_str(), s.second.wstring().c_str(),
+                                        s.output.wstring().c_str(), format, options)
+        : stirling::ApplyBinaryPatch(s.first.wstring().c_str(), s.second.wstring().c_str(),
+                                     s.output.wstring().c_str(), options);
+}
+
+// apply は出力そのもの、generate は生成したパッチを元ファイルへ適用した結果を expected と比べる。
+static bool PatchScenarioOutputMatches(const PatchScenario& s, bool generate,
+                                       const std::vector<unsigned char>& expected) {
+    if (!generate) { return ReadFileBytes(s.output) == expected; }
+    const fs::path verify = s.dir / L"verify.bin";
+    const bool ok = stirling::ApplyBinaryPatch(s.first.wstring().c_str(),
+                                               s.output.wstring().c_str(),
+                                               verify.wstring().c_str()).Ok() &&
+                    ReadFileBytes(verify) == expected;
+    std::error_code ec;
+    fs::remove(verify, ec);
+    return ok;
+}
+
+static void CheckPatchScenarioFailure(const char* what, bool generate,
+                                      stirling::BinaryPatchFormat format,
+                                      const std::vector<unsigned char>& first,
+                                      const std::vector<unsigned char>& second,
+                                      stirling::BinaryPatchStatus expected,
+                                      const stirling::BinaryPatchOptions& options = {}) {
+    const PatchScenario s = PreparePatchScenario(first, second);
+    const std::vector<std::wstring> before = DirEntryNames(s.dir);
+    const auto result = RunPatchScenario(s, generate, format, options);
+    char where[256];
+    std::snprintf(where, sizeof(where), "%s: status %d (expected %d)", what,
+                  static_cast<int>(result.status), static_cast<int>(expected));
+    CHECK(result.status == expected, where);
+    std::snprintf(where, sizeof(where), "%s: no temporary file remains and the existing output is kept",
+                  what);
+    CHECK(DirEntryNames(s.dir) == before && ReadFileBytes(s.output) == kExistingPatchOutput, where);
+    std::error_code ec;
+    fs::remove_all(s.dir, ec);
+}
+
+static void CheckPatchScenarioSuccess(const char* what, bool generate,
+                                      stirling::BinaryPatchFormat format,
+                                      const std::vector<unsigned char>& first,
+                                      const std::vector<unsigned char>& second,
+                                      const std::vector<unsigned char>& expected,
+                                      const stirling::BinaryPatchOptions& options = {}) {
+    const PatchScenario s = PreparePatchScenario(first, second);
+    const std::vector<std::wstring> before = DirEntryNames(s.dir);
+    const auto result = RunPatchScenario(s, generate, format, options);
+    char where[256];
+    std::snprintf(where, sizeof(where), "%s: succeeds (status %d)", what,
+                  static_cast<int>(result.status));
+    CHECK(result.Ok(), where);
+    std::snprintf(where, sizeof(where), "%s: replaces the existing output without leftovers", what);
+    CHECK(DirEntryNames(s.dir) == before && PatchScenarioOutputMatches(s, generate, expected), where);
+    std::error_code ec;
+    fs::remove_all(s.dir, ec);
+}
+
+// 宣言する結果サイズ・メタデータ・フッタの結果 CRC を個別に指定できる BPS。
+static std::vector<unsigned char> BuildRawBps(const std::vector<unsigned char>& source,
+                                              std::uint64_t declaredTargetSize,
+                                              const std::vector<unsigned char>& metadata,
+                                              const std::vector<unsigned char>& body,
+                                              const std::vector<unsigned char>& targetCrcData) {
+    std::vector<unsigned char> patch = {'B', 'P', 'S', '1'};
+    AppendBpsVar(patch, source.size());
+    AppendBpsVar(patch, declaredTargetSize);
+    AppendBpsVar(patch, metadata.size());
+    patch.insert(patch.end(), metadata.begin(), metadata.end());
+    patch.insert(patch.end(), body.begin(), body.end());
+    AppendLe32(patch, TestCrc32(source.data(), source.size()));
+    AppendLe32(patch, TestCrc32(targetCrcData.data(), targetCrcData.size()));
+    AppendLe32(patch, TestCrc32(patch.data(), patch.size()));
+    return patch;
+}
+
+static void TestBinaryPatchLimitsAndMalformed() {
+    TestPrintf("TestBinaryPatchLimitsAndMalformed\n");
+    using stirling::BinaryPatchFormat;
+    using stirling::BinaryPatchLimits;
+    using stirling::BinaryPatchOptions;
+    using stirling::BinaryPatchStatus;
+    constexpr bool kApply = false;
+    constexpr bool kGenerate = true;
+    constexpr BinaryPatchFormat kIps = BinaryPatchFormat::kIps;
+    constexpr BinaryPatchFormat kBps = BinaryPatchFormat::kBps;
+    const auto bytesOf = [](const char* text) {
+        return std::vector<unsigned char>(text, text + std::strlen(text));
+    };
+    const auto limits = [](const std::function<void(BinaryPatchLimits&)>& mutate) {
+        BinaryPatchOptions options;
+        mutate(options.limits);
+        return options;
+    };
+    struct LimitCase {
+        const char* name;
+        BinaryPatchOptions over;
+        BinaryPatchOptions at;
+    };
+
+    // ---- IPS 適用の上限: 通常レコード 2 バイト + RLE 3 バイトの 2 レコード、16 バイトの元ファイル。
+    const std::vector<unsigned char> ipsSource = NonPeriodicBytes(16, 0x267u);
+    std::vector<unsigned char> ipsPatch = {'P', 'A', 'T', 'C', 'H'};
+    AppendBe24(ipsPatch, 0); AppendBe16(ipsPatch, 2); ipsPatch.push_back('A'); ipsPatch.push_back('B');
+    AppendBe24(ipsPatch, 4); AppendBe16(ipsPatch, 0); AppendBe16(ipsPatch, 3); ipsPatch.push_back('Z');
+    ipsPatch.insert(ipsPatch.end(), {'E', 'O', 'F'});
+    std::vector<unsigned char> ipsExpected = ipsSource;
+    ipsExpected[0] = 'A'; ipsExpected[1] = 'B';
+    ipsExpected[4] = ipsExpected[5] = ipsExpected[6] = 'Z';
+    const FileOffset ipsPatchSize = static_cast<FileOffset>(ipsPatch.size());
+    const LimitCase ipsApplyLimits[] = {
+        {"IPS apply source size",
+         limits([](BinaryPatchLimits& l) { l.ipsApplyMaxSourceBytes = 15; }),
+         limits([](BinaryPatchLimits& l) { l.ipsApplyMaxSourceBytes = 16; })},
+        {"IPS apply patch size",
+         limits([=](BinaryPatchLimits& l) { l.maxPatchBytes = ipsPatchSize - 1; }),
+         limits([=](BinaryPatchLimits& l) { l.maxPatchBytes = ipsPatchSize; })},
+        {"IPS record count",
+         limits([](BinaryPatchLimits& l) { l.maxIpsRecords = 1; }),
+         limits([](BinaryPatchLimits& l) { l.maxIpsRecords = 2; })},
+        {"IPS expanded bytes",
+         limits([](BinaryPatchLimits& l) { l.ipsExpandedBytes = 4; }),
+         limits([](BinaryPatchLimits& l) { l.ipsExpandedBytes = 5; })},
+        {"IPS apply target size",
+         limits([](BinaryPatchLimits& l) { l.ipsApplyMaxTargetBytes = 15; }),
+         limits([](BinaryPatchLimits& l) { l.ipsApplyMaxTargetBytes = 16; })},
+        {"IPS apply temporary budget",
+         limits([](BinaryPatchLimits& l) { l.maxTemporaryBytes = 31; }),
+         limits([](BinaryPatchLimits& l) { l.maxTemporaryBytes = 32; })},
+    };
+    for (const LimitCase& c : ipsApplyLimits) {
+        CheckPatchScenarioFailure(c.name, kApply, kIps, ipsSource, ipsPatch,
+                                  BinaryPatchStatus::kLimitExceeded, c.over);
+        CheckPatchScenarioSuccess(c.name, kApply, kIps, ipsSource, ipsPatch, ipsExpected, c.at);
+    }
+    // レコード保持メモリは sizeof(IpsRecord) に依存するため、超過側だけを確かめる。
+    CheckPatchScenarioFailure("IPS record memory", kApply, kIps, ipsSource, ipsPatch,
+                              BinaryPatchStatus::kLimitExceeded,
+                              limits([](BinaryPatchLimits& l) { l.ipsRecordMemoryBytes = 8; }));
+
+    // ---- BPS 適用の上限: 5 命令、元 8 バイト、結果 10 バイト。
+    const std::vector<unsigned char> bpsSource = bytesOf("ABCDEFGH");
+    const std::vector<unsigned char> bpsTarget = bytesOf("EFCDZCDZFC");
+    std::vector<unsigned char> bpsBody;
+    AppendBpsVar(bpsBody, ((2 - 1) << 2) | 2); AppendBpsSigned(bpsBody, +4);
+    AppendBpsVar(bpsBody, ((2 - 1) << 2) | 2); AppendBpsSigned(bpsBody, -4);
+    AppendBpsVar(bpsBody, ((1 - 1) << 2) | 1); bpsBody.push_back('Z');
+    AppendBpsVar(bpsBody, ((3 - 1) << 2) | 3); AppendBpsSigned(bpsBody, +2);
+    AppendBpsVar(bpsBody, ((2 - 1) << 2) | 3); AppendBpsSigned(bpsBody, -4);
+    const std::vector<unsigned char> bpsPatch = BuildTestBps(bpsSource, bpsTarget, bpsBody);
+    const FileOffset bpsPatchSize = static_cast<FileOffset>(bpsPatch.size());
+    const LimitCase bpsApplyLimits[] = {
+        {"BPS apply source size",
+         limits([](BinaryPatchLimits& l) { l.bpsMaxSourceBytes = 7; }),
+         limits([](BinaryPatchLimits& l) { l.bpsMaxSourceBytes = 8; })},
+        {"BPS apply patch size",
+         limits([=](BinaryPatchLimits& l) { l.maxPatchBytes = bpsPatchSize - 1; }),
+         limits([=](BinaryPatchLimits& l) { l.maxPatchBytes = bpsPatchSize; })},
+        {"BPS apply target size",
+         limits([](BinaryPatchLimits& l) { l.bpsMaxTargetBytes = 9; }),
+         limits([](BinaryPatchLimits& l) { l.bpsMaxTargetBytes = 10; })},
+        {"BPS apply temporary budget",
+         limits([](BinaryPatchLimits& l) { l.maxTemporaryBytes = 19; }),
+         limits([](BinaryPatchLimits& l) { l.maxTemporaryBytes = 20; })},
+        {"BPS instruction count",
+         limits([](BinaryPatchLimits& l) { l.maxBpsInstructions = 4; }),
+         limits([](BinaryPatchLimits& l) { l.maxBpsInstructions = 5; })},
+    };
+    for (const LimitCase& c : bpsApplyLimits) {
+        CheckPatchScenarioFailure(c.name, kApply, kBps, bpsSource, bpsPatch,
+                                  BinaryPatchStatus::kLimitExceeded, c.over);
+        CheckPatchScenarioSuccess(c.name, kApply, kBps, bpsSource, bpsPatch, bpsTarget, c.at);
+    }
+
+    // ---- 生成の上限: 中央へ挿入した変更後ファイル（SourceRead/TargetRead/SourceCopy の 3 命令以上）。
+    const std::vector<unsigned char> genSource = NonPeriodicBytes(3000, 0x2671u);
+    std::vector<unsigned char> genTarget(genSource.begin(), genSource.begin() + 1000);
+    const std::vector<unsigned char> genInsert = bytesOf("INSERTED-267");
+    genTarget.insert(genTarget.end(), genInsert.begin(), genInsert.end());
+    genTarget.insert(genTarget.end(), genSource.begin() + 1000, genSource.end());
+    const FileOffset genSourceSize = static_cast<FileOffset>(genSource.size());
+    const FileOffset genTargetSize = static_cast<FileOffset>(genTarget.size());
+    const LimitCase bpsGenerateLimits[] = {
+        {"BPS generate source size",
+         limits([=](BinaryPatchLimits& l) { l.bpsGenerateMaxSourceBytes = genSourceSize - 1; }),
+         limits([=](BinaryPatchLimits& l) { l.bpsGenerateMaxSourceBytes = genSourceSize; })},
+        {"BPS generate target size",
+         limits([=](BinaryPatchLimits& l) { l.bpsGenerateMaxTargetBytes = genTargetSize - 1; }),
+         limits([=](BinaryPatchLimits& l) { l.bpsGenerateMaxTargetBytes = genTargetSize; })},
+    };
+    for (const LimitCase& c : bpsGenerateLimits) {
+        CheckPatchScenarioFailure(c.name, kGenerate, kBps, genSource, genTarget,
+                                  BinaryPatchStatus::kLimitExceeded, c.over);
+        CheckPatchScenarioSuccess(c.name, kGenerate, kBps, genSource, genTarget, genTarget, c.at);
+    }
+    CheckPatchScenarioFailure("BPS generate instruction count", kGenerate, kBps, genSource, genTarget,
+                              BinaryPatchStatus::kLimitExceeded,
+                              limits([](BinaryPatchLimits& l) { l.maxBpsInstructions = 1; }));
+    CheckPatchScenarioFailure("IPS generate rejects different sizes", kGenerate, kIps,
+                              genSource, genTarget, BinaryPatchStatus::kLimitExceeded);
+
+    // ---- BPS メタデータ: 読み飛ばし、パッチ CRC の対象、長さの検証。
+    const std::vector<unsigned char> metadata = bytesOf("<?xml version=\"1.0\"?><patch/>");
+    const std::vector<unsigned char> metaPatch = BuildRawBps(bpsSource, bpsTarget.size(), metadata,
+                                                             bpsBody, bpsTarget);
+    CheckPatchScenarioSuccess("BPS with metadata", kApply, kBps, bpsSource, metaPatch, bpsTarget);
+    {
+        std::vector<unsigned char> decoded;
+        BpsReferenceStats stats;
+        CHECK(DecodeBpsReference(metaPatch, bpsSource, decoded, stats) && decoded == bpsTarget,
+              "metadata BPS fixture is valid for the reference decoder");
+    }
+    // 1MiB の読込単位を超えるメタデータも読み飛ばせる。
+    const std::vector<unsigned char> largeMetadata(1024u * 1024u + 17u, 'm');
+    CheckPatchScenarioSuccess("BPS with metadata larger than 1MiB", kApply, kBps, bpsSource,
+                              BuildRawBps(bpsSource, bpsTarget.size(), largeMetadata, bpsBody,
+                                          bpsTarget),
+                              bpsTarget);
+    std::vector<unsigned char> tamperedMeta = metaPatch;
+    tamperedMeta[7] ^= 0x01;  // 'BPS1' + 3 つの 1 バイト可変長整数の直後 = メタデータ先頭
+    CheckPatchScenarioFailure("BPS metadata is covered by the patch CRC", kApply, kBps, bpsSource,
+                              tamperedMeta, BinaryPatchStatus::kInvalidPatch);
+    std::vector<unsigned char> overlongMeta = {'B', 'P', 'S', '1'};
+    AppendBpsVar(overlongMeta, bpsSource.size());
+    AppendBpsVar(overlongMeta, 0);
+    AppendBpsVar(overlongMeta, 1000);
+    overlongMeta.insert(overlongMeta.end(), {'m', 'm', 'm'});
+    AppendLe32(overlongMeta, TestCrc32(bpsSource.data(), bpsSource.size()));
+    AppendLe32(overlongMeta, 0);
+    AppendLe32(overlongMeta, TestCrc32(overlongMeta.data(), overlongMeta.size()));
+    CheckPatchScenarioFailure("BPS metadata longer than the patch", kApply, kBps, bpsSource,
+                              overlongMeta, BinaryPatchStatus::kInvalidPatch);
+
+    // ---- BPS の不正命令。
+    std::vector<unsigned char> longReadBody;
+    AppendBpsVar(longReadBody, ((3 - 1) << 2) | 1);
+    longReadBody.insert(longReadBody.end(), {'X', 'Y', 'Z'});
+    CheckPatchScenarioFailure("BPS instruction longer than the remaining target", kApply, kBps,
+                              bpsSource, BuildRawBps(bpsSource, 2, {}, longReadBody, bytesOf("XYZ")),
+                              BinaryPatchStatus::kInvalidPatch);
+    // 命令をすべて処理しても宣言サイズに届かない（フッタの CRC は処理結果と一致させる）。
+    CheckPatchScenarioFailure("BPS instructions shorter than the declared target", kApply, kBps,
+                              bpsSource, BuildRawBps(bpsSource, 5, {}, longReadBody, bytesOf("XYZ")),
+                              BinaryPatchStatus::kInvalidPatch);
+    // 終端ビットの無い 10 バイトの可変長整数。
+    CheckPatchScenarioFailure("BPS unterminated variable-length integer", kApply, kBps, bpsSource,
+                              BuildRawBps(bpsSource, 1, {}, std::vector<unsigned char>(10, 0x00),
+                                          bytesOf("X")),
+                              BinaryPatchStatus::kInvalidPatch);
+    CheckPatchScenarioFailure("BPS declared target size beyond FileOffset", kApply, kBps, bpsSource,
+                              BuildRawBps(bpsSource, 1ull << 63, {}, {}, {}),
+                              BinaryPatchStatus::kInvalidPatch);
+
+    // ---- 不明なマジック。
+    std::vector<unsigned char> bps2 = bpsPatch;
+    bps2[3] = '2';
+    CheckPatchScenarioFailure("unknown magic BPS2", kApply, kBps, bpsSource, bps2,
+                              BinaryPatchStatus::kInvalidPatch);
+    CheckPatchScenarioFailure("unknown magic XYZW", kApply, kBps, bpsSource,
+                              bytesOf("XYZW0123456789abcdef"), BinaryPatchStatus::kInvalidPatch);
+    CheckPatchScenarioFailure("patch shorter than any magic", kApply, kBps, bpsSource,
+                              bytesOf("BPS"), BinaryPatchStatus::kInvalidPatch);
+    CheckPatchScenarioFailure("IPS-like magic PATCX", kApply, kIps, ipsSource,
+                              bytesOf("PATCXEOF"), BinaryPatchStatus::kInvalidPatch);
+
+    // ---- IPS の不正入力と EOF 拡張。
+    std::vector<unsigned char> zeroRle = {'P', 'A', 'T', 'C', 'H'};
+    AppendBe24(zeroRle, 4); AppendBe16(zeroRle, 0); AppendBe16(zeroRle, 0); zeroRle.push_back('Z');
+    zeroRle.insert(zeroRle.end(), {'E', 'O', 'F'});
+    CheckPatchScenarioFailure("IPS RLE record with zero length", kApply, kIps, ipsSource, zeroRle,
+                              BinaryPatchStatus::kInvalidPatch);
+    for (size_t extra : {1u, 2u, 4u}) {
+        std::vector<unsigned char> trailing = ipsPatch;
+        trailing.insert(trailing.end(), extra, 0x00);
+        char name[80];
+        std::snprintf(name, sizeof(name), "IPS with %zu byte(s) after EOF", extra);
+        CheckPatchScenarioFailure(name, kApply, kIps, ipsSource, trailing,
+                                  BinaryPatchStatus::kInvalidPatch);
+    }
+    // EOF 拡張長（4）より後ろに書くレコードは、最終的な切り詰めで出力に残らない。
+    const std::vector<unsigned char> extSource = bytesOf("0123456789abcdefghijkl");
+    std::vector<unsigned char> beyondExtension = {'P', 'A', 'T', 'C', 'H'};
+    AppendBe24(beyondExtension, 10); AppendBe16(beyondExtension, 4);
+    beyondExtension.insert(beyondExtension.end(), {'W', 'X', 'Y', 'Z', 'E', 'O', 'F'});
+    AppendBe24(beyondExtension, 4);
+    CheckPatchScenarioSuccess("IPS record beyond the EOF extension size", kApply, kIps, extSource,
+                              beyondExtension, bytesOf("0123"));
+
+    // ---- 16MiB ちょうどの IPS 生成: 最終オフセット 0xFFFFFF の変更も 24 ビットに収まる。
+    {
+        const size_t size = static_cast<size_t>(BinaryPatchLimits::kIpsGenerateMaxBytes);
+        std::vector<unsigned char> before(size, 0x00);
+        std::vector<unsigned char> after = before;
+        after.front() = 0x02;
+        after.back() = 0x01;
+        const fs::path source = TempFile("ips_16mib_source");
+        const fs::path target = TempFile("ips_16mib_target");
+        const fs::path patch = TempFile("ips_16mib_patch");
+        const fs::path output = TempFile("ips_16mib_output");
+        WriteFile(source, before);
+        WriteFile(target, after);
+        CHECK(stirling::GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                            patch.wstring().c_str(), kIps).Ok(),
+              "IPS generation succeeds at exactly 16MiB");
+        const std::vector<unsigned char> expectedPatch = {
+            'P', 'A', 'T', 'C', 'H',
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
+            0xff, 0xff, 0xff, 0x00, 0x01, 0x01,
+            'E', 'O', 'F'};
+        CHECK(ReadFileBytes(patch) == expectedPatch, "16MiB IPS writes the last byte at offset 0xFFFFFF");
+        CHECK(stirling::ApplyBinaryPatch(source.wstring().c_str(), patch.wstring().c_str(),
+                                         output.wstring().c_str()).Ok() &&
+              ReadFileBytes(output) == after,
+              "16MiB IPS applies byte-identically");
+        std::error_code ec;
+        for (const fs::path& path : {source, target, patch, output}) { fs::remove(path, ec); }
+    }
+
+    // ---- 中止: 進捗コールバックの N 回目だけ false を返す。N を 1 から増やして、生成・適用の
+    //   全段階（ステージングパッチの作成・検証用の適用・比較・保存先への転送）で中止しても
+    //   一時ファイルが残らず既存の出力が保たれることを確かめる。false を返すのは 1 回だけ
+    //   なので、中止の戻り値を無視する箇所があると処理が成功してしまい検出できる。
+    std::vector<unsigned char> sameSizeTarget = genSource;
+    for (size_t i = 100; i < 140; ++i) { sameSizeTarget[i] ^= 0x5a; }
+    std::fill(sameSizeTarget.begin() + 2000, sameSizeTarget.begin() + 2100,
+              static_cast<unsigned char>(0xcc));
+    std::vector<unsigned char> genBpsPatch;
+    {
+        const fs::path source = TempFile("cancel_fixture_source");
+        const fs::path target = TempFile("cancel_fixture_target");
+        const fs::path patch = TempFile("cancel_fixture_patch");
+        WriteFile(source, genSource);
+        WriteFile(target, genTarget);
+        CHECK(stirling::GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                            patch.wstring().c_str(), kBps).Ok(),
+              "cancel fixture BPS generation");
+        genBpsPatch = ReadFileBytes(patch);
+        std::error_code ec;
+        for (const fs::path& path : {source, target, patch}) { fs::remove(path, ec); }
+    }
+    struct CancelSweep {
+        const char* name;
+        bool generate;
+        BinaryPatchFormat format;
+        const std::vector<unsigned char>& first;
+        const std::vector<unsigned char>& second;
+        const std::vector<unsigned char>& expected;
+    };
+    const CancelSweep sweeps[] = {
+        {"BPS generation", kGenerate, kBps, genSource, genTarget, genTarget},
+        {"IPS generation", kGenerate, kIps, genSource, sameSizeTarget, sameSizeTarget},
+        {"BPS apply", kApply, kBps, genSource, genBpsPatch, genTarget},
+        {"IPS apply", kApply, kIps, ipsSource, ipsPatch, ipsExpected},
+    };
+    for (const CancelSweep& sweep : sweeps) {
+        int cancelled = 0;
+        int firstBad = 0;
+        bool completed = false;
+        for (int cancelAt = 1; cancelAt <= 20000 && !completed; ++cancelAt) {
+            const PatchScenario s = PreparePatchScenario(sweep.first, sweep.second);
+            const std::vector<std::wstring> before = DirEntryNames(s.dir);
+            int calls = 0;
+            BinaryPatchOptions options;
+            options.progress = [&calls, cancelAt](FileOffset, FileOffset) {
+                return ++calls != cancelAt;
+            };
+            const auto result = RunPatchScenario(s, sweep.generate, sweep.format, options);
+            if (result.Ok()) {
+                // 中止を返した後に成功した場合は、中止の戻り値が無視されている。
+                completed = true;
+                if (calls >= cancelAt ||
+                    !PatchScenarioOutputMatches(s, sweep.generate, sweep.expected)) {
+                    firstBad = cancelAt;
+                }
+            } else {
+                ++cancelled;
+                const bool clean = result.status == BinaryPatchStatus::kCancelled &&
+                                   DirEntryNames(s.dir) == before &&
+                                   ReadFileBytes(s.output) == kExistingPatchOutput;
+                if (!clean && firstBad == 0) { firstBad = cancelAt; }
+            }
+            std::error_code ec;
+            fs::remove_all(s.dir, ec);
+        }
+        char where[200];
+        std::snprintf(where, sizeof(where),
+                      "%s cancelled at every progress call cleans up (cancelled %d times, first bad call %d)",
+                      sweep.name, cancelled, firstBad);
+        CHECK(completed && cancelled > 1 && firstBad == 0, where);
+    }
+}
+
+// ---- 出力先の衝突・結果の付帯情報・IPS 生成の境界（Issue #269）----
+static void TestBinaryPatchConflictsAndIpsBoundaries() {
+    TestPrintf("TestBinaryPatchConflictsAndIpsBoundaries\n");
+    using stirling::ApplyBinaryPatch;
+    using stirling::BinaryPatchFormat;
+    using stirling::BinaryPatchStatus;
+    using stirling::GenerateBinaryPatch;
+    const auto bytesOf = [](const char* text) {
+        return std::vector<unsigned char>(text, text + std::strlen(text));
+    };
+
+    // ---- 出力先の衝突: 保存先が入力と同じファイル（同一パス・ハードリンク）なら、
+    //   何も書かずに kConflict を返す。入力ファイルとディレクトリの内容は変わらない。
+    {
+        static int counter = 0;
+        const fs::path dir = TestTempRoot() / ("patch_conflict_" + std::to_string(counter++));
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const std::vector<unsigned char> sourceBytes = bytesOf("0123456789");
+        const std::vector<unsigned char> targetBytes = bytesOf("01234ABCDE");
+        const fs::path source = dir / L"source.bin";
+        const fs::path target = dir / L"target.bin";
+        const fs::path patch = dir / L"patch.ips";
+        WriteFile(source, sourceBytes);
+        WriteFile(target, targetBytes);
+        CHECK(GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                  patch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(),
+              "conflict fixture IPS generation");
+        const std::vector<unsigned char> patchBytes = ReadFileBytes(patch);
+        const fs::path sourceLink = dir / L"source-link.bin";
+        const fs::path targetLink = dir / L"target-link.bin";
+        const fs::path patchLink = dir / L"patch-link.ips";
+        fs::create_hard_link(source, sourceLink, ec);
+        CHECK(!ec, "hard link to the source");
+        fs::create_hard_link(target, targetLink, ec);
+        CHECK(!ec, "hard link to the target");
+        fs::create_hard_link(patch, patchLink, ec);
+        CHECK(!ec, "hard link to the patch");
+        const std::vector<std::wstring> before = DirEntryNames(dir);
+
+        struct ConflictCase {
+            const char* name;
+            bool generate;
+            fs::path output;
+        };
+        const ConflictCase cases[] = {
+            {"generate: patch path is the source", true, source},
+            {"generate: patch path is the target", true, target},
+            {"generate: patch path is a hard link to the source", true, sourceLink},
+            {"generate: patch path is a hard link to the target", true, targetLink},
+            {"apply: result path is the patch", false, patch},
+            {"apply: result path is a hard link to the source", false, sourceLink},
+            {"apply: result path is a hard link to the patch", false, patchLink},
+        };
+        for (const ConflictCase& c : cases) {
+            const auto result = c.generate
+                ? GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                      c.output.wstring().c_str(), BinaryPatchFormat::kBps)
+                : ApplyBinaryPatch(source.wstring().c_str(), patch.wstring().c_str(),
+                                   c.output.wstring().c_str());
+            char where[160];
+            std::snprintf(where, sizeof(where), "%s is rejected as a conflict (status %d)", c.name,
+                          static_cast<int>(result.status));
+            CHECK(result.status == BinaryPatchStatus::kConflict, where);
+            std::snprintf(where, sizeof(where), "%s leaves the inputs and the directory unchanged",
+                          c.name);
+            CHECK(ReadFileBytes(source) == sourceBytes && ReadFileBytes(target) == targetBytes &&
+                  ReadFileBytes(patch) == patchBytes && DirEntryNames(dir) == before, where);
+        }
+        fs::remove_all(dir, ec);
+    }
+
+    // ---- 結果の付帯情報: 検証の有無と入出力サイズ。
+    {
+        const std::vector<unsigned char> source = bytesOf("0123456789abcdef");
+        std::vector<unsigned char> target = source;
+        target[3] = 'X';
+        const fs::path sourcePath = TempFile("result_fields_source");
+        const fs::path targetPath = TempFile("result_fields_target");
+        const fs::path ipsPath = TempFile("result_fields_ips");
+        const fs::path extendedIpsPath = TempFile("result_fields_ips_extended");
+        const fs::path output = TempFile("result_fields_output");
+        WriteFile(sourcePath, source);
+        WriteFile(targetPath, target);
+
+        const auto generated = GenerateBinaryPatch(sourcePath.wstring().c_str(),
+                                                   targetPath.wstring().c_str(),
+                                                   ipsPath.wstring().c_str(),
+                                                   BinaryPatchFormat::kIps);
+        CHECK(generated.Ok() && generated.sourceVerified && generated.targetVerified &&
+              generated.sourceSize == 16 && generated.targetSize == 16,
+              "IPS generation reports verified sizes (generate -> apply -> compare)");
+
+        const auto applied = ApplyBinaryPatch(sourcePath.wstring().c_str(),
+                                              ipsPath.wstring().c_str(),
+                                              output.wstring().c_str());
+        CHECK(applied.Ok() && !applied.sourceVerified && !applied.targetVerified &&
+              applied.sourceSize == 16 && applied.targetSize == 16,
+              "IPS apply reports no source/target verification");
+
+        std::vector<unsigned char> extended = {'P', 'A', 'T', 'C', 'H', 'E', 'O', 'F'};
+        AppendBe24(extended, 20);
+        WriteFile(extendedIpsPath, extended);
+        const auto extendedApplied = ApplyBinaryPatch(sourcePath.wstring().c_str(),
+                                                      extendedIpsPath.wstring().c_str(),
+                                                      output.wstring().c_str());
+        CHECK(extendedApplied.Ok() && extendedApplied.sourceSize == 16 &&
+              extendedApplied.targetSize == 20 && ReadFileBytes(output).size() == 20,
+              "IPS apply reports the EOF-extended target size");
+
+        const fs::path bpsPath = TempFile("result_fields_bps");
+        const fs::path wrongSource = TempFile("result_fields_wrong_source");
+        CHECK(GenerateBinaryPatch(sourcePath.wstring().c_str(), targetPath.wstring().c_str(),
+                                  bpsPath.wstring().c_str(), BinaryPatchFormat::kBps).Ok(),
+              "result-field fixture BPS generation");
+        const auto bpsApplied = ApplyBinaryPatch(sourcePath.wstring().c_str(),
+                                                 bpsPath.wstring().c_str(),
+                                                 output.wstring().c_str());
+        CHECK(bpsApplied.Ok() && bpsApplied.sourceVerified && bpsApplied.targetVerified &&
+              bpsApplied.sourceSize == 16 && bpsApplied.targetSize == 16,
+              "BPS apply reports verified source and target");
+        std::vector<unsigned char> wrong = source;
+        wrong[0] ^= 0x01;
+        WriteFile(wrongSource, wrong);
+        const auto mismatch = ApplyBinaryPatch(wrongSource.wstring().c_str(),
+                                               bpsPath.wstring().c_str(),
+                                               output.wstring().c_str());
+        CHECK(mismatch.status == BinaryPatchStatus::kSourceMismatch &&
+              !mismatch.sourceVerified && !mismatch.targetVerified,
+              "BPS source mismatch does not report verification");
+
+        std::error_code ec;
+        for (const fs::path& path : {sourcePath, targetPath, ipsPath, extendedIpsPath, output,
+                                     bpsPath, wrongSource}) {
+            fs::remove(path, ec);
+        }
+    }
+
+    // ---- IPS 生成の境界。各ケースはレコードを解析して構造を確かめ、往復で内容も確かめる。
+    struct IpsBoundaryCase {
+        const char* name;
+        std::vector<unsigned char> source;
+        std::vector<unsigned char> target;
+        std::vector<TestIpsRecord> expected;  // value は RLE のときだけ比較する
+    };
+    std::vector<IpsBoundaryCase> ipsCases;
+    {
+        // 同じ値が 3 バイトなら通常レコード（5+3 バイト）、4 バイトなら RLE（8 バイト）。
+        IpsBoundaryCase c{"IPS RLE threshold", std::vector<unsigned char>(64, 0x00), {}, {}};
+        c.target = c.source;
+        std::fill(c.target.begin() + 10, c.target.begin() + 13, static_cast<unsigned char>(0x77));
+        std::fill(c.target.begin() + 30, c.target.begin() + 34, static_cast<unsigned char>(0x77));
+        c.expected = {{10, 3, false, 0}, {30, 4, true, 0x77}};
+        ipsCases.push_back(std::move(c));
+    }
+    constexpr std::uint32_t kEofOffset = 0x454f46;
+    {
+        // 65535 バイトで分割した直後が 0x454F46 になる変更。2 つ目のレコードは 1 バイト
+        //   手前（0x454F45）から始め、EOF マーカーと衝突しない。
+        const std::uint32_t start = kEofOffset - 0xffff;
+        IpsBoundaryCase c{"IPS split landing on the EOF offset",
+                          std::vector<unsigned char>(kEofOffset + 64, 0x00), {}, {}};
+        c.target = c.source;
+        for (std::uint32_t i = 0; i < 0xffff + 10; ++i) {
+            c.target[start + i] = static_cast<unsigned char>((i & 1) ? 0xa5 : 0xa6);
+        }
+        c.expected = {{start, 0xffff, false, 0}, {kEofOffset - 1, 11, false, 0}};
+        ipsCases.push_back(std::move(c));
+    }
+    {
+        // 0x454F46 から始まる同じ値の連続。手前の 1 バイトを含めるため一様でなくなり、
+        //   RLE ではなく通常レコードになる。
+        IpsBoundaryCase c{"IPS uniform run starting at the EOF offset",
+                          std::vector<unsigned char>(kEofOffset + 256, 0x00), {}, {}};
+        c.target = c.source;
+        std::fill(c.target.begin() + kEofOffset, c.target.begin() + kEofOffset + 100,
+                  static_cast<unsigned char>(0x33));
+        c.expected = {{kEofOffset - 1, 101, false, 0}};
+        ipsCases.push_back(std::move(c));
+    }
+    for (const IpsBoundaryCase& c : ipsCases) {
+        const fs::path source = TempFile("ips_boundary_source");
+        const fs::path target = TempFile("ips_boundary_target");
+        const fs::path patch = TempFile("ips_boundary_patch");
+        const fs::path output = TempFile("ips_boundary_output");
+        WriteFile(source, c.source);
+        WriteFile(target, c.target);
+        char where[160];
+        std::snprintf(where, sizeof(where), "%s: generation succeeds", c.name);
+        CHECK(GenerateBinaryPatch(source.wstring().c_str(), target.wstring().c_str(),
+                                  patch.wstring().c_str(), BinaryPatchFormat::kIps).Ok(), where);
+        std::vector<TestIpsRecord> records;
+        bool matches = ParseIpsRecords(ReadFileBytes(patch), records) &&
+                       records.size() == c.expected.size();
+        for (size_t i = 0; matches && i < records.size(); ++i) {
+            const TestIpsRecord& got = records[i];
+            const TestIpsRecord& want = c.expected[i];
+            matches = got.offset == want.offset && got.length == want.length &&
+                      got.rle == want.rle && (!want.rle || got.value == want.value) &&
+                      got.offset != kEofOffset;
+        }
+        std::snprintf(where, sizeof(where), "%s: record layout", c.name);
+        CHECK(matches, where);
+        std::snprintf(where, sizeof(where), "%s: applies byte-identically", c.name);
+        CHECK(ApplyBinaryPatch(source.wstring().c_str(), patch.wstring().c_str(),
+                               output.wstring().c_str()).Ok() &&
+              ReadFileBytes(output) == c.target, where);
+        std::error_code ec;
+        for (const fs::path& path : {source, target, patch, output}) { fs::remove(path, ec); }
+    }
+}
+
+// ---- 挿入・削除でずれた後の再同期とパッチサイズ（Issue #278）----
+// 4MiB を超える元ファイルでは索引を一定間隔で間引く。挿入・削除でずれた後に一致を
+//   見つけ直せないと、挿入のたびに大きなリテラルが入りパッチが肥大する（64MiB に
+//   1 バイト挿入 × 1000 で約 23MB になっていた）。編集 1 か所あたりの増分が小さいことを、
+//   パッチサイズの上限で確かめる。
+static void TestBinaryPatchShiftRealignment() {
+    TestPrintf("TestBinaryPatchShiftRealignment\n");
+    using stirling::BinaryPatchFormat;
+
+    struct ShiftCase {
+        const char* name;
+        size_t size;
+        size_t maxPatchBytes;
+        std::uint64_t compareBytes;  // bpsHashCompareBytes（0 = 既定値）
+    };
+    // 100 か所の挿入・削除（各 1〜17 バイト）。1 か所あたり 80 バイト程度までを許容する。
+    //   比較上限を元ファイルより小さくしたケースは、採用した長い一致（ずれた後の本物の
+    //   コピー）を上限に数えて使い切り、以降の SourceCopy 探索が止まらないことを確かめる
+    //   （既定の 256MiB 上限では 192MiB 以上のファイルで起きていた）。
+    const ShiftCase cases[] = {
+        {"2MiB (full index)", 2u * 1024u * 1024u, 8 * 1024, 0},
+        {"16MiB (sampled index)", 16u * 1024u * 1024u, 8 * 1024, 0},
+        {"2MiB with a 1MiB compare budget", 2u * 1024u * 1024u, 8 * 1024, 1024u * 1024u},
+    };
+    for (const ShiftCase& c : cases) {
+        const std::vector<unsigned char> source = NonPeriodicBytes(c.size, 0x278u);
+        std::vector<unsigned char> target = source;
+        std::mt19937 rng(0x2780u);
+        std::vector<size_t> offsets;
+        for (int i = 0; i < 100; ++i) { offsets.push_back(static_cast<size_t>(rng() % (c.size - 64))); }
+        std::sort(offsets.rbegin(), offsets.rend());   // 後ろから編集して前の位置をずらさない
+        for (size_t offset : offsets) {
+            const size_t length = 1 + rng() % 17;
+            if (rng() % 2 == 0) {
+                std::vector<unsigned char> inserted(length);
+                for (unsigned char& b : inserted) { b = static_cast<unsigned char>(rng()); }
+                target.insert(target.begin() + offset, inserted.begin(), inserted.end());
+            } else {
+                target.erase(target.begin() + offset, target.begin() + offset + length);
+            }
+        }
+
+        const PatchScenario s = PreparePatchScenario(source, target);
+        stirling::BinaryPatchOptions options;
+        if (c.compareBytes != 0) { options.limits.bpsHashCompareBytes = c.compareBytes; }
+        const auto result = RunPatchScenario(s, true, BinaryPatchFormat::kBps, options);
+        const std::vector<unsigned char> patch = ReadFileBytes(s.output);
+        std::vector<unsigned char> decoded;
+        BpsReferenceStats stats;
+        char where[200];
+        std::snprintf(where, sizeof(where), "%s: shifted BPS generation decodes", c.name);
+        CHECK(result.Ok() && DecodeBpsReference(patch, source, decoded, stats) && decoded == target,
+              where);
+        std::snprintf(where, sizeof(where), "%s: 100 edits make a small patch (%zu bytes, limit %zu)",
+                      c.name, patch.size(), c.maxPatchBytes);
+        CHECK(patch.size() <= c.maxPatchBytes, where);
+        std::error_code ec;
+        fs::remove_all(s.dir, ec);
+    }
+}
+
+// ---- TargetCopy の生成（Issue #279）----
+// 変更後ファイルの中で繰り返す内容が元ファイルに無いと、TargetCopy を使わなければ
+//   すべてリテラルになる（空 → 16MiB のゼロで 16MB のパッチ）。既出の変更後データからの
+//   コピー（重なりを含む）で小さくなること、参照デコーダで復号できることを確かめる。
+static void TestBinaryPatchTargetCopy() {
+    TestPrintf("TestBinaryPatchTargetCopy\n");
+    using stirling::BinaryPatchFormat;
+
+    const size_t mib = 1024u * 1024u;
+    const std::vector<unsigned char> block = NonPeriodicBytes(4096, 0x2791u);
+    std::vector<unsigned char> blocks;
+    for (int i = 0; i < 1024; ++i) { blocks.insert(blocks.end(), block.begin(), block.end()); }
+    std::vector<unsigned char> abc;
+    for (size_t i = 0; i < mib; ++i) { abc.push_back(static_cast<unsigned char>('A' + i % 3)); }
+    const std::vector<unsigned char> base = NonPeriodicBytes(2 * mib, 0x2792u);
+    std::vector<unsigned char> zeroFilled(base.begin(), base.begin() + mib);
+    zeroFilled.insert(zeroFilled.end(), mib, 0x00);
+    zeroFilled.insert(zeroFilled.end(), base.begin() + mib, base.end());
+
+    struct TargetCopyCase {
+        const char* name;
+        std::vector<unsigned char> source;
+        std::vector<unsigned char> target;
+        size_t maxPatchBytes;
+    };
+    const std::vector<TargetCopyCase> cases = {
+        {"empty -> 16MiB of zeros", {}, std::vector<unsigned char>(16 * mib, 0x00), 256},
+        {"1KiB -> a 4KiB block repeated 1024 times", NonPeriodicBytes(1024, 0x2793u), blocks,
+         4096 + 512},
+        {"empty -> period-3 pattern", {}, abc, 256},
+        {"2MiB with 1MiB of zero fill inserted", base, zeroFilled, 512},
+    };
+    for (const TargetCopyCase& c : cases) {
+        const PatchScenario s = PreparePatchScenario(c.source, c.target);
+        const auto result = RunPatchScenario(s, true, BinaryPatchFormat::kBps,
+                                             stirling::BinaryPatchOptions());
+        const std::vector<unsigned char> patch = ReadFileBytes(s.output);
+        std::vector<unsigned char> decoded;
+        BpsReferenceStats stats;
+        char where[200];
+        std::snprintf(where, sizeof(where), "%s: generation decodes with the reference decoder",
+                      c.name);
+        CHECK(result.Ok() && DecodeBpsReference(patch, c.source, decoded, stats) &&
+              decoded == c.target, where);
+        std::snprintf(where, sizeof(where), "%s: uses TargetCopy (%zu bytes, limit %zu)",
+                      c.name, patch.size(), c.maxPatchBytes);
+        CHECK(stats.targetCopy > 0 && patch.size() <= c.maxPatchBytes, where);
+        std::error_code ec;
+        fs::remove_all(s.dir, ec);
+    }
+
+    // bpsTargetHashMemoryBytes = 0 は TargetCopy を生成しない（従来どおりリテラル）。
+    {
+        const std::vector<unsigned char> zeros(64 * 1024, 0x00);
+        const PatchScenario s = PreparePatchScenario({}, zeros);
+        stirling::BinaryPatchOptions options;
+        options.limits.bpsTargetHashMemoryBytes = 0;
+        const auto result = RunPatchScenario(s, true, BinaryPatchFormat::kBps, options);
+        std::vector<unsigned char> decoded;
+        BpsReferenceStats stats;
+        CHECK(result.Ok() && DecodeBpsReference(ReadFileBytes(s.output), {}, decoded, stats) &&
+              decoded == zeros && stats.targetCopy == 0,
+              "TargetCopy generation can be disabled with bpsTargetHashMemoryBytes = 0");
+        std::error_code ec;
+        fs::remove_all(s.dir, ec);
+    }
+}
+
+// ---- 生成中にパッチが上限を超えたときの状態値（Issue #271）----
+// ステージングパッチの書込上限（maxPatchBytes）を 0 から「実際のパッチサイズ - 1」まで
+//   変えて生成する。ヘッダ・レコード/命令・リテラル・フッタのどこで上限に達しても、
+//   ディスク不足を装った kWriteFailed ではなく、OS エラー無しの kLimitExceeded になること。
+static void TestBinaryPatchGenerateLimitStatus() {
+    TestPrintf("TestBinaryPatchGenerateLimitStatus\n");
+    using stirling::BinaryPatchFormat;
+    using stirling::BinaryPatchStatus;
+
+    const std::vector<unsigned char> source = NonPeriodicBytes(600, 0x2711u);
+    std::vector<unsigned char> sameSize = source;
+    for (size_t i = 40; i < 60; ++i) { sameSize[i] ^= 0x3c; }
+    std::fill(sameSize.begin() + 300, sameSize.begin() + 340, static_cast<unsigned char>(0x99));
+    // BPS: SourceRead・TargetRead・SourceCopy・リテラルを含むよう、挿入と削除を混ぜる。
+    std::vector<unsigned char> resized(source.begin(), source.begin() + 200);
+    const char* inserted = "INSERTED-271";
+    resized.insert(resized.end(), inserted, inserted + std::strlen(inserted));
+    resized.insert(resized.end(), source.begin() + 260, source.end());
+
+    const std::pair<BinaryPatchFormat, const std::vector<unsigned char>*> cases[] = {
+        {BinaryPatchFormat::kIps, &sameSize},
+        {BinaryPatchFormat::kBps, &resized},
+    };
+    for (const auto& c : cases) {
+        const char* name = c.first == BinaryPatchFormat::kIps ? "IPS" : "BPS";
+        const std::vector<unsigned char>& target = *c.second;
+        FileOffset patchSize = 0;
+        {
+            const PatchScenario s = PreparePatchScenario(source, target);
+            CHECK(RunPatchScenario(s, true, c.first, stirling::BinaryPatchOptions()).Ok(),
+                  "limit-status fixture generation");
+            patchSize = static_cast<FileOffset>(ReadFileBytes(s.output).size());
+            std::error_code ec;
+            fs::remove_all(s.dir, ec);
+        }
+        int firstBad = -1;
+        for (FileOffset limit = 0; limit < patchSize; ++limit) {
+            const PatchScenario s = PreparePatchScenario(source, target);
+            const std::vector<std::wstring> entries = DirEntryNames(s.dir);
+            stirling::BinaryPatchOptions options;
+            options.limits.maxPatchBytes = limit;
+            const auto result = RunPatchScenario(s, true, c.first, options);
+            const bool reported = result.status == BinaryPatchStatus::kLimitExceeded &&
+                                  result.systemError == 0 &&
+                                  DirEntryNames(s.dir) == entries &&
+                                  ReadFileBytes(s.output) == kExistingPatchOutput;
+            if (!reported && firstBad < 0) {
+                firstBad = static_cast<int>(limit);
+                TestPrintf("  %s maxPatchBytes=%lld: status %d, system error %lu\n", name,
+                           static_cast<long long>(limit), static_cast<int>(result.status),
+                           result.systemError);
+            }
+            std::error_code ec;
+            fs::remove_all(s.dir, ec);
+        }
+        char where[200];
+        std::snprintf(where, sizeof(where),
+                      "%s generation over maxPatchBytes reports kLimitExceeded at every size (patch %lld bytes, first bad limit %d)",
+                      name, static_cast<long long>(patchSize), firstBad);
+        CHECK(patchSize > 0 && firstBad < 0, where);
+
+        stirling::BinaryPatchOptions exact;
+        exact.limits.maxPatchBytes = patchSize;
+        std::snprintf(where, sizeof(where), "%s generation succeeds at exactly maxPatchBytes", name);
+        CheckPatchScenarioSuccess(where, true, c.first, source, target, target, exact);
     }
 }
 
@@ -6497,6 +7725,7 @@ struct Plan {
     // --- 記録 ---
     int writeCalls = 0;
     int readCalls = 0;
+    std::uint64_t readBytes = 0;       // ReadFile に要求したバイト数の合計（Issue #277）
     int flushCalls = 0;
     int replaceCalls = 0;
     int moveCalls = 0;
@@ -6555,6 +7784,7 @@ bool HandleHasFileName(HANDLE h, const std::wstring& name) {
 
 bool ReadHook(HANDLE h, void* buf, DWORD want, DWORD* outRead, DWORD* outError, BOOL* outResult) {
     const int call = g_plan.readCalls++;
+    g_plan.readBytes += want;
     if (!g_plan.readFailFileName.empty() && HandleHasFileName(h, g_plan.readFailFileName)) {
         const int fileCall = g_plan.readFailFileCalls++;
         if (g_plan.readFailFileFromCall >= 0 && fileCall >= g_plan.readFailFileFromCall) {
@@ -6650,6 +7880,55 @@ struct ScopedHooks {
 };
 
 }  // namespace io_fault
+
+// ---- BPS 生成の候補照合の読込量（Issue #277）----
+// 同じ 4 バイト（とその回転）が元ファイル中に約 1MiB 間隔で散らばり、変更後ファイルが
+//   そのキーを繰り返す入力。候補の照合（16 バイト）のたびに読込キャッシュ全体（1MiB）を
+//   読み直すと、読込量が入力サイズの数十倍以上に膨らみ、生成が極端に遅くなる。
+//   生成中に ReadFile へ要求したバイト数が、入力サイズの定数倍に収まることを確かめる。
+static void TestBinaryPatchCandidateReadVolume() {
+    TestPrintf("TestBinaryPatchCandidateReadVolume\n");
+    using stirling::BinaryPatchFormat;
+
+    // 16MiB では索引を 4 バイトおきに間引く。キーの間隔（256KiB + 64）はその倍数にして、
+    //   すべてのキーを索引に載せる。4 通りの回転を順に置くので、各キーは約 1MiB 間隔になる。
+    const size_t sourceSize = 16u * 1024u * 1024u;
+    const size_t spacing = 256u * 1024u + 64u;
+    std::vector<unsigned char> sourceBytes = NonPeriodicBytes(sourceSize, 0x277u);
+    const unsigned char key[4] = {'K', 'E', 'Y', '!'};
+    size_t rotation = 0;
+    for (size_t pos = 0; pos + 4 <= sourceSize; pos += spacing, ++rotation) {
+        for (size_t i = 0; i < 4; ++i) { sourceBytes[pos + i] = key[(rotation + i) % 4]; }
+    }
+    std::vector<unsigned char> targetBytes;
+    for (int i = 0; i < 1024; ++i) { targetBytes.insert(targetBytes.end(), key, key + 4); }
+
+    const PatchScenario s = PreparePatchScenario(sourceBytes, targetBytes);
+    stirling::BinaryPatchResult result;
+    std::uint64_t readBytes = 0;
+    {
+        io_fault::ScopedHooks hooks;   // 読込は素通しし、要求量だけ数える
+        result = RunPatchScenario(s, true, BinaryPatchFormat::kBps, stirling::BinaryPatchOptions());
+        readBytes = io_fault::g_plan.readBytes;
+    }
+    CHECK(result.Ok(), "candidate-heavy BPS generation succeeds");
+    std::vector<unsigned char> decoded;
+    BpsReferenceStats stats;
+    CHECK(DecodeBpsReference(ReadFileBytes(s.output), sourceBytes, decoded, stats) &&
+          decoded == targetBytes && stats.sourceCopy > 0,
+          "candidate-heavy BPS patch decodes and still uses SourceCopy");
+    // 索引作成・CRC・検証用の適用・比較で入力を数回読むのは正常。修正前は候補ごとに 1MiB を
+    //   読み直し、入力の数百倍を読んでいた。
+    const std::uint64_t inputBytes = sourceBytes.size() + targetBytes.size();
+    char where[200];
+    std::snprintf(where, sizeof(where),
+                  "candidate probes do not refill 1MiB per candidate (read %llu MiB for %llu MiB of input)",
+                  static_cast<unsigned long long>(readBytes >> 20),
+                  static_cast<unsigned long long>(inputBytes >> 20));
+    CHECK(readBytes <= 16 * inputBytes, where);
+    std::error_code ec;
+    fs::remove_all(s.dir, ec);
+}
 
 static void TestBinaryPatchIoFaults() {
     TestPrintf("TestBinaryPatchIoFaults\n");
@@ -6814,6 +8093,44 @@ static void TestBinaryPatchIoFaults() {
             std::error_code ec;
             fs::remove(out, ec);
         }
+    }
+
+    // 生成時の実際の書込失敗（ディスク不足）は、製品上限の超過（kLimitExceeded）ではなく
+    //   kWriteFailed と OS エラーで報告する（Issue #271）。N 回目の WriteFile だけを失敗させ、
+    //   N を 0 から増やしてステージング・検証用の適用・保存先への転送の全書込箇所を通す。
+    for (const auto format : {BinaryPatchFormat::kIps, BinaryPatchFormat::kBps}) {
+        int faults = 0;
+        int firstBad = -1;
+        bool reachedOk = false;
+        for (int call = 0; call < 256 && !reachedOk; ++call) {
+            const PatchScenario s = PreparePatchScenario(before, after);
+            const std::vector<std::wstring> entries = DirEntryNames(s.dir);
+            stirling::BinaryPatchResult result;
+            {
+                io_fault::ScopedHooks hooks;
+                io_fault::g_plan.writeCallsBeforeFault = call;
+                io_fault::g_plan.writeFail = true;
+                io_fault::g_plan.writeError = ERROR_DISK_FULL;
+                result = RunPatchScenario(s, true, format, stirling::BinaryPatchOptions());
+            }
+            if (result.Ok()) {
+                reachedOk = true;
+            } else {
+                ++faults;
+                const bool reported = result.status == stirling::BinaryPatchStatus::kWriteFailed &&
+                                      result.systemError == ERROR_DISK_FULL &&
+                                      DirEntryNames(s.dir) == entries &&
+                                      ReadFileBytes(s.output) == kExistingPatchOutput;
+                if (!reported && firstBad < 0) { firstBad = call; }
+            }
+            std::error_code ec;
+            fs::remove_all(s.dir, ec);
+        }
+        char where[200];
+        std::snprintf(where, sizeof(where),
+                      "%s generation disk-full write faults report kWriteFailed (faults %d, first bad call %d)",
+                      format == BinaryPatchFormat::kIps ? "IPS" : "BPS", faults, firstBad);
+        CHECK(reachedOk && faults > 0 && firstBad < 0, where);
     }
     for (const fs::path& path : {largeReadSource, largeReadTarget,
                                  largeReadPatch, largeReadOut}) {
@@ -7024,6 +8341,57 @@ static void TestStreamFileWriterFaults() {
         }   // デストラクタ（= Abort 相当）でも消えない
         CHECK(!kept.empty() && fs::exists(fs::path(kept)),
               "the destructor does not delete the kept temporary file either");
+        fs::remove_all(dir, ec);
+    }
+
+    // 8b) 新規作成（出力先が最初から無い）で移動に失敗した場合は、失われたデータが無いので
+    //     一時ファイルを残さず、回復用ファイルとしても報告しない（Issue #280）。
+    {
+        const fs::path dir = TempFile("io_new_target_move_fail");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        const fs::path out = dir / L"new-target.bin";
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.moveFailures = 5;
+            io_fault::g_plan.moveError = ERROR_ACCESS_DENIED;
+
+            StreamFileWriter w;
+            CHECK(w.Open(out.wstring().c_str()).Ok(), "open for the new-target move failure case");
+            CHECK(w.Write(body.data(), body.size()).Ok(), "write for the new-target move failure case");
+            const stirling::FileIoResult r = w.Commit();
+            CHECK(!r.Ok() && r.status == FileIoStatus::kWriteFailed &&
+                  r.systemError == ERROR_ACCESS_DENIED,
+                  "a failed move of a new target is reported with its cause");
+            CHECK(io_fault::g_plan.replaceCalls == 0,
+                  "a new target is moved into place, never replaced");
+            CHECK(w.KeptTempPath().empty() && r.keptTempPath.empty(),
+                  "nothing was lost, so no temporary file is kept for recovery");
+        }
+        CHECK(!fs::exists(out) && DirEntryNames(dir).empty(),
+              "the new-target failure leaves neither a target nor a temporary file");
+        fs::remove_all(dir, ec);
+    }
+
+    // 8c) 実際の API でも同じ: 作成できない名前（代替データストリーム名）への新規保存は
+    //     失敗し、一時ファイルを残さない（Issue #280。以前は回復用ファイルとして残していた）。
+    {
+        const fs::path dir = TempFile("io_ads_target");
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        const std::wstring out = (dir / L"new.bin").wstring() + L":stream";
+
+        StreamFileWriter w;
+        const stirling::FileIoResult opened = w.Open(out.c_str());
+        if (opened.Ok()) {
+            CHECK(w.Write(body.data(), body.size()).Ok(), "write for the stream-name case");
+            const stirling::FileIoResult r = w.Commit();
+            CHECK(!r.Ok() && r.keptTempPath.empty() && w.KeptTempPath().empty(),
+                  "a stream-name target fails without reporting a recovery file");
+        }
+        CHECK(DirEntryNames(dir).empty(), "the stream-name failure leaves no temporary file");
         fs::remove_all(dir, ec);
     }
 
@@ -7659,6 +9027,16 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestFuzz", g_checks, g_failures, TestFuzz);
     g_report.Run("TestFileRoundTrip", g_checks, g_failures, TestFileRoundTrip);
     g_report.Run("TestBinaryPatch", g_checks, g_failures, TestBinaryPatch);
+    g_report.Run("TestBinaryPatchBpsCoverage", g_checks, g_failures, TestBinaryPatchBpsCoverage);
+    g_report.Run("TestBinaryPatchLimitsAndMalformed", g_checks, g_failures,
+                 TestBinaryPatchLimitsAndMalformed);
+    g_report.Run("TestBinaryPatchConflictsAndIpsBoundaries", g_checks, g_failures,
+                 TestBinaryPatchConflictsAndIpsBoundaries);
+    g_report.Run("TestBinaryPatchGenerateLimitStatus", g_checks, g_failures,
+                 TestBinaryPatchGenerateLimitStatus);
+    g_report.Run("TestBinaryPatchShiftRealignment", g_checks, g_failures,
+                 TestBinaryPatchShiftRealignment);
+    g_report.Run("TestBinaryPatchTargetCopy", g_checks, g_failures, TestBinaryPatchTargetCopy);
     g_report.Run("TestLoadEditSave", g_checks, g_failures, TestLoadEditSave);
     g_report.Run("TestSearchBasic", g_checks, g_failures, TestSearchBasic);
     g_report.Run("TestSearchEofBounds", g_checks, g_failures, TestSearchEofBounds);
@@ -7719,6 +9097,8 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestStreamFileWriter", g_checks, g_failures, TestStreamFileWriter);
 #ifdef STIRLING_TEST_IO_HOOK
     g_report.Run("TestBinaryPatchIoFaults", g_checks, g_failures, TestBinaryPatchIoFaults);
+    g_report.Run("TestBinaryPatchCandidateReadVolume", g_checks, g_failures,
+                 TestBinaryPatchCandidateReadVolume);
     g_report.Run("TestStreamFileWriterFaults", g_checks, g_failures, TestStreamFileWriterFaults);
     g_report.Run("TestBlockFileIoReadFaults", g_checks, g_failures, TestBlockFileIoReadFaults);
 #endif

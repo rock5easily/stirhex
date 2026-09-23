@@ -70,6 +70,9 @@ struct BinaryPatchLimits {
     std::uint64_t bpsHashSearchLimit = 4096;
     // Bound the total source bytes compared while probing hash candidates.
     std::uint64_t bpsHashCompareBytes = 256ull * 1024ull * 1024ull;
+    // Bound the table of already-written target positions used to find BPS
+    // TargetCopy matches (Issue #279).  0 disables TargetCopy generation.
+    size_t bpsTargetHashMemoryBytes = 16u * 1024u * 1024u;
 };
 
 // Return false from progress to cancel.  It is called periodically with the

@@ -361,8 +361,11 @@ bool CBinaryPatchDlg::ValidatePaths(const std::wstring& first,
         return false;
     }
     if (OutputConflicts(result, first, second)) {
+        // The output field is labelled "patch file" when creating (Issue #272).
         CStringW message;
-        message.Format(ui::LoadW(IDS_BP_OUTPUT_CONFLICT), result.c_str());
+        message.Format(ui::LoadW(mode_ == Mode::Generate ? IDS_BP_OUTPUT_CONFLICT_PATCH
+                                                         : IDS_BP_OUTPUT_CONFLICT),
+                       result.c_str());
         ui::MsgBox(m_hWnd, message);
         return false;
     }

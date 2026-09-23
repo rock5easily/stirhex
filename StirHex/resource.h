@@ -811,6 +811,7 @@
 #define IDS_BP_FILTER_BPS           1306
 #define IDS_BP_FILTER_IPS           1307
 #define IDS_BP_OVERWRITE            1308
+#define IDS_BP_OUTPUT_CONFLICT_PATCH 1309
 
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 

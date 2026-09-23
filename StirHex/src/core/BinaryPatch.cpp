@@ -4,6 +4,9 @@
 #include "Win32FileHooks.h"
 
 #include <windows.h>
+#if defined(_M_IX86) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -22,8 +25,45 @@ constexpr DWORD kFileShareRead = FILE_SHARE_READ;
 constexpr size_t kIoChunk = 1024u * 1024u;
 constexpr size_t kMatchChunk = 64u * 1024u;
 constexpr size_t kMatchProbe = 16u;
+// Read-ahead for SourceCopy candidate probes.  Candidates can be scattered over
+// the whole source, so a miss must not refill a kIoChunk window for a 16-byte
+// probe (Issue #277); a small window still serves densely packed candidates.
+constexpr size_t kCandidateCache = 4096u;
 constexpr FileOffset kLiteralSearchStride = 16;
+// Re-alignment after insertions/deletions (Issue #278).  A sampled source index
+// only lists every stride-th position, so inside a literal every target
+// position is probed cheaply: a key filter rejects absent keys, and only the
+// candidates nearest the expected (drift-corrected) source position are tried.
+constexpr size_t kKeyFilterBitsPerEntry = 16;
+constexpr std::uint64_t kNearCandidates = 16;
+// A SourceRead/near SourceCopy at least this long ends a literal between the
+// kLiteralSearchStride checkpoints; shorter coincidences would only fragment it.
+constexpr size_t kRealignMinimum = 8;
+// Candidate probing stops once a match is this long.
+constexpr size_t kGoodMatch = 4096;
+// Full searches that exhaust their candidate limit with matches shorter than
+// kBackoffMatch halve the limit (down to kMinFullCandidates); a match of at
+// least kRestoreMatch restores it.  This bounds inputs whose frequent keys never
+// lead to a useful copy.
+constexpr std::uint64_t kMinFullCandidates = 16;
+constexpr size_t kBackoffMatch = 16;
+constexpr size_t kRestoreMatch = 64;
+// Shortest TargetCopy worth emitting: its relative offset costs several bytes,
+// so shorter repeats (common words in text) would only fragment literals.
+constexpr size_t kTargetCopyMinimum = 16;
+// Distance (in target bytes) at which the per-byte literal scan prefetches the
+// key filter and target table lines it will look up (Issue #279).
+constexpr FileOffset kLookupPrefetchDistance = 16;
 constexpr std::uint32_t kCrcInit = 0xffffffffu;
+
+// Hint that a cache line will be read soon (no-op where unsupported).
+inline void PrefetchLine(const void* address) {
+#if defined(_M_IX86) || defined(_M_X64)
+    _mm_prefetch(static_cast<const char*>(address), _MM_HINT_T0);
+#else
+    (void)address;
+#endif
+}
 
 BinaryPatchResult Result(BinaryPatchStatus status, DWORD error = 0,
                          FileOffset processed = 0) {
@@ -543,15 +583,20 @@ public:
     bool Open(const wchar_t* path, FileOffset maxBytes = (std::numeric_limits<FileOffset>::max)()) {
         maxBytes_ = maxBytes;
         written_ = 0;
+        limitExceeded_ = false;
         const FileIoResult result = writer_.Open(path);
         error_ = result.systemError;
         return result.Ok();
     }
 
+    // Exceeding maxBytes is a product limit, not an OS write failure: it is
+    // tracked separately so a real ERROR_DISK_FULL from the writer is never
+    // mistaken for it (and vice versa).  Error() is ERROR_SUCCESS in that case.
     bool Write(const void* data, size_t size) {
         if (size > 0 && (written_ > maxBytes_ ||
                          static_cast<FileOffset>(size) > maxBytes_ - written_)) {
-            error_ = ERROR_DISK_FULL;
+            limitExceeded_ = true;
+            error_ = ERROR_SUCCESS;
             return false;
         }
         const FileIoResult result = writer_.Write(data, size);
@@ -572,6 +617,11 @@ public:
 
     void Abort() { writer_.Abort(); }
     DWORD Error() const { return error_; }
+    // Status for the last failed Write/Commit.
+    BinaryPatchStatus FailureStatus() const {
+        return limitExceeded_ ? BinaryPatchStatus::kLimitExceeded
+                              : BinaryPatchStatus::kWriteFailed;
+    }
     std::uint32_t Crc() const { return patchCrc_.Final(); }
     std::uint32_t CrcWith(const void* data, size_t size) const {
         Crc32 crc = patchCrc_;
@@ -585,6 +635,7 @@ private:
     DWORD error_ = ERROR_SUCCESS;
     FileOffset maxBytes_ = (std::numeric_limits<FileOffset>::max)();
     FileOffset written_ = 0;
+    bool limitExceeded_ = false;
 };
 
 void PutBe16(unsigned char* p, std::uint32_t value) {
@@ -657,7 +708,12 @@ bool EmitIpsSegment(PatchSink& sink, const DiskFile& target,
         // "EOF" is a record marker, so a normal/RLE record cannot begin at
         // the byte offset whose big-endian representation is 45 4f 46.
         // Match Flips by moving that segment one byte earlier and including
-        // the preceding target byte.  This is checked on every split too.
+        // the preceding target byte.
+        // GenerateIpsToStage already splits changed runs into segments of at
+        // most 0xffff bytes, so only a segment's first record can start at
+        // 0x454f46; the only split made below is for the byte this shift
+        // adds, and it lands at 0x454f45 + 0xffff.  The check stays inside the
+        // loop so the rule still holds if a caller passes a longer segment.
         if (currentOffset == 0x454f46) {
             try { adjusted.resize(currentLength + 1); }
             catch (const std::bad_alloc&) {
@@ -685,17 +741,12 @@ bool EmitIpsSegment(PatchSink& sink, const DiskFile& target,
             : WriteIpsRecord(sink, currentOffset, current, count);
         if (!ok) {
             failureError = sink.Error();
-            failure = (failureError == ERROR_DISK_FULL)
-                ? BinaryPatchStatus::kLimitExceeded
-                : BinaryPatchStatus::kWriteFailed;
+            failure = sink.FailureStatus();
             return false;
         }
         current += count;
         currentLength -= count;
         currentOffset += static_cast<FileOffset>(count);
-        // A split caused by the EOF collision cannot land on another marker
-        // unless a later caller starts a new segment there; handle that case
-        // on the next call without weakening the format check.
     }
     return true;
 }
@@ -827,17 +878,74 @@ std::uint32_t Hash4(const unsigned char* p) {
            (static_cast<std::uint32_t>(p[3]) << 24);
 }
 
+// Sampled source positions sorted by (key, position), plus a Bloom filter of the
+// keys present so that most absent keys are rejected without a search.
+struct SourceIndex {
+    static constexpr unsigned kFilterProbes = 3;
+
+    std::vector<HashEntry> entries;
+    std::vector<std::uint64_t> filter;
+    unsigned filterShift = 32;
+
+    std::uint32_t FilterBit(std::uint32_t key, unsigned probe) const {
+        // Double hashing: bit_i = h1 + i * h2 (h2 odd), top bits of 32.
+        const std::uint32_t h1 = key * 0x9e3779b1u;
+        const std::uint32_t h2 = (key * 0x85ebca6bu) | 1u;
+        return (h1 + probe * h2) >> filterShift;
+    }
+
+    void Add(std::uint32_t key, FileOffset position) {
+        entries.push_back({key, position});
+        for (unsigned probe = 0; probe < kFilterProbes; ++probe) {
+            const std::uint32_t bit = FilterBit(key, probe);
+            filter[bit >> 6] |= std::uint64_t(1) << (bit & 63u);
+        }
+    }
+
+    void Prefetch(std::uint32_t key) const {
+        if (filter.empty()) { return; }
+        for (unsigned probe = 0; probe < kFilterProbes; ++probe) {
+            PrefetchLine(&filter[FilterBit(key, probe) >> 6]);
+        }
+    }
+
+    bool MayContain(std::uint32_t key) const {
+        if (filter.empty()) { return false; }
+        for (unsigned probe = 0; probe < kFilterProbes; ++probe) {
+            const std::uint32_t bit = FilterBit(key, probe);
+            if (((filter[bit >> 6] >> (bit & 63u)) & 1u) == 0) { return false; }
+        }
+        return true;
+    }
+};
+
 // Returns kOk, kCancelled, kOutOfMemory, or kReadFailed carrying source's error.
 BinaryPatchResult BuildHashIndex(const DiskFile& source, const BinaryPatchOptions& options,
-                                 std::vector<HashEntry>& entries) {
+                                 SourceIndex& index) {
+    std::vector<HashEntry>& entries = index.entries;
     entries.clear();
+    index.filter.clear();
     if (source.Size() < 4) { return Result(BinaryPatchStatus::kOk); }
+    // The filter shares bpsHashMemoryBytes with the entries: at most
+    // kKeyFilterBitsPerEntry bits per entry (rounded down to a power of two).
     const size_t maxEntries = static_cast<size_t>((std::min)(
         static_cast<std::uint64_t>(source.Size() - 3),
-        static_cast<std::uint64_t>(options.limits.bpsHashMemoryBytes / sizeof(HashEntry))));
+        static_cast<std::uint64_t>(options.limits.bpsHashMemoryBytes /
+                                   (sizeof(HashEntry) + kKeyFilterBitsPerEntry / 8))));
     if (maxEntries == 0) { return Result(BinaryPatchStatus::kOk); }
-    try { entries.reserve(maxEntries); }
-    catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
+    unsigned filterBitsLog2 = 6;
+    while (filterBitsLog2 < 32 &&
+           (std::uint64_t(1) << (filterBitsLog2 + 1)) <=
+               static_cast<std::uint64_t>(maxEntries) * kKeyFilterBitsPerEntry) {
+        ++filterBitsLog2;
+    }
+    index.filterShift = 32 - filterBitsLog2;
+    try {
+        entries.reserve(maxEntries);
+        index.filter.assign(static_cast<size_t>((std::uint64_t(1) << filterBitsLog2) / 64), 0);
+    } catch (const std::bad_alloc&) {
+        return Result(BinaryPatchStatus::kOutOfMemory);
+    }
     const FileOffset possible = source.Size() - 3;
     const FileOffset stride = (possible > static_cast<FileOffset>(maxEntries))
         ? (possible + static_cast<FileOffset>(maxEntries) - 1) /
@@ -857,7 +965,7 @@ BinaryPatchResult BuildHashIndex(const DiskFile& source, const BinaryPatchOption
         if (p < chunkStart) { p += stride; }
         for (; p + 3 < last && entries.size() < maxEntries; p += stride) {
             const size_t inChunk = static_cast<size_t>(p - chunkStart);
-            entries.push_back({Hash4(buffer.data() + inChunk), p});
+            index.Add(Hash4(buffer.data() + inChunk), p);
         }
         if (last == source.Size()) { break; }
         chunkStart += static_cast<FileOffset>(count - 3);
@@ -902,8 +1010,10 @@ size_t MatchLength(CachedReader& source, CachedReader& target,
                    FileOffset sourcePos, FileOffset targetPos,
                    FileOffset maximum, ReadFailure& failure) {
     failure = ReadFailure();
-    std::array<unsigned char, kMatchChunk> sourceBuffer;
-    std::array<unsigned char, kMatchChunk> targetBuffer;
+    // Per-thread scratch instead of 128KiB of stack: MatchLength runs for many
+    // target positions, and a frame that large pays a stack probe per call.
+    thread_local std::array<unsigned char, kMatchChunk> sourceBuffer;
+    thread_local std::array<unsigned char, kMatchChunk> targetBuffer;
     const size_t probe = static_cast<size_t>((std::min)(
         maximum, static_cast<FileOffset>(kMatchProbe)));
     if (probe == 0) { return 0; }
@@ -916,9 +1026,13 @@ size_t MatchLength(CachedReader& source, CachedReader& target,
     if (same != probe) { return same; }
     if (static_cast<FileOffset>(probe) == maximum) { return probe; }
     FileOffset matched = static_cast<FileOffset>(probe);
+    // Grow the chunk from what is left of a candidate-sized cache window up to
+    // kMatchChunk: most candidate matches end early, and a full kMatchChunk
+    // read per candidate would bypass the small candidate cache (Issue #277).
+    size_t chunk = kCandidateCache - kMatchProbe;
     while (matched < maximum) {
         const size_t count = static_cast<size_t>((std::min)(
-            static_cast<FileOffset>(sourceBuffer.size()), maximum - matched));
+            static_cast<FileOffset>(chunk), maximum - matched));
         if (!ReadBoth(source, sourcePos + matched, sourceBuffer.data(),
                       target, targetPos + matched, targetBuffer.data(), count, failure)) {
             return static_cast<size_t>(matched);
@@ -927,6 +1041,7 @@ size_t MatchLength(CachedReader& source, CachedReader& target,
         while (matchedChunk < count && sourceBuffer[matchedChunk] == targetBuffer[matchedChunk]) { ++matchedChunk; }
         matched += static_cast<FileOffset>(matchedChunk);
         if (matchedChunk != count) { break; }
+        chunk = (std::min)(chunk * 2, sourceBuffer.size());
     }
     return static_cast<size_t>(matched);
 }
@@ -941,43 +1056,63 @@ size_t SourceReadLength(CachedReader& source, CachedReader& target,
                        failure);
 }
 
+// Probes up to searchLimit candidates for the key at targetPos, nearest to the
+// expected source position first, and returns the longest match.  Probing stops
+// early at kGoodMatch.  `tested` receives the number of candidates probed.
 size_t FindSourceCopy(CachedReader& source, CachedReader& target,
-                      const std::vector<HashEntry>& entries,
+                      const SourceIndex& index,
                       FileOffset targetPos, FileOffset targetSize,
-                      FileOffset sourceSize, std::uint64_t searchLimit,
-                      std::uint64_t compareLimit,
+                      FileOffset sourceSize, FileOffset expected,
+                      std::uint64_t searchLimit, std::uint64_t compareLimit,
                       std::uint64_t& comparedBytes,
-                      FileOffset& bestPosition, ReadFailure& failure,
-                      bool& cancelled, const BinaryPatchOptions& options) {
+                      FileOffset& bestPosition, std::uint64_t& tested,
+                      ReadFailure& failure, bool& cancelled,
+                      const BinaryPatchOptions& options) {
     bestPosition = 0;
+    tested = 0;
     failure = ReadFailure();
     cancelled = false;
+    const std::vector<HashEntry>& entries = index.entries;
     if (targetSize - targetPos < 4 || sourceSize < 4 || entries.empty()) { return 0; }
     unsigned char bytes[4] = {};
     if (!target.ReadAt(targetPos, bytes, sizeof(bytes))) { failure.From(target); return 0; }
     const std::uint32_t key = Hash4(bytes);
-    const auto begin = std::lower_bound(entries.begin(), entries.end(), key,
-        [](const HashEntry& entry, std::uint32_t value) { return entry.key < value; });
+    if (!index.MayContain(key)) { return 0; }
+    const auto byKey = std::equal_range(entries.begin(), entries.end(), HashEntry{key, 0},
+        [](const HashEntry& a, const HashEntry& b) { return a.key < b.key; });
+    // Candidates of one key are sorted by position: walk outwards from the
+    // expected position so a shifted copy is usually among the first probes.
+    auto right = std::lower_bound(byKey.first, byKey.second, expected,
+        [](const HashEntry& entry, FileOffset value) { return entry.position < value; });
+    auto left = right;
+    const FileOffset remaining = targetSize - targetPos;
     size_t best = 0;
-    std::uint64_t tested = 0;
-    for (auto it = begin; it != entries.end() && it->key == key && tested < searchLimit;
-         ++it, ++tested) {
-        if (it->position + 4 > sourceSize) { continue; }
+    while (tested < searchLimit && (left != byKey.first || right != byKey.second)) {
+        bool takeRight = left == byKey.first;
+        if (!takeRight && right != byKey.second) {
+            takeRight = right->position - expected <= expected - (left - 1)->position;
+        }
+        const HashEntry& candidate = takeRight ? *right++ : *--left;
+        ++tested;
+        if (candidate.position + 4 > sourceSize) { continue; }
         if (compareLimit < 4 || comparedBytes > compareLimit - 4) {
             break;
         }
         const std::uint64_t before = comparedBytes;
-        const size_t length = MatchLength(source, target, it->position, targetPos,
-            (std::min)(sourceSize - it->position, targetSize - targetPos),
-            failure);
+        const size_t length = MatchLength(source, target, candidate.position, targetPos,
+            (std::min)(sourceSize - candidate.position, remaining), failure);
+        // The budget bounds wasted probing, so a match is charged at most
+        // kGoodMatch: probing stops there, and a longer match is the copy that
+        // advances the target.  Charging its full length let a few long copies
+        // in a large file exhaust the budget and disable SourceCopy (Issue #278).
         comparedBytes += (std::max)(static_cast<std::uint64_t>(4),
-                                    static_cast<std::uint64_t>(length));
+                                    static_cast<std::uint64_t>((std::min)(length, kGoodMatch)));
         if (failure.failed) { return 0; }
         if (comparedBytes < before) { comparedBytes = compareLimit; }
         if (length > best) {
             best = length;
-            bestPosition = it->position;
-            if (best == static_cast<size_t>(targetSize - targetPos)) {
+            bestPosition = candidate.position;
+            if (best >= kGoodMatch || best == static_cast<size_t>(remaining)) {
                 break;
             }
         }
@@ -988,6 +1123,68 @@ size_t FindSourceCopy(CachedReader& source, CachedReader& target,
     }
     return best;
 }
+
+// Latest position of already-written literal target data for each 4-byte key,
+// used to find BPS TargetCopy matches (Issue #279).  One slot per bucket; the
+// stored key rejects most collisions and MatchLength verifies the bytes.
+class TargetTable {
+public:
+    static constexpr FileOffset kInsertStride = 4;
+
+    // Returns false only when the table cannot be allocated.  A zero budget, a
+    // tiny target, or a target whose positions do not fit 32 bits leaves the
+    // table disabled.
+    bool Init(size_t memoryBytes, FileOffset targetSize) {
+        slots_.clear();
+        if (targetSize < 8 || targetSize > static_cast<FileOffset>(0xfffffffeu) ||
+            memoryBytes < 64 * sizeof(Slot)) {
+            return true;
+        }
+        size_t count = 64;
+        unsigned bits = 6;
+        while (bits < 31 && (count * 2) * sizeof(Slot) <= memoryBytes &&
+               static_cast<FileOffset>(count) < targetSize) {
+            count *= 2;
+            ++bits;
+        }
+        shift_ = 32 - bits;
+        try { slots_.assign(count, Slot()); }
+        catch (const std::bad_alloc&) { return false; }
+        return true;
+    }
+
+    bool Enabled() const { return !slots_.empty(); }
+
+    // Only every kInsertStride-th position is stored: lookups run at every
+    // position, so a repeat is still found within kInsertStride bytes, while
+    // the random writes into the table (a cache miss each) drop by that factor.
+    void Insert(std::uint32_t key, FileOffset position) {
+        if ((position % kInsertStride) != 0) { return; }
+        slots_[Bucket(key)] = {key, static_cast<std::uint32_t>(position) + 1u};
+    }
+
+    void Prefetch(std::uint32_t key) const {
+        if (!slots_.empty()) { PrefetchLine(&slots_[Bucket(key)]); }
+    }
+
+    bool Find(std::uint32_t key, FileOffset& position) const {
+        const Slot& slot = slots_[Bucket(key)];
+        if (slot.positionPlusOne == 0 || slot.key != key) { return false; }
+        position = static_cast<FileOffset>(slot.positionPlusOne - 1u);
+        return true;
+    }
+
+private:
+    struct Slot {
+        std::uint32_t key = 0;
+        std::uint32_t positionPlusOne = 0;
+    };
+
+    size_t Bucket(std::uint32_t key) const { return (key * 0x9e3779b1u) >> shift_; }
+
+    std::vector<Slot> slots_;
+    unsigned shift_ = 32;
+};
 
 bool WriteBpsInstruction(PatchSink& sink, unsigned action, FileOffset length) {
     if (length <= 0) { return false; }
@@ -1017,7 +1214,7 @@ BinaryPatchResult GenerateIpsToStage(const DiskFile& source, const DiskFile& tar
     }
     if (!sink.Write("PATCH", 5)) {
         sink.Abort();
-        return Result(BinaryPatchStatus::kWriteFailed, sink.Error());
+        return Result(sink.FailureStatus(), sink.Error());
     }
     std::vector<unsigned char> sourceBuffer;
     std::vector<unsigned char> targetBuffer;
@@ -1066,9 +1263,10 @@ BinaryPatchResult GenerateIpsToStage(const DiskFile& source, const DiskFile& tar
         }
     }
     if (!sink.Write("EOF", 3) || !sink.Commit()) {
+        const BinaryPatchStatus status = sink.FailureStatus();
         const DWORD error = sink.Error();
         sink.Abort();
-        return Result(BinaryPatchStatus::kWriteFailed, error);
+        return Result(status, error);
     }
     BinaryPatchResult result = Result(BinaryPatchStatus::kOk, 0, target.Size());
     result.sourceSize = source.Size();
@@ -1083,8 +1281,8 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
         target.Size() > options.limits.bpsGenerateMaxTargetBytes) {
         return Result(BinaryPatchStatus::kLimitExceeded);
     }
-    std::vector<HashEntry> entries;
-    const BinaryPatchResult indexResult = BuildHashIndex(source, options, entries);
+    SourceIndex index;
+    const BinaryPatchResult indexResult = BuildHashIndex(source, options, index);
     if (!indexResult.Ok()) { return indexResult; }
     std::uint32_t sourceCrc = 0;
     std::uint32_t targetCrc = 0;
@@ -1097,24 +1295,76 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
                                      options.limits.maxPatchBytes))) {
         return Result(BinaryPatchStatus::kOpenFailed, sink.Error());
     }
-    if (!sink.Write("BPS1", 4)) { sink.Abort(); return Result(BinaryPatchStatus::kWriteFailed, sink.Error()); }
+    if (!sink.Write("BPS1", 4)) { sink.Abort(); return Result(sink.FailureStatus(), sink.Error()); }
     std::vector<unsigned char> var;
     WriteBpsVar(var, static_cast<std::uint64_t>(source.Size()));
     WriteBpsVar(var, static_cast<std::uint64_t>(target.Size()));
     WriteBpsVar(var, 0); // metadata length; generated metadata is deliberately empty
-    if (!sink.Write(var.data(), var.size())) { sink.Abort(); return Result(BinaryPatchStatus::kWriteFailed, sink.Error()); }
+    if (!sink.Write(var.data(), var.size())) { sink.Abort(); return Result(sink.FailureStatus(), sink.Error()); }
 
+    // sourceReader follows the target position (SourceRead); candidateReader
+    // serves SourceCopy candidate probes so they neither refill nor evict the
+    // sequential window.
     CachedReader sourceReader(source);
+    CachedReader candidateReader(source, kCandidateCache);
     CachedReader targetReader(target);
+    // earlierReader serves TargetCopy candidates (earlier target data), so they
+    // do not evict targetReader's window at the current position.
+    CachedReader earlierReader(target, kCandidateCache);
+    TargetTable targetTable;
+    if (!targetTable.Init(options.limits.bpsTargetHashMemoryBytes, target.Size())) {
+        sink.Abort(); return Result(BinaryPatchStatus::kOutOfMemory);
+    }
     std::vector<unsigned char> literalBuffer;
     try { literalBuffer.resize(kIoChunk); }
     catch (const std::bad_alloc&) { sink.Abort(); return Result(BinaryPatchStatus::kOutOfMemory); }
     FileOffset targetPos = 0;
     FileOffset sourceRelative = 0;
+    FileOffset targetRelative = 0;
     std::uint64_t comparedBytes = 0;
     std::uint64_t instructionCount = 0;
     const auto reserveInstruction = [&]() {
         return instructionCount < options.limits.maxBpsInstructions && ++instructionCount <= options.limits.maxBpsInstructions;
+    };
+    // Expected source position minus target position, taken from the last
+    // long enough SourceRead/SourceCopy (Issue #278).
+    FileOffset drift = 0;
+    const std::uint64_t searchLimit = options.limits.bpsHashSearchLimit;
+    std::uint64_t fullLimit = searchLimit;
+    const auto fullSearch = [&](FileOffset position, FileOffset& found,
+                                ReadFailure& failure, bool& cancelled) {
+        std::uint64_t tested = 0;
+        const size_t length = FindSourceCopy(candidateReader, targetReader, index,
+            position, target.Size(), source.Size(), position + drift, fullLimit,
+            options.limits.bpsHashCompareBytes, comparedBytes, found, tested,
+            failure, cancelled, options);
+        if (length >= kRestoreMatch) {
+            fullLimit = searchLimit;
+        } else if (length < kBackoffMatch && tested >= fullLimit) {
+            fullLimit = (std::max)((std::min)(kMinFullCandidates, searchLimit), fullLimit / 2);
+        }
+        return length;
+    };
+    // Reads the 4-byte key at position; hasKey is false near the end of the
+    // target (no TargetCopy/table entry is possible there).
+    const auto readKey = [&](FileOffset position, std::uint32_t& key, bool& hasKey) {
+        hasKey = targetTable.Enabled() && target.Size() - position >= 4;
+        if (!hasKey) { return true; }
+        unsigned char bytes[4] = {};
+        if (!targetReader.ReadAt(position, bytes, sizeof(bytes))) { return false; }
+        key = Hash4(bytes);
+        return true;
+    };
+    // Length of the TargetCopy from the latest earlier literal occurrence of the
+    // key at position (overlap allowed: the bytes are verified against the
+    // target file, which is exactly what a byte-by-byte TargetCopy produces).
+    const auto targetSearch = [&](FileOffset position, std::uint32_t key, FileOffset& found,
+                                  ReadFailure& failure) -> size_t {
+        FileOffset candidate = 0;
+        if (!targetTable.Find(key, candidate) || candidate >= position) { return 0; }
+        found = candidate;
+        return MatchLength(earlierReader, targetReader, candidate, position,
+                           target.Size() - position, failure);
     };
     while (targetPos < target.Size()) {
         ReadFailure readFailure;
@@ -1127,56 +1377,151 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
         if (sourceRead > 0) {
             if (!reserveInstruction()) { sink.Abort(); return Result(BinaryPatchStatus::kLimitExceeded, 0, targetPos); }
             if (!WriteBpsInstruction(sink, 0, static_cast<FileOffset>(sourceRead))) {
-                sink.Abort(); return Result(BinaryPatchStatus::kWriteFailed, sink.Error(), targetPos);
+                sink.Abort(); return Result(sink.FailureStatus(), sink.Error(), targetPos);
             }
+            if (sourceRead >= kRealignMinimum) { drift = 0; }
             targetPos += static_cast<FileOffset>(sourceRead);
             if (!Report(options, targetPos, target.Size())) { sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos); }
             continue;
         }
         FileOffset sourceCopyPosition = 0;
         bool candidateCancelled = false;
-        const size_t sourceCopy = FindSourceCopy(sourceReader, targetReader, entries,
-            targetPos, target.Size(), source.Size(), options.limits.bpsHashSearchLimit,
-            options.limits.bpsHashCompareBytes, comparedBytes,
-            sourceCopyPosition, readFailure, candidateCancelled, options);
+        const size_t sourceCopy = fullSearch(targetPos, sourceCopyPosition, readFailure,
+                                             candidateCancelled);
         if (candidateCancelled) {
             sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos);
         }
         if (readFailure.failed) {
             sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
         }
+        std::uint32_t startKey = 0;
+        bool startHasKey = false;
+        if (!readKey(targetPos, startKey, startHasKey)) {
+            sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, targetReader.Error(), targetPos);
+        }
+        FileOffset targetCopyPosition = 0;
+        const size_t targetCopy = startHasKey
+            ? targetSearch(targetPos, startKey, targetCopyPosition, readFailure) : 0;
+        if (readFailure.failed) {
+            sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
+        }
+        if (targetCopy >= kTargetCopyMinimum && targetCopy > sourceCopy) {
+            if (!reserveInstruction()) { sink.Abort(); return Result(BinaryPatchStatus::kLimitExceeded, 0, targetPos); }
+            if (!WriteBpsInstruction(sink, 3, static_cast<FileOffset>(targetCopy)) ||
+                !WriteBpsSigned(sink, targetCopyPosition - targetRelative)) {
+                sink.Abort(); return Result(sink.FailureStatus(), sink.Error(), targetPos);
+            }
+            targetRelative = targetCopyPosition + static_cast<FileOffset>(targetCopy);
+            targetPos += static_cast<FileOffset>(targetCopy);
+            if (!Report(options, targetPos, target.Size())) { sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos); }
+            continue;
+        }
         if (sourceCopy >= 4) {
             if (!reserveInstruction()) { sink.Abort(); return Result(BinaryPatchStatus::kLimitExceeded, 0, targetPos); }
             if (!WriteBpsInstruction(sink, 2, static_cast<FileOffset>(sourceCopy)) ||
                 !WriteBpsSigned(sink, sourceCopyPosition - sourceRelative)) {
-                sink.Abort(); return Result(BinaryPatchStatus::kWriteFailed, sink.Error(), targetPos);
+                sink.Abort(); return Result(sink.FailureStatus(), sink.Error(), targetPos);
             }
+            if (sourceCopy >= kRealignMinimum) { drift = sourceCopyPosition - targetPos; }
             sourceRelative = sourceCopyPosition + static_cast<FileOffset>(sourceCopy);
             targetPos += static_cast<FileOffset>(sourceCopy);
             if (!Report(options, targetPos, target.Size())) { sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos); }
             continue;
         }
 
+        // Literal.  Every kLiteralSearchStride-th position runs the checks the
+        // main loop runs (any SourceRead, full SourceCopy search); the positions
+        // in between look for a long SourceRead or a nearby SourceCopy so that a
+        // shift is re-aligned within one index stride (Issue #278).  Every
+        // position also looks for a TargetCopy and, when none ends the literal,
+        // is registered in the target table (Issue #279).
         const FileOffset literalStart = targetPos;
+        if (startHasKey) { targetTable.Insert(startKey, targetPos); }
         ++targetPos;
-        while (targetPos < target.Size()) {
+        while (targetPos < target.Size() && targetPos - literalStart < 0x100000) {
+            FileOffset found = 0;
+            // The per-byte lookups below hit the key filter and the target table
+            // at random; start loading the lines for a position a little ahead
+            // so that the misses overlap instead of adding up.
+            if (target.Size() - targetPos >= kLookupPrefetchDistance + 4) {
+                unsigned char aheadBytes[4] = {};
+                if (targetReader.ReadAt(targetPos + kLookupPrefetchDistance, aheadBytes,
+                                        sizeof(aheadBytes))) {
+                    const std::uint32_t aheadKey = Hash4(aheadBytes);
+                    index.Prefetch(aheadKey);
+                    targetTable.Prefetch(aheadKey);
+                }
+            }
             if ((targetPos - literalStart) % kLiteralSearchStride != 0) {
+                // Per-byte scan between checkpoints: read the key once, compare
+                // one source byte and consult the key filter before paying for
+                // MatchLength/FindSourceCopy, whose large stack frame and index
+                // searches would otherwise dominate this loop.
+                unsigned char keyBytes[4] = {};
+                const bool hasKey = target.Size() - targetPos >= 4;
+                if (!targetReader.ReadAt(targetPos, keyBytes, hasKey ? 4 : 1)) {
+                    sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, targetReader.Error(), targetPos);
+                }
+                if (targetPos < source.Size()) {
+                    unsigned char sourceByte = 0;
+                    if (!sourceReader.ByteAt(targetPos, sourceByte)) {
+                        sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, sourceReader.Error(), targetPos);
+                    }
+                    if (sourceByte == keyBytes[0]) {
+                        const size_t nearSourceRead = SourceReadLength(sourceReader, targetReader,
+                            targetPos, source.Size(), target.Size(), readFailure);
+                        if (readFailure.failed) {
+                            sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
+                        }
+                        if (nearSourceRead >= kRealignMinimum) {
+                            drift = 0;
+                            break;
+                        }
+                    }
+                }
+                if (hasKey && index.MayContain(Hash4(keyBytes))) {
+                    std::uint64_t tested = 0;
+                    const size_t nearCopy = FindSourceCopy(candidateReader, targetReader, index,
+                        targetPos, target.Size(), source.Size(), targetPos + drift,
+                        (std::min)(kNearCandidates, searchLimit),
+                        options.limits.bpsHashCompareBytes, comparedBytes, found, tested,
+                        readFailure, candidateCancelled, options);
+                    if (candidateCancelled) {
+                        sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos);
+                    }
+                    if (readFailure.failed) {
+                        sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
+                    }
+                    if (nearCopy >= kRealignMinimum) {
+                        drift = found - targetPos;
+                        break;
+                    }
+                }
+                if (hasKey && targetTable.Enabled()) {
+                    const std::uint32_t literalKey = Hash4(keyBytes);
+                    if (targetSearch(targetPos, literalKey, found, readFailure) >= kTargetCopyMinimum) {
+                        break;
+                    }
+                    if (readFailure.failed) {
+                        sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
+                    }
+                    targetTable.Insert(literalKey, targetPos);
+                }
                 ++targetPos;
                 continue;
             }
+            // Checkpoint: the same checks the main loop runs.
             const size_t literalSourceRead = SourceReadLength(sourceReader, targetReader,
                 targetPos, source.Size(), target.Size(), readFailure);
             if (readFailure.failed) {
                 sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
             }
             if (literalSourceRead > 0) {
+                if (literalSourceRead >= kRealignMinimum) { drift = 0; }
                 break;
             }
-            FileOffset ignored = 0;
-            const size_t literalSourceCopy = FindSourceCopy(sourceReader, targetReader,
-                entries, targetPos, target.Size(), source.Size(),
-                options.limits.bpsHashSearchLimit, options.limits.bpsHashCompareBytes,
-                comparedBytes, ignored, readFailure, candidateCancelled, options);
+            const size_t literalSourceCopy = fullSearch(targetPos, found, readFailure,
+                                                        candidateCancelled);
             if (candidateCancelled) {
                 sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos);
             }
@@ -1184,9 +1529,23 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
                 sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
             }
             if (literalSourceCopy >= 4) {
+                if (literalSourceCopy >= kRealignMinimum) { drift = found - targetPos; }
                 break;
             }
-            if (targetPos - literalStart >= 0x100000) { break; }
+            std::uint32_t literalKey = 0;
+            bool literalHasKey = false;
+            if (!readKey(targetPos, literalKey, literalHasKey)) {
+                sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, targetReader.Error(), targetPos);
+            }
+            if (literalHasKey) {
+                if (targetSearch(targetPos, literalKey, found, readFailure) >= kTargetCopyMinimum) {
+                    break;
+                }
+                if (readFailure.failed) {
+                    sink.Abort(); return Result(BinaryPatchStatus::kReadFailed, readFailure.error, targetPos);
+                }
+                targetTable.Insert(literalKey, targetPos);
+            }
             ++targetPos;
         }
         const FileOffset literalLength = targetPos - literalStart;
@@ -1199,7 +1558,7 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
         if (!literalFits ||
             !WriteBpsInstruction(sink, 1, literalLength) ||
             !sink.Write(literalBuffer.data(), static_cast<size_t>(literalLength))) {
-            sink.Abort(); return Result(BinaryPatchStatus::kWriteFailed, sink.Error(), literalStart);
+            sink.Abort(); return Result(sink.FailureStatus(), sink.Error(), literalStart);
         }
         if (!Report(options, targetPos, target.Size())) { sink.Abort(); return Result(BinaryPatchStatus::kCancelled, 0, targetPos); }
     }
@@ -1210,9 +1569,10 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
     // CRC fields are part of the CRC input (and are not metadata).
     PutLe32(footer + 8, sink.CrcWith(footer, 8));
     if (!sink.Write(footer, sizeof(footer)) || !sink.Commit()) {
+        const BinaryPatchStatus status = sink.FailureStatus();
         const DWORD error = sink.Error();
         sink.Abort();
-        return Result(BinaryPatchStatus::kWriteFailed, error, targetPos);
+        return Result(status, error, targetPos);
     }
     BinaryPatchResult result = Result(BinaryPatchStatus::kOk, 0, targetPos);
     result.sourceSize = source.Size();

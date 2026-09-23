@@ -197,6 +197,10 @@ FileIoResult StreamFileWriter::Commit() {
 
     // 一時ファイルを FILE_ATTRIBUTE_TEMPORARY のまま残さない（置換後は通常ファイル）。
     ::SetFileAttributesW(tempPath_.c_str(), FILE_ATTRIBUTE_NORMAL);
+    // 置換の前に出力先が在ったかを記録する。失敗後に出力先が無いことが「置換の途中で
+    //   消えた」ことを意味するのは、元々在った場合だけ（Issue #280）。
+    const bool targetExisted =
+        (::GetFileAttributesW(targetPath_.c_str()) != INVALID_FILE_ATTRIBUTES);
     DWORD replaceErr = 0;
     if (!ReplaceTargetWithTemp(tempPath_, targetPath_, replaceErr)) {
         // 通常はここで出力先が元のまま残っているので、一時ファイルは削除して構わない。
@@ -204,7 +208,10 @@ FileIoResult StreamFileWriter::Commit() {
         //   失敗した場合だけは、出力先が既に消えていて書いた内容は一時ファイルにしかない。
         //   その一時ファイルを消すとデータがどこにも残らないため、残して呼出側へ知らせる
         //   （keptTempPath_）。取り残しの掃除は利用者の判断に委ねる。
-        if (::GetFileAttributesW(targetPath_.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        //   新規作成（出力先が最初から無い）で移動に失敗した場合は、失われたデータが無い
+        //   ので残さない（作成できない名前・アクセス拒否など。Issue #280）。
+        if (targetExisted &&
+            ::GetFileAttributesW(targetPath_.c_str()) == INVALID_FILE_ATTRIBUTES) {
             keptTempPath_ = tempPath_;
             tempPath_.clear();   // Abort() に削除させない
         }

@@ -1,10 +1,12 @@
 # Build the standalone binary-patch CLI used by the external interop harness.
 # This is a test adapter only; it is not linked into StirHex.exe.
-param([ValidateSet("x86", "x64")][string]$Arch = "x64")
+# -OutDir builds into another directory (the static tests use a private temp
+# directory so they never overwrite the objects of a core_test.exe build).
+param([ValidateSet("x86", "x64")][string]$Arch = "x64", [string]$OutDir = "")
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$outDir = Join-Path (Join-Path $root "bin") $Arch
+$outDir = if ($OutDir) { $OutDir } else { Join-Path (Join-Path $root "bin") $Arch }
 if (-not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
