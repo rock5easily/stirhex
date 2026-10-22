@@ -11,6 +11,8 @@
 
 import time
 import pytest
+import win32con
+import win32gui
 
 from drivers.stirling_driver import (
     StirlingDriver,
@@ -32,6 +34,17 @@ def _write_test_file(path):
     return path
 
 
+def _wait_ui_idle(drv, timeout_ms: int = 30000):
+    """メインフレームの UI スレッドがメッセージ処理に戻るまで待つ。
+
+    送信した WM_NULL は、実行中のコマンドハンドラが戻ってメッセージループへ復帰した
+    時点で処理されるため、同期的な長い処理の完了待ちに使える。
+    """
+    win32gui.SendMessageTimeout(drv.hwnd, win32con.WM_NULL, 0, 0,
+                                win32con.SMTO_NORMAL, timeout_ms)
+    time.sleep(0.3)
+
+
 @pytest.mark.ported
 class TestIssue30UndoMemoryLimit:
 
@@ -46,7 +59,6 @@ class TestIssue30UndoMemoryLimit:
                 drv.focus_view()
 
                 drv.select_all()
-                time.sleep(0.3)
                 # 確認ダイアログはモーダルのため、プロセス跨ぎの SendMessage（press_delete）では
                 # デッドロックする。PostMessage 経由のコマンドで削除させる。
                 drv.post_command(ID_DELETE_SELECTION)
@@ -71,7 +83,6 @@ class TestIssue30UndoMemoryLimit:
                 drv.focus_view()
 
                 drv.select_all()
-                time.sleep(0.3)
                 # 確認ダイアログはモーダルのため、プロセス跨ぎの SendMessage（press_delete）では
                 # デッドロックする。PostMessage 経由のコマンドで削除させる。
                 drv.post_command(ID_DELETE_SELECTION)
@@ -79,8 +90,9 @@ class TestIssue30UndoMemoryLimit:
                 text = drv.answer_message_box(IDYES, timeout=15.0)
                 assert "続行" in text, f"Undo capacity confirmation not shown: {text!r}"
 
-                # 2MB の削除は 1 バイトずつ処理されるため完了まで待つ（Issue #62）。
-                time.sleep(20.0)
+                # 削除はブロック単位で一括処理される（Issue #62）。固定時間ではなく、
+                #   UI スレッドがメッセージ処理に戻る（削除コマンドを終えた）まで待つ（Issue #289）。
+                _wait_ui_idle(drv)
 
                 drv.post_command(CMD_EDIT_UNDO)   # 履歴は破棄済み＝何も起きない
                 time.sleep(1.0)

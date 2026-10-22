@@ -270,3 +270,42 @@ def run_both_stirling(original_exe_path, ported_exe_path, tmp_path):
         return orig_out.read_bytes(), port_out.read_bytes()
 
     return _runner
+
+
+@pytest.fixture
+def run_both_stirling_cases(original_exe_path, ported_exe_path, tmp_path):
+    """Like run_both_stirling, but runs several cases on one launch of each executable.
+
+    Starting both programs costs more than most golden cases themselves, so cases that
+    share their input data run back to back in one session (Issue #290). `cases` maps a
+    case id to an action(drv, out_path); every action runs in order on the original, then
+    in the same order on the port. `cleanup(drv)`, if given, runs after the last case on
+    each side. Returns {case id: (original output, ported output)}.
+    """
+
+    def _runner(cases: dict, initial_data: bytes,
+                cleanup=None) -> dict[str, tuple[bytes, bytes]]:
+        outputs: dict[str, dict[str, Path]] = {}
+        for side, exe in (("orig", original_exe_path), ("port", ported_exe_path)):
+            in_path = tmp_path / f"in_{side}.dat"
+            in_path.write_bytes(initial_data)
+            with StirlingDriver(exe) as drv:
+                drv.start(in_path)
+                for index, (case_id, action_fn) in enumerate(cases.items()):
+                    out_path = tmp_path / f"out_{index}_{side}.dat"
+                    action_fn(drv, out_path)
+                    outputs.setdefault(case_id, {})[side] = out_path
+                if cleanup is not None:
+                    cleanup(drv)
+
+        # Same rule as run_both_stirling: a missing file must not compare equal (#203).
+        missing = [f"{case_id} ({path})" for case_id, paths in outputs.items()
+                   for path in paths.values() if not path.exists()]
+        if missing:
+            raise AssertionError(
+                "golden run produced no output file: " + ", ".join(missing)
+            )
+        return {case_id: (paths["orig"].read_bytes(), paths["port"].read_bytes())
+                for case_id, paths in outputs.items()}
+
+    return _runner

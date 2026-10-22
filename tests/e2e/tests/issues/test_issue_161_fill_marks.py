@@ -13,8 +13,6 @@
      - マークが消えていた場合: 先頭の 0x00 が消えて 0x01 始まりになる
 """
 
-import time
-
 import pytest
 
 from drivers.settings_context import stirling_settings
@@ -38,22 +36,15 @@ def _mark_survives_fill(exe_path, tmp_path, tag: str) -> bool:
             drv.focus_view()
 
             drv.jump_to_address(f"{MARK_POS:X}", is_hex=True)
-            time.sleep(0.2)
             drv.mark_toggle()
-            time.sleep(0.2)
 
             drv.select_range_dialog(f"{FILL_START:X}", f"{FILL_END:X}", is_hex=True)
-            time.sleep(0.2)
             drv.fill_range_dialog(FILL_VALUE)
-            time.sleep(0.2)
 
             # 選択を解除してから先頭へ戻す（この後の Delete が選択削除にならないように）。
             drv.jump_to_address("0", is_hex=True)
-            time.sleep(0.2)
             drv.mark_next()
-            time.sleep(0.2)
             drv.press_delete()
-            time.sleep(0.2)
 
             drv.save_as_via_dialog(out_file)
 

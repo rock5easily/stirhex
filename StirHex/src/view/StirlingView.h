@@ -36,6 +36,10 @@ public:
     virtual void OnInitialUpdate();   // 文書接続後: この文書の拡張子設定をビューへ反映
     // アクティブ化時に外部変更の確認を自身へポストする（原 CView::OnActivateView @0x00450d2c）。
     virtual void OnActivateView(BOOL bActivate, CView* pActivateView, CView* pDeactiveView);
+    // キー入力・タイマー等ビューへ直接届くメッセージで、捕捉されなかった標準の確保失敗
+    //   （std::bad_alloc / length_error）を MFC のメモリ不足表示へ変換する（Issue #306。
+    //   app/AllocFailure.h）。
+    virtual LRESULT WindowProc(UINT message, WPARAM wParam, LPARAM lParam) override;
 
     // --- 印刷（原 CStirlingView 印刷仮想関数4種の移植）---
     //   整形ダンプ（アドレス／16進／文字欄）をプリンタDCへ割付ける。フォントはＭＳ明朝(h100)。
@@ -256,28 +260,36 @@ protected:
     }
     void ClearSelection();               // 選択解除（必要なら再描画）
     bool DeleteSelection();              // 選択範囲を削除しキャレットを先頭へ。削除したら true
-    // 選択バイト列を Windows クリップボードへ CF_TEXT で書き出す（原 FUN_0045c53f 相当）
-    void SetClipboardText(const std::vector<unsigned char>& bytes);
+    // 選択バイト列を Windows クリップボードへ書き出す（原 FUN_0045c53f 相当）。
+    //   Prepare で16進ペイン用の文字列を作り（失敗時は理由を表示して false）、Put で転送する。
+    bool PrepareClipboardText(const std::vector<unsigned char>& bytes, std::wstring& hexText) const;
+    void PutClipboardText(const std::vector<unsigned char>& bytes, const std::wstring& hexText);
     // クライアント座標→(行,列,ペイン)。データ領域内なら true。
     // row は画面上の相対行ではなくデータの絶対行番号のため 64bit。
     bool HitTest(CPoint pt, stirling::FileOffset& row, int& col, int& pane) const;
 
-    // pattern を direction 方向・rangeMode で検索し、見つかれば選択して true。
-    bool DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode);
+    // 検索の結果。読み取れない位置で打ち切った場合は未発見と区別する（Issue #312）。
+    enum class SearchOutcome { kFound, kNotFound, kReadFailed };
+    // pattern を direction 方向・rangeMode で検索し、見つかれば選択して kFound。
+    SearchOutcome DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode);
     // 一致範囲 [pos, pos+size) を選択しキャレットを先頭へ（DoSearch と検索結果一覧で共用）。
     void SelectMatch(stirling::FileOffset pos, stirling::FileOffset size);
     // [全て検索] の条件から検索範囲を決め、検索結果一覧を開いて検索を始める（Issue #236）。
     void StartFindAll(const CFindDlg::FindAllRequest& request);
     // 指定1バイトに一致しない最初の位置を direction 方向・rangeMode で検索（不一致検索の実体）。
     //   範囲・セッション決定は DoSearch と同一（原 FUN_0044b654 の不一致分岐）。
-    bool DoMismatchSearch(unsigned char value, bool forward, int rangeMode);
+    SearchOutcome DoMismatchSearch(unsigned char value, bool forward, int rangeMode);
     // 検索不一致時のフィードバック（原 FUN_0044b654 末尾）: searchNotFoundMsg(view+0x264)
-    //   有効ならメッセージ、無効ならビープ。found が true の時は何もしない。
-    void NotifySearchResult(bool found);
+    //   有効ならメッセージ、無効ならビープ。kFound の時は何もしない。
+    //   kReadFailed は設定に依らず読み取り失敗を通知する（移植独自。Issue #312）。
+    void NotifySearchResult(SearchOutcome outcome);
+    // 検索が読み取れない位置で打ち切ったことを通知する（Issue #312）。
+    void ShowSearchReadFailure();
     // [lo,hi) 内の search を repl で前方一括置換し、置換件数を返す（原 FUN_0044c0d1 相当）。
+    //   読み取れない位置で検索を打ち切った場合は *readFailed を true にする（Issue #312）。
     int  ReplaceAll(const stirling::HexPattern& search,
                     const std::vector<unsigned char>& repl,
-                    stirling::FileOffset lo, stirling::FileOffset hi);
+                    stirling::FileOffset lo, stirling::FileOffset hi, bool* readFailed);
 
     // バイト毎の前景/背景色を決定（原 GetByteColor 0x45cf92）。
     //   優先順は比較差分→マーク→構造体範囲→強調コード／データ既定色。

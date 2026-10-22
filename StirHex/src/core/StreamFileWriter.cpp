@@ -33,7 +33,7 @@ std::wstring DirectoryOf(const std::wstring& path) {
 //   なる。読み取り専用属性・権限・共有違反（他プロセスが掴んでいる）をここで検出し、
 //   原因を kOpenFailed として返す（呼出側は「保存できません」の見出しへ分岐できる）。
 //   出力先が存在しないときは確認対象が無いので true（一時ファイル作成で判明する）。
-bool CanReplaceTarget(const std::wstring& target, DWORD& err) {
+bool CanReplaceTarget(const std::wstring& target, bool openProbe, DWORD& err) {
     const DWORD attrs = ::GetFileAttributesW(target.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         // 「無い」以外の理由（親フォルダを辿れない・権限不足）を新規作成と混同しない。
@@ -51,6 +51,9 @@ bool CanReplaceTarget(const std::wstring& target, DWORD& err) {
     if ((attrs & FILE_ATTRIBUTE_READONLY) != 0) {
         err = ERROR_ACCESS_DENIED;   // 読み取り専用属性（置換も削除もできない）
         return false;
+    }
+    if (!openProbe) {
+        return true;   // 呼出側が出力先を開いたまま保存する（Issue #300）
     }
     // 権限・共有状態は属性からは判らないため、開いて確かめる（OPEN_EXISTING。切り詰めない）。
     //   置換は出力先の削除を伴うため、書込権に加えて DELETE も要求する。
@@ -111,7 +114,7 @@ StreamFileWriter::~StreamFileWriter() {
     Abort();
 }
 
-FileIoResult StreamFileWriter::Open(const wchar_t* path) {
+FileIoResult StreamFileWriter::Open(const wchar_t* path, bool probeTarget) {
     Abort();   // 開きっぱなしの一時ファイルを残さない
     written_ = 0;
     keptTempPath_.clear();   // 前回の取り残し情報は持ち越さない
@@ -122,7 +125,7 @@ FileIoResult StreamFileWriter::Open(const wchar_t* path) {
 
     // 書き終えてから権限で弾かれないよう、先に出力先の置換可否を確かめる（Issue #170）。
     DWORD probeErr = 0;
-    if (!CanReplaceTarget(targetPath_, probeErr)) {
+    if (!CanReplaceTarget(targetPath_, probeTarget, probeErr)) {
         targetPath_.clear();
         return MakeResult(FileIoStatus::kOpenFailed, probeErr, 0);
     }

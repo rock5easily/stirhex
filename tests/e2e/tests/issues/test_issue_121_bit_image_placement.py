@@ -64,7 +64,6 @@ def test_ported_restores_visibility(ported_exe_path, tmp_path):
         # 1回目: 非表示で開始 → トグルで表示 → 終了時に 1 が保存される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert not drv.is_bit_image_visible(), "既定は非表示のはず"
             drv.toggle_bit_image()
             assert drv.is_bit_image_visible(), "トグルで表示になるはず"
@@ -73,7 +72,6 @@ def test_ported_restores_visibility(ported_exe_path, tmp_path):
         # 2回目: 表示状態で復元される → トグルで非表示 → 終了時に 0 が保存される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.is_bit_image_visible(), "前回終了時の表示状態が復元されるはず"
             drv.toggle_bit_image()
             assert not drv.is_bit_image_visible(), "トグルで非表示になるはず"
@@ -82,7 +80,6 @@ def test_ported_restores_visibility(ported_exe_path, tmp_path):
         # 3回目: 非表示で復元される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert not drv.is_bit_image_visible(), "非表示状態が復元されるはず"
 
 
@@ -100,7 +97,6 @@ def test_ported_restores_floating_position(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.is_bit_image_floating(), "フローティングで復元されるはず"
             assert drv.bit_image_frame_rect()[:2] == (300, 200), (
                 "設定に書いた位置で開くはず"
@@ -112,7 +108,6 @@ def test_ported_restores_floating_position(ported_exe_path, tmp_path):
         # 移動後の位置で復元される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.bit_image_frame_rect()[:2] == moved_to, (
                 "前回終了時のフローティング位置が復元されるはず"
             )
@@ -131,7 +126,6 @@ def test_ported_restores_docked_placement(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.is_bit_image_visible(), "表示状態で復元されるはず"
             assert not drv.is_bit_image_floating(), "左ドッキングで復元されるはず"
             # ドッキング中はメインフレーム配下にある。
@@ -145,7 +139,6 @@ def test_ported_restores_docked_placement(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.is_bit_image_floating(), (
                 "ドッキング不可の設定ではフローティングへ戻すはず"
             )
@@ -164,7 +157,6 @@ def test_ported_offscreen_position_falls_back(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             left, top = drv.bit_image_frame_rect()[:2]
             assert (left, top) != (-30000, -30000), (
                 "画面外の保存位置をそのまま使ってはいけない"
@@ -191,12 +183,10 @@ def test_ported_env_settings_keeps_bit_image_state(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             drv.toggle_bit_image()
             assert drv.is_bit_image_visible(), "トグルで表示になるはず"
             sheet = drv.open_env_settings_dialog()
             drv.close_settings_sheet(sheet, accept=True)
-            time.sleep(0.5)
             assert drv.is_bit_image_visible(), "環境設定のOKで表示状態が変わらないはず"
             # OK の時点で設定一式が保存される。表示中の値が書かれていること。
             _wait_for_setting("BitImageShow", 1)
@@ -225,7 +215,6 @@ def test_ported_never_writes_position_sentinel(ported_exe_path, tmp_path):
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert not drv.is_bit_image_floating(), "左ドッキングで復元されるはず"
         _wait_for_setting("BitImagePlacement", PLACEMENT_DOCK_LEFT)
 

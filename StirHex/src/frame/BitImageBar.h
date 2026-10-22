@@ -28,6 +28,8 @@ public:
 
     static const int kImageWidth = 128;   // 画像幅（原 DIB biWidth=0x80）
     static const int kTopMargin  = 8;     // 上部マージン（原 FUN_00404a68 の 8 行分）
+    // 遅延読み込み（Issue #300）中の文書で画像にする最大バイト数（先頭から 32MB）。
+    static const int kLazyImageMaxBytes = 32 * 1024 * 1024;
 
 protected:
     // パレット（バイト値→色）を設定から決定（原 FUN_00436640）。

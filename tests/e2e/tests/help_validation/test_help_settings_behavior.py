@@ -319,7 +319,6 @@ class TestHelpSettingsBehavior:
                 drv.start(char_file)
                 drv.type_text_chars("Z")
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.4)
                 assert char_file.read_bytes()[0] == ord("Z")
 
                 # OpenCharMode=0 keeps the default hex pane. A non-hex character
@@ -327,7 +326,6 @@ class TestHelpSettingsBehavior:
                 drv.open_file_via_dialog(hex_file)
                 drv.type_text_chars("Z")
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.4)
                 assert hex_file.read_bytes()[0] == 0
 
                 # Changing the extension record re-applies document settings, but
@@ -345,7 +343,6 @@ class TestHelpSettingsBehavior:
                 # The view remains in the text pane after the changed settings apply.
                 drv.type_text_chars("Y")
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.4)
                 assert hex_file.read_bytes()[0] == ord("Y")
 
     @pytest.mark.ported

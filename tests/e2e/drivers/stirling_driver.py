@@ -11,6 +11,7 @@ from pywinauto.handleprops import is64bitprocess
 from pywinauto.remote_memory_block import RemoteMemoryBlock
 from pywinauto.sysinfo import is_x64_Python
 
+from drivers.ui_idle import wait_ui_idle
 from drivers.process_guard import (
     describe_processes,
     find_stirling_processes,
@@ -720,7 +721,9 @@ class StirlingDriver:
         if self.hwnd and win32gui.GetClassName(self.hwnd) != "#32770":
             self.main_window = self.app.window(handle=self.hwnd)
             safe_set_focus(self.hwnd)
-        time.sleep(0.3)
+        # The frame appears before the document is loaded; a large file keeps the thread
+        # busy for a while.
+        self.wait_idle(timeout=120.0)
         return self
 
     def _process_exited(self) -> bool:
@@ -818,7 +821,7 @@ class StirlingDriver:
         h, _title, items = self.find_message_box(timeout=timeout)
         text = "\n".join(items)
         win32gui.PostMessage(h, win32con.WM_COMMAND, button_id, 0)
-        time.sleep(0.3)
+        self.wait_idle()
         return text
 
     def dismiss_message_box(self, timeout: float = 3.0) -> bool:
@@ -826,7 +829,7 @@ class StirlingDriver:
         try:
             h, _, _ = self.find_message_box(timeout=timeout)
             win32gui.PostMessage(h, win32con.WM_COMMAND, win32con.IDOK, 0)
-            time.sleep(0.3)
+            self.wait_idle()
             return True
         except Exception:
             return False
@@ -920,12 +923,19 @@ class StirlingDriver:
 
 
 
+    def _dialog_hwnds(self) -> set[int]:
+        """Visible top-level dialogs (#32770) of this process."""
+        try:
+            return {h for h, cls, _ in self._get_process_windows() if cls == "#32770"}
+        except Exception:
+            return set()
+
     def close(self):
         """Close the application cleanly, or kill if needed."""
+        dialogs_before = self._dialog_hwnds() if self.pid else set()
         if self.hwnd and win32gui.IsWindow(self.hwnd):
             try:
                 win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
-                time.sleep(0.3)
             except Exception:
                 pass
         if self.app and self.pid:
@@ -935,7 +945,19 @@ class StirlingDriver:
             process = KERNEL32.OpenProcess(0x00100001, False, self.pid)  # SYNCHRONIZE | TERMINATE
             if process:
                 try:
-                    if KERNEL32.WaitForSingleObject(process, 1500) == 0x00000102:
+                    # A dialog that appears only after WM_CLOSE is the save confirmation
+                    # for unsaved edits. Nobody answers it, so terminate at once instead of
+                    # sitting out the whole grace period (Issue #287). Dialogs that were
+                    # already open, such as a modeless list, do not count.
+                    deadline = time.time() + 1.5
+                    exited = False
+                    while True:
+                        if KERNEL32.WaitForSingleObject(process, 50) != 0x00000102:
+                            exited = True
+                            break
+                        if time.time() >= deadline or self._dialog_hwnds() - dialogs_before:
+                            break
+                    if not exited:
                         KERNEL32.TerminateProcess(process, 1)
                         KERNEL32.WaitForSingleObject(process, 3000)
                 finally:
@@ -951,10 +973,18 @@ class StirlingDriver:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def wait_idle(self, timeout: float = 30.0):
+        """Wait until the UI thread has handled everything sent or posted to it so far.
+
+        Replaces fixed sleeps after PostMessage / SendMessage (Issue #296). A command
+        that opens a modal dialog returns once the dialog is up and waiting for input.
+        """
+        wait_ui_idle(self.hwnd, timeout=timeout)
+
     def post_command(self, cmd_id: int):
         """Post a WM_COMMAND asynchronously to the main frame."""
         win32gui.PostMessage(self.hwnd, win32con.WM_COMMAND, cmd_id, 0)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def get_view_hwnd(self) -> int:
         """Find the CStirlingView window handle inside MDI Client."""
@@ -995,7 +1025,7 @@ class StirlingDriver:
                 win32gui.SendMessage(vhwnd, win32con.WM_LBUTTONUP, 0, 0x00100010)
             except Exception:
                 pass
-        time.sleep(0.2)
+        self.wait_idle()
 
 
     def send_vk(self, vk: int):
@@ -1003,9 +1033,8 @@ class StirlingDriver:
         vhwnd = self.get_view_hwnd()
         win32gui.SendMessage(vhwnd, win32con.WM_SETFOCUS, 0, 0)
         win32gui.SendMessage(vhwnd, win32con.WM_KEYDOWN, vk, 0)
-        time.sleep(0.02)
         win32gui.SendMessage(vhwnd, win32con.WM_KEYUP, vk, 0)
-        time.sleep(0.05)
+        self.wait_idle()
 
     def press_tab(self):
         """Toggle between Hex pane and Text pane."""
@@ -1056,31 +1085,28 @@ class StirlingDriver:
         """Type hex characters (e.g. '12AB') into the active view."""
         vhwnd = self.get_view_hwnd()
         win32gui.SendMessage(vhwnd, win32con.WM_SETFOCUS, 0, 0)
-        time.sleep(0.1)
+        self.wait_idle()
         for ch in hex_string:
             _send_message_w(vhwnd, win32con.WM_CHAR, ord(ch), 0)
-            time.sleep(0.02)
-        time.sleep(0.2)
+            self.wait_idle()
 
     def type_text_chars(self, text_string: str):
         """Type text characters into the active view (e.g. when Text pane is active)."""
         vhwnd = self.get_view_hwnd()
         win32gui.SendMessage(vhwnd, win32con.WM_SETFOCUS, 0, 0)
-        time.sleep(0.1)
+        self.wait_idle()
         for ch in text_string:
             _send_message_w(vhwnd, win32con.WM_CHAR, ord(ch), 0)
-            time.sleep(0.02)
-        time.sleep(0.2)
+            self.wait_idle()
 
     def type_ime_chars(self, text_string: str):
         """Send IME-confirmed Unicode characters to the active text pane."""
         vhwnd = self.get_view_hwnd()
         win32gui.SendMessage(vhwnd, win32con.WM_SETFOCUS, 0, 0)
-        time.sleep(0.1)
+        self.wait_idle()
         for ch in text_string:
             _send_message_w(vhwnd, WM_IME_CHAR, ord(ch), 0)
-            time.sleep(0.02)
-        time.sleep(0.2)
+            self.wait_idle()
 
     def jump_to_address(self, address_str: str, is_hex: bool = True):
         """Jump to specific address using Jump Dialog (ID_JUMP = 32794)."""
@@ -1110,15 +1136,16 @@ class StirlingDriver:
             except Exception:
                 pass
 
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Set address text
         edit = dlg.child_window(class_name="Edit")
         _set_control_text(edit.handle, str(address_str))
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Press OK (IDOK = 1)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         def _check_closed():
             wins = self._get_process_windows()
@@ -1128,7 +1155,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(5, 0.2, _check_closed)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def fill_range_dialog(self, hex_val: str):
         """Fill selected range with hex byte value (e.g. 'FF' or '00') via ID_FILL_SELECTION (32811)."""
@@ -1146,10 +1173,11 @@ class StirlingDriver:
 
         edit = dlg.child_window(class_name="Edit")
         _set_control_text(edit.handle, str(hex_val))
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Press OK (IDOK = 1)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         def _check_closed():
             wins = self._get_process_windows()
@@ -1159,7 +1187,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(5, 0.2, _check_closed)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def select_range_dialog(self, start_addr: str, end_addr: str, is_hex: bool = True):
         """Open 'Select Range' dialog (ID_SELECT_RANGE = 32869), input start & end addresses, and press OK."""
@@ -1185,7 +1213,7 @@ class StirlingDriver:
         for ch, cid, ccls in children:
             if cid == base_id and ccls == "Button":
                 win32gui.SendMessage(ch, win32con.BM_CLICK, 0, 0)
-                time.sleep(0.05)
+                self.wait_idle()
 
         # Set Start and End edit texts
         for ch, cid, ccls in children:
@@ -1194,13 +1222,14 @@ class StirlingDriver:
             elif cid == IDC_RANGEBAR_END and ccls == "Edit":
                 _set_control_text(ch, str(end_addr))
 
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Press OK button (IDOK = 1)
         btn_ok = win32gui.GetDlgItem(dlg_hwnd, 1)
         if btn_ok:
             win32gui.SendMessage(btn_ok, win32con.BM_CLICK, 0, 0)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         def _check_closed():
             wins = self._get_process_windows()
@@ -1210,7 +1239,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(5, 0.2, _check_closed)
-        time.sleep(0.2)
+        self.wait_idle()
 
 
     def replace_all_dialog(self, search_str: str, replace_str: str, search_is_hex: bool = True, replace_is_hex: bool = True):
@@ -1271,11 +1300,11 @@ class StirlingDriver:
             except Exception:
                 pass
 
-        time.sleep(0.1)
+        self.wait_idle()
         # Click "Replace All" button (IDC_REPL_ALL = 1038)
         print(f"[DEBUG] Pre-click windows: {self._get_process_windows()}")
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, IDC_REPL_ALL, 0)
-        time.sleep(0.5)
+        self.wait_idle()
         print(f"[DEBUG] Post-click windows: {self._get_process_windows()}")
 
         # 1. Wait until Replace dialog is closed
@@ -1287,7 +1316,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(5, 0.2, _check_replace_dlg_closed)
-        time.sleep(0.2)
+        self.wait_idle()
         print(f"[DEBUG] After Replace dialog closed windows: {self._get_process_windows()}")
 
         # 2. Wait for and dismiss the result MessageBox ("%d個置換しました")
@@ -1301,7 +1330,7 @@ class StirlingDriver:
                         return True
                     win32gui.EnumChildWindows(h, _click_btn, None)
                     win32gui.SendMessage(h, win32con.WM_COMMAND, 1, 0)
-                    time.sleep(0.15)
+                    self.wait_idle()
                     if not win32gui.IsWindow(h) or not win32gui.IsWindowVisible(h):
                         return True
                     raise RuntimeError("Msgbox still closing")
@@ -1332,17 +1361,15 @@ class StirlingDriver:
             pass
 
         safe_set_focus(self.hwnd)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def select_all(self):
         """Execute Edit -> Select All (CMD_EDIT_SELECT_ALL = 57642)."""
         self.post_command(CMD_EDIT_SELECT_ALL)
-        time.sleep(0.1)
 
     def copy(self):
         """Execute Edit -> Copy (ID_EDIT_COPY = 57634)."""
         self.post_command(CMD_EDIT_COPY)
-        time.sleep(0.1)
 
     def _drive_file_dialog(self, path: str, timeout: float = 10.0):
         """Type `path` into the common file dialog that is up, then press its OK button."""
@@ -1358,12 +1385,22 @@ class StirlingDriver:
 
         dlg_hwnd, edit_hwnd = timings.wait_until_passes(timeout, 0.2, _find_dlg)
         _set_control_text(edit_hwnd, path)
-        time.sleep(0.1)
+        self.wait_idle()
         btn = win32gui.GetDlgItem(dlg_hwnd, 1)
         if btn:
             win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
-        time.sleep(0.4)
+        # The shell dialog makes COM calls while it closes, and the thread can look idle
+        # while it waits on them. Wait for the dialog itself to go away first - or for the
+        # message box it leaves behind when the path is rejected (Issue #296).
+        deadline = time.time() + 5.0
+        while win32gui.IsWindow(dlg_hwnd) and time.time() < deadline:
+            others = [h for h, cls, _ in self._get_process_windows()
+                      if cls == "#32770" and h != dlg_hwnd]
+            if others:
+                break
+            time.sleep(0.05)
+        self.wait_idle()
 
     def mark_export(self, dest_path: str | Path):
         """Write the document's marks to dest_path (ID_MARK_EXPORT = 33018)."""
@@ -1394,77 +1431,62 @@ class StirlingDriver:
     def mark_toggle(self):
         """Toggle mark at current cursor position (ID_MARK_TOGGLE = 32842)."""
         self.post_command(ID_MARK_TOGGLE)
-        time.sleep(0.1)
 
     def mark_next(self):
         """Jump to next mark (ID_MARK_NEXT = 32843)."""
         self.post_command(ID_MARK_NEXT)
-        time.sleep(0.1)
 
     def mark_prev(self):
         """Jump to previous mark (ID_MARK_PREV = 32844)."""
         self.post_command(ID_MARK_PREV)
-        time.sleep(0.1)
 
     def mark_clear_all(self):
         """Clear all marks (ID_MARK_CLEAR_ALL = 32845)."""
         self.post_command(ID_MARK_CLEAR_ALL)
-        time.sleep(0.1)
 
     def set_charset_ascii(self):
         """Switch character set to ASCII (ID_CHARSET_ASCII = 32851)."""
         self.post_command(ID_CHARSET_ASCII)
-        time.sleep(0.1)
 
     def set_charset_sjis(self):
         """Switch character set to Shift-JIS (ID_CHARSET_SJIS = 32852)."""
         self.post_command(ID_CHARSET_SJIS)
-        time.sleep(0.1)
 
     def set_charset_euc(self):
         """Switch character set to EUC-JP (ID_CHARSET_EUC = 32853)."""
         self.post_command(ID_CHARSET_EUC)
-        time.sleep(0.1)
 
     def set_charset_unicode(self):
         """Switch character set to Unicode (ID_CHARSET_UNICODE = 32854)."""
         self.post_command(ID_CHARSET_UNICODE)
-        time.sleep(0.1)
 
     def set_byteorder_little(self):
         """Switch byte order to Little Endian (ID_BYTEORDER_LITTLE = 32859)."""
         self.post_command(ID_BYTEORDER_LITTLE)
-        time.sleep(0.1)
 
     def set_byteorder_big(self):
         """Switch byte order to Big Endian (ID_BYTEORDER_BIG = 32860)."""
         self.post_command(ID_BYTEORDER_BIG)
-        time.sleep(0.1)
 
     def cut(self):
         """Execute Edit -> Cut (ID_EDIT_CUT = 57635)."""
         self.post_command(CMD_EDIT_CUT)
-        time.sleep(0.1)
 
     def paste(self):
         """Execute Edit -> Paste (ID_EDIT_PASTE = 57637)."""
         self.post_command(CMD_EDIT_PASTE)
-        time.sleep(0.1)
 
     def paste_hex(self):
         """Execute Edit -> Paste as hex text (ID_EDIT_PASTE_HEX = 33016, port only)."""
         self.post_command(ID_EDIT_PASTE_HEX)
-        time.sleep(0.1)
 
     def undo(self):
         """Execute Edit -> Undo (ID_EDIT_UNDO = 57643)."""
         self.post_command(CMD_EDIT_UNDO)
-        time.sleep(0.1)
 
     def redo(self):
         """Execute Edit -> Redo (ID_EDIT_REDO = 57644)."""
         self.post_command(ID_EDIT_REDO)
-        time.sleep(0.1)
 
     def revert_file(self):
         """Revert file to initial on-disk state via ID_REVERT_FILE (32813)."""
@@ -1487,7 +1509,7 @@ class StirlingDriver:
                         return True
                     win32gui.EnumChildWindows(h, _click_yes, None)
                     win32gui.SendMessage(h, win32con.WM_COMMAND, 6, 0)
-                    time.sleep(0.15)
+                    self.wait_idle()
                     if not win32gui.IsWindow(h) or not win32gui.IsWindowVisible(h):
                         return True
                     raise RuntimeError("Confirm MessageBox still closing")
@@ -1499,7 +1521,7 @@ class StirlingDriver:
             print(f"[REVERT] Exception waiting for confirm: {e}")
 
         safe_set_focus(self.hwnd)
-        time.sleep(0.3)
+        self.wait_idle()
         print(f"[REVERT] After revert windows: {self._get_process_windows()}")
 
     def save_dump_via_dialog(self, dest_path: str | Path):
@@ -1528,10 +1550,11 @@ class StirlingDriver:
 
         edit = dlg.child_window(control_id=IDC_SAVEDUMP_FILE)
         _set_control_text(edit.handle, dest_path)
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Press OK (IDOK = 1)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         def _check_saved():
             if os.path.exists(dest_path) and os.path.getsize(dest_path) >= 0:
@@ -1539,7 +1562,7 @@ class StirlingDriver:
             raise RuntimeError("Dump file not saved yet")
 
         timings.wait_until_passes(5, 0.2, _check_saved)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def save_selection_via_dialog(self, dest_path: str | Path):
         """Save currently selected range to binary file via ID_SAVE_SELECTION (32812)."""
@@ -1560,9 +1583,10 @@ class StirlingDriver:
 
         dlg_hwnd, edit_hwnd = timings.wait_until_passes(5, 0.2, _find_dlg)
         _set_control_text(edit_hwnd, dest_path)
-        time.sleep(0.1)
+        self.wait_idle()
 
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         def _check_saved():
             if os.path.exists(dest_path) and os.path.getsize(dest_path) >= 0:
@@ -1570,13 +1594,14 @@ class StirlingDriver:
             raise RuntimeError("Selection file not saved yet")
 
         timings.wait_until_passes(5, 0.2, _check_saved)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def save_as_via_dialog(
         self,
         dest_path: str | Path,
         remove_existing: bool = True,
         overwrite: str = "yes",
+        save_timeout: float = 5.0,
     ):
         """Save current document to dest_path via Save As command (57604).
 
@@ -1587,6 +1612,10 @@ class StirlingDriver:
           "yes"    accept and let the save proceed (the file dialog closes)
           "no"     decline, then cancel the file dialog. Nothing is saved and the
                    document keeps its current path (Issue #203).
+
+        save_timeout is how long to wait for the destination to appear. The save goes
+        through a temporary file, so the destination only shows up once all of it is
+        written; multi-GB documents need far more than the default (Issue #329).
 
         Returns True when the document was saved, False when the overwrite prompt was
         declined.
@@ -1599,7 +1628,7 @@ class StirlingDriver:
         expect_prompt = not remove_existing and os.path.exists(dest_path)
 
         safe_set_focus(self.hwnd)
-        time.sleep(0.3)
+        self.wait_idle()
 
         print(f"[SAVE_AS] Posting CMD_FILE_SAVE_AS to {self.hwnd}, current wins: {self._get_process_windows()}")
         # Trigger Save As command asynchronously
@@ -1617,7 +1646,7 @@ class StirlingDriver:
 
         dlg_hwnd, edit_hwnd = timings.wait_until_passes(10, 0.2, _find_dlg)
         _set_control_text(edit_hwnd, dest_path)
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Trigger Save button (IDOK = 1). When the destination exists, the click opens the
         # modal overwrite confirmation inside the dialog's own message loop, so a
@@ -1669,15 +1698,15 @@ class StirlingDriver:
                 return True
             raise RuntimeError("File not saved yet")
 
-        timings.wait_until_passes(5, 0.2, _check_saved)
-        time.sleep(0.3)
+        timings.wait_until_passes(save_timeout, 0.2, _check_saved)
+        self.wait_idle()
         return True
 
     def open_file_via_dialog(self, file_path: str | Path):
         """Open a file via File Open command (57601) and Common File Dialog."""
         file_path = str(Path(file_path).resolve())
         safe_set_focus(self.hwnd)
-        time.sleep(0.3)
+        self.wait_idle()
 
         self.post_command(CMD_FILE_OPEN)
 
@@ -1692,13 +1721,14 @@ class StirlingDriver:
 
         dlg_hwnd, edit_hwnd = timings.wait_until_passes(10, 0.2, _find_dlg)
         _set_control_text(edit_hwnd, file_path)
-        time.sleep(0.1)
+        self.wait_idle()
 
         # Trigger Open button (IDOK = 1)
         btn = win32gui.GetDlgItem(dlg_hwnd, 1)
         if btn:
             win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
         win32gui.PostMessage(dlg_hwnd, win32con.WM_COMMAND, 1, 0)
+        self.wait_idle()
 
         # Wait until dialog closes
         def _check_closed():
@@ -1709,7 +1739,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(5, 0.2, _check_closed)
-        time.sleep(0.5)
+        self.wait_idle()
 
     def find_struct_bar_controls(self) -> dict[str, int]:
         """Find handles of struct bar and its child controls (supports both Original and Ported)."""
@@ -1804,7 +1834,7 @@ class StirlingDriver:
             return
         # Post command (both 32814 and 33014 work appropriately in their respective builds)
         self.post_command(ID_STRUCT_EDIT)
-        time.sleep(0.4)
+        self.wait_idle()
 
     def select_struct_type(self, name_or_index: str | int):
         """Select a struct template from combo box in struct bar."""
@@ -1831,7 +1861,7 @@ class StirlingDriver:
             win32gui.SendMessage(parent, win32con.WM_COMMAND, (win32con.CBN_SELCHANGE << 16) | cid, combo)
         if bar and bar != parent:
             win32gui.SendMessage(bar, win32con.WM_COMMAND, (win32con.CBN_SELCHANGE << 16) | cid, combo)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def struct_type_names(self) -> list[str]:
         """Return all structure names currently loaded in the struct bar."""
@@ -1846,7 +1876,7 @@ class StirlingDriver:
         if not button:
             raise RuntimeError("Struct bar reload button not found")
         win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def get_struct_address(self) -> str:
         """Get the current base address displayed in Struct Bar (e.g. '00000000')."""
@@ -1863,7 +1893,7 @@ class StirlingDriver:
         if not btn:
             raise RuntimeError(f"Struct bar '{btn_key}' button not found")
         win32gui.SendMessage(btn, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def struct_nav_prev_rec(self):
         """Click '<<' button (struct size previous)."""
@@ -1890,7 +1920,7 @@ class StirlingDriver:
         
         # Click Goto button with PostMessage to avoid blocking modal dialog
         win32gui.PostMessage(btn, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.3)
+        self.wait_idle()
 
         def _find_dlg():
             wins = self._get_process_windows()
@@ -1906,43 +1936,43 @@ class StirlingDriver:
             btn_mode = win32gui.GetDlgItem(dlg_hwnd, IDC_TOPADDR_MODE_ADDRESS)
             if btn_mode:
                 win32gui.SendMessage(btn_mode, win32con.BM_CLICK, 0, 0)
-                time.sleep(0.1)
+                self.wait_idle()
 
             # Select Base
             base_id = IDC_TOPADDR_BASE_HEX if is_hex else IDC_TOPADDR_BASE_DEC
             btn_base = win32gui.GetDlgItem(dlg_hwnd, base_id)
             if btn_base:
                 win32gui.SendMessage(btn_base, win32con.BM_CLICK, 0, 0)
-                time.sleep(0.1)
+                self.wait_idle()
 
             # Input address
             edit = win32gui.GetDlgItem(dlg_hwnd, IDC_TOPADDR_EDIT)
             if edit and address is not None:
                 _set_control_text(edit, str(address))
-                time.sleep(0.1)
+                self.wait_idle()
         elif mode == "mark":
             # Select Mark radio
             btn_mode = win32gui.GetDlgItem(dlg_hwnd, IDC_TOPADDR_MODE_MARK)
             if btn_mode:
                 win32gui.SendMessage(btn_mode, win32con.BM_CLICK, 0, 0)
-                time.sleep(0.1)
+                self.wait_idle()
 
             # Select mark in list box
             lb = win32gui.GetDlgItem(dlg_hwnd, IDC_TOPADDR_MARK_LIST)
             if lb:
                 win32gui.SendMessage(lb, win32con.LB_SETCURSEL, mark_index, 0)
-                time.sleep(0.1)
+                self.wait_idle()
 
         # Click OK
         btn_ok = win32gui.GetDlgItem(dlg_hwnd, 1)
         if btn_ok:
             win32gui.PostMessage(btn_ok, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.4)
+        self.wait_idle()
 
     def set_struct_address_to_caret(self):
         """Execute 'キャレット位置を構造体編集' (32865)."""
         self.post_command(ID_STRUCT_CARET)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def get_struct_list_texts(self) -> list[tuple[str, str, str]]:
         """Get visible rows from struct list view as (type, name, value) tuples."""
@@ -2170,7 +2200,8 @@ class StirlingDriver:
         if not button:
             raise RuntimeError(f"Dialog control not found: {control_id}")
         win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.2)
+        # A static method has no driver; wait on the thread that owns the dialog.
+        wait_ui_idle(dialog_hwnd)
 
     def open_find_mismatch_dialog(self) -> int:
         self.post_command(ID_FIND_MISMATCH)
@@ -2389,7 +2420,7 @@ class StirlingDriver:
         if not mdi:
             raise RuntimeError("MDI client not found")
         win32gui.SendMessage(mdi, 0x0222, child_hwnd, 0)  # WM_MDIACTIVATE
-        time.sleep(0.2)
+        self.wait_idle()
 
     def active_mdi_title(self) -> str:
         # EnumChildWindows does not return handles; query the MDI client explicitly.
@@ -2546,12 +2577,12 @@ class StirlingDriver:
     def toggle_bit_image(self):
         """Toggle Bit Image window (33003 / ID_BITIMAGE)."""
         self.post_command(ID_BITIMAGE)
-        time.sleep(0.4)
+        self.wait_idle()
 
     def reload_bit_image(self):
         """Reload / Update Bit Image window (33004 / ID_BITIMAGE_RELOAD)."""
         self.post_command(ID_BITIMAGE_RELOAD)
-        time.sleep(0.3)
+        self.wait_idle()
 
     def find_bit_image_window(self, timeout: float = 2.0) -> int | None:
         """Find the floating top-level Bit Image window."""
@@ -2697,7 +2728,7 @@ class StirlingDriver:
     def toggle_output_pane(self):
         """Toggle the output pane (0x80E8)."""
         self.post_command(ID_OUTPUT_PANE)
-        time.sleep(0.3)
+        self.wait_idle()
 
     # ------------------------------------------------------------------
     # Environment Settings "User Menu" page / accelerator dialog (Issue #27)
@@ -2753,7 +2784,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2778,7 +2809,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2803,7 +2834,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2827,7 +2858,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2855,7 +2886,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2876,7 +2907,7 @@ class StirlingDriver:
         count = win32gui.SendMessage(tab, TCM_GETITEMCOUNT, 0, 0) or 12
         for index in range(count):
             win32gui.SendMessage(tab, TCM_SETCURFOCUS, index, 0)
-            time.sleep(0.2)
+            self.wait_idle()
             page = self._find_settings_page(sheet_hwnd, probe)
             if page is not None:
                 return sheet_hwnd, page
@@ -2896,7 +2927,7 @@ class StirlingDriver:
             page_hwnd, win32con.WM_COMMAND,
             (win32con.CBN_SELCHANGE << 16) | IDC_TBAR_CATEGORY, combo,
         )
-        time.sleep(0.1)
+        self.wait_idle()
 
     def toolbar_select_item(self, page_hwnd: int, index: int, *, current: bool):
         control_id = IDC_TBAR_CURRENT if current else IDC_TBAR_AVAILABLE
@@ -2906,14 +2937,14 @@ class StirlingDriver:
             page_hwnd, win32con.WM_COMMAND,
             (win32con.LBN_SELCHANGE << 16) | control_id, listbox,
         )
-        time.sleep(0.1)
+        self.wait_idle()
 
     def toolbar_click(self, page_hwnd: int, control_id: int):
         button = win32gui.GetDlgItem(page_hwnd, control_id)
         if not button:
             raise RuntimeError(f"Toolbar page control not found: {control_id}")
         win32gui.SendMessage(page_hwnd, win32con.WM_COMMAND, control_id, button)
-        time.sleep(0.1)
+        self.wait_idle()
 
     def toolbar_button_states(self, page_hwnd: int) -> dict[int, bool]:
         return {
@@ -2963,7 +2994,7 @@ class StirlingDriver:
             dialog_hwnd, win32con.WM_COMMAND,
             (win32con.LBN_SELCHANGE << 16) | IDC_EXTLIST_LIST, listbox,
         )
-        time.sleep(0.1)
+        self.wait_idle()
 
     def extension_open_record(
         self, dialog_hwnd: int, *, add: bool = False, double_click: bool = False
@@ -3047,7 +3078,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(timeout, 0.1, _closed)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def key_assign_categories(self, page_hwnd: int) -> list[str]:
         return _combobox_texts(win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_CATEGORY))
@@ -3072,7 +3103,7 @@ class StirlingDriver:
             (win32con.CBN_SELCHANGE << 16) | IDC_KA_FUNC_CATEGORY,
             combo,
         )
-        time.sleep(0.1)
+        self.wait_idle()
 
     def key_assign_set_modifiers(
         self, page_hwnd: int, *, ctrl: bool = False, shift: bool = False
@@ -3082,7 +3113,7 @@ class StirlingDriver:
             checked = win32gui.SendMessage(button, win32con.BM_GETCHECK, 0, 0)
             if bool(checked == win32con.BST_CHECKED) != desired:
                 win32gui.SendMessage(button, win32con.BM_CLICK, 0, 0)
-                time.sleep(0.1)
+                self.wait_idle()
 
     def key_assign_select_key(self, page_hwnd: int, index: int):
         listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_KEYLIST)
@@ -3093,7 +3124,7 @@ class StirlingDriver:
             (win32con.LBN_SELCHANGE << 16) | IDC_KA_KEYLIST,
             listbox,
         )
-        time.sleep(0.1)
+        self.wait_idle()
 
     def key_assign_select_function(self, page_hwnd: int, raw_id: int):
         category = (raw_id >> 8) & 0xFF
@@ -3105,7 +3136,7 @@ class StirlingDriver:
             (win32con.CBN_SELCHANGE << 16) | IDC_KA_FUNC_CATEGORY,
             combo,
         )
-        time.sleep(0.1)
+        self.wait_idle()
         listbox = win32gui.GetDlgItem(page_hwnd, IDC_KA_FUNC_LIST)
         count = win32gui.SendMessage(listbox, win32con.LB_GETCOUNT, 0, 0)
         for index in range(count):
@@ -3120,7 +3151,7 @@ class StirlingDriver:
                     (win32con.LBN_SELCHANGE << 16) | IDC_KA_FUNC_LIST,
                     listbox,
                 )
-                time.sleep(0.1)
+                self.wait_idle()
                 return
         raise ValueError(f"Key Assign function raw ID not found: 0x{raw_id:04X}")
 
@@ -3136,7 +3167,7 @@ class StirlingDriver:
     def key_assign_reset(self, page_hwnd: int):
         button = win32gui.GetDlgItem(page_hwnd, IDC_KA_RESET)
         win32gui.PostMessage(button, win32con.BM_CLICK, 0, 0)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def key_assign_transfer_file(
         self, page_hwnd: int, path: str | Path, *, save: bool
@@ -3194,7 +3225,7 @@ class StirlingDriver:
         win32gui.SendMessage(lb, win32con.LB_SETCURSEL, index, 0)
         win32gui.SendMessage(page_hwnd, win32con.WM_COMMAND,
                              (1 << 16) | IDC_UM_AVAILABLE, lb)   # LBN_SELCHANGE
-        time.sleep(0.1)
+        self.wait_idle()
 
     def um_select_current(self, page_hwnd: int, index: int = 0):
         """Select an item in the "現在のメニュー設定" listbox and notify the page."""
@@ -3202,19 +3233,19 @@ class StirlingDriver:
         win32gui.SendMessage(lb, win32con.LB_SETCURSEL, index, 0)
         win32gui.SendMessage(page_hwnd, win32con.WM_COMMAND,
                              (1 << 16) | IDC_UM_CURRENT, lb)     # LBN_SELCHANGE
-        time.sleep(0.1)
+        self.wait_idle()
 
     def um_click_add(self, page_hwnd: int):
         """Press the "追加" button (opens the modal accelerator dialog -> must not block)."""
         btn = win32gui.GetDlgItem(page_hwnd, IDC_UM_ADD)
         win32gui.PostMessage(page_hwnd, win32con.WM_COMMAND, IDC_UM_ADD, btn)   # BN_CLICKED
-        time.sleep(0.2)
+        self.wait_idle()
 
     def um_click_separator(self, page_hwnd: int):
         """Press the "セパレータ" button."""
         btn = win32gui.GetDlgItem(page_hwnd, IDC_UM_SEPARATOR)
         win32gui.SendMessage(page_hwnd, win32con.WM_COMMAND, IDC_UM_SEPARATOR, btn)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def um_dblclk_current(self, page_hwnd: int, index: int):
         """Double-click an item of the "現在のメニュー設定" listbox (opens the accel dialog)."""
@@ -3222,7 +3253,7 @@ class StirlingDriver:
         win32gui.SendMessage(lb, win32con.LB_SETCURSEL, index, 0)
         win32gui.PostMessage(page_hwnd, win32con.WM_COMMAND,
                              (2 << 16) | IDC_UM_CURRENT, lb)     # LBN_DBLCLK
-        time.sleep(0.2)
+        self.wait_idle()
 
     def find_accel_dialog(self, timeout: float = 3.0) -> int | None:
         """Find the modal "アクセラレータの指定" dialog (IDD_ACCEL_INPUT 184)."""
@@ -3250,14 +3281,14 @@ class StirlingDriver:
         """Type one character into the accelerator edit (goes through ES_UPPERCASE)."""
         edit = win32gui.GetDlgItem(dlg_hwnd, IDC_ACCEL_EDIT)
         _send_message_w(edit, win32con.WM_CHAR, ord(ch), 1)
-        time.sleep(0.1)
+        self.wait_idle()
 
     def accel_dialog_clear(self, dlg_hwnd: int):
         """Clear the accelerator edit (select all + backspace)."""
         edit = win32gui.GetDlgItem(dlg_hwnd, IDC_ACCEL_EDIT)
         win32gui.SendMessage(edit, win32con.EM_SETSEL, 0, -1)
         _send_message_w(edit, win32con.WM_CHAR, 8, 1)   # VK_BACK
-        time.sleep(0.1)
+        self.wait_idle()
 
     def accel_dialog_close(self, dlg_hwnd: int, accept: bool = True, timeout: float = 5.0):
         """Close the accelerator dialog with OK (accept) or Cancel."""
@@ -3269,7 +3300,7 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(timeout, 0.2, _check_closed)
-        time.sleep(0.2)
+        self.wait_idle()
 
     def close_settings_sheet(self, sheet_hwnd: int, accept: bool = False, timeout: float = 5.0):
         """Close the Environment Settings property sheet with OK / Cancel.
@@ -3286,4 +3317,4 @@ class StirlingDriver:
             return True
 
         timings.wait_until_passes(timeout, 0.2, _check_closed)
-        time.sleep(0.2)
+        self.wait_idle()

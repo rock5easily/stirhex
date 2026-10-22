@@ -170,7 +170,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             text = _dump_text(drv, dump_file)
 
         assert _char_fields(text) == EXPECTED_CHAR_FIELDS, text
@@ -190,9 +189,7 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             drv.select_range_dialog(start_addr="31", end_addr="3F", is_hex=True)
-            time.sleep(0.3)
             text = _dump_text(drv, dump_file)
 
         fields = _char_fields(text)
@@ -221,7 +218,6 @@ class TestIssue173CharsetUnicode:
                 safe_set_focus(drv.hwnd)
                 time.sleep(0.3)
                 drv.post_command(ID_CHARSET_UNICODE)
-                time.sleep(0.5)
                 text = _dump_text(drv, dump_file)
 
         assert text.count("😀") == pairs, (
@@ -239,7 +235,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             text = _dump_text(drv, dump_file)
 
         # 2 バイト = 2 セル。二倍幅グリフはそのまま 2 セルを占める。
@@ -261,7 +256,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             text = _dump_text(drv, dump_file)
 
         assert "\U0001F600" in text, text
@@ -278,7 +272,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             text = _dump_text(drv, dump_file)
 
         assert "\U0001F600" not in text, text
@@ -296,7 +289,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
 
             _find_text_from_top(drv, "한국어")
             pos = _caret_address(drv)
@@ -314,7 +306,6 @@ class TestIssue173CharsetUnicode:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.5)
             drv.press_tab()          # 文字ペインへ
             time.sleep(0.2)
             drv.type_ime_chars("한")  # CP932 に無い文字
@@ -335,11 +326,9 @@ class TestIssue173CharsetUnicode:
             time.sleep(0.3)
 
             drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.6)
             sjis_px = drv.capture_view_pixels()
 
             drv.post_command(ID_CHARSET_UNICODE)
-            time.sleep(0.6)
             uni_px = drv.capture_view_pixels()
 
         assert sjis_px and uni_px, "could not capture the view"

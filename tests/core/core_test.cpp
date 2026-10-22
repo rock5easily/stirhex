@@ -19,12 +19,15 @@
 #include "../../StirHex/src/core/HexText.h"
 #include "../../StirHex/src/core/HexPattern.h"
 #include "../../StirHex/src/core/FindAll.h"
+#include "../../StirHex/src/core/DiffScan.h"
 #include "../../StirHex/src/core/Utf8Text.h"
 #include "../../StirHex/src/core/Utf16Text.h"
 #include "../../StirHex/src/core/BinaryPatch.h"
+#include "../../StirHex/src/core/AllocFailureScope.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -46,6 +49,9 @@
 #include "../../StirHex/src/core/Win32FileHooks.h"   // I/O 故障注入の差込口（Issue #180）
 
 #include "core/Checksum.h"
+#include "core/FileSource.h"   // 遅延読み込みの読み出し元（Issue #300）
+
+#include <memory>
 
 using stirling::BlockCursor;
 using stirling::BlockList;
@@ -1139,6 +1145,133 @@ static void TestBinaryPatch() {
                                                wrongOut.wstring().c_str());
     CHECK(wrongResult.status == BinaryPatchStatus::kSourceMismatch && !fs::exists(wrongOut),
           "BPS source CRC mismatch is rejected");
+
+    // bpsIgnoreChecksum publishes despite source/target CRC mismatches, but
+    // still rejects a corrupt patch or a source of the wrong size (Issue #302).
+    {
+        stirling::BinaryPatchOptions ignoreOptions;
+        ignoreOptions.bpsIgnoreChecksum = true;
+        const auto applyIgnoring = [&](const fs::path& sourcePath,
+                                       const std::vector<unsigned char>& patchBytes,
+                                       const fs::path& outPath,
+                                       const stirling::BinaryPatchOptions& opts) {
+            const fs::path patchPath = TempFile("patch_bps_ignore");
+            WriteFile(patchPath, patchBytes);
+            WriteFile(outPath, std::vector<unsigned char>{0xca, 0xfe});
+            const auto applied = ApplyBinaryPatch(sourcePath.wstring().c_str(),
+                                                  patchPath.wstring().c_str(),
+                                                  outPath.wstring().c_str(), opts);
+            std::error_code ec;
+            fs::remove(patchPath, ec);
+            return applied;
+        };
+        // Alter one CRC field and re-seal the patch CRC so that only that
+        // field disagrees.
+        const auto withCrcField = [&](size_t fieldOffset) {
+            std::vector<unsigned char> patched = bpsFixture;
+            patched[fieldOffset] ^= 0x01;
+            patched.resize(patched.size() - 4);
+            AppendLe32(patched, TestCrc32(patched.data(), patched.size()));
+            return patched;
+        };
+        const fs::path ignoreOut = TempFile("patch_bps_ignore_out");
+        const std::vector<unsigned char> untouched = {0xca, 0xfe};
+        std::error_code ec;
+
+        const auto matched = applyIgnoring(bpsFixtureSource, bpsFixture, ignoreOut, ignoreOptions);
+        CHECK(matched.Ok() && matched.sourceVerified && matched.targetVerified &&
+              !matched.checksumIgnored && ReadFileBytes(ignoreOut) == bpsTarget,
+              "BPS ignore-checksum still reports verified CRCs when they match");
+
+        const std::vector<unsigned char> badSourceCrc = withCrcField(bpsFooter);
+        CHECK(applyIgnoring(bpsFixtureSource, badSourceCrc, ignoreOut, {}).status ==
+                  BinaryPatchStatus::kSourceMismatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS source CRC field mismatch is rejected without ignore-checksum");
+        const auto ignoredSource = applyIgnoring(bpsFixtureSource, badSourceCrc, ignoreOut,
+                                                 ignoreOptions);
+        CHECK(ignoredSource.Ok() && !ignoredSource.sourceVerified &&
+              ignoredSource.targetVerified && ignoredSource.checksumIgnored &&
+              ReadFileBytes(ignoreOut) == bpsTarget,
+              "BPS ignore-checksum publishes despite source CRC field mismatch");
+
+        const std::vector<unsigned char> badTargetCrc = withCrcField(bpsFooter + 4);
+        CHECK(applyIgnoring(bpsFixtureSource, badTargetCrc, ignoreOut, {}).status ==
+                  BinaryPatchStatus::kTargetMismatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS target CRC field mismatch is rejected without ignore-checksum");
+        const auto ignoredTarget = applyIgnoring(bpsFixtureSource, badTargetCrc, ignoreOut,
+                                                 ignoreOptions);
+        CHECK(ignoredTarget.Ok() && ignoredTarget.sourceVerified &&
+              !ignoredTarget.targetVerified && ignoredTarget.checksumIgnored &&
+              ReadFileBytes(ignoreOut) == bpsTarget,
+              "BPS ignore-checksum publishes despite target CRC field mismatch");
+
+        // Different source content of the right size: both CRCs differ.
+        const auto ignoredContent = applyIgnoring(wrongSource, bpsFixture, ignoreOut,
+                                                  ignoreOptions);
+        CHECK(ignoredContent.Ok() && !ignoredContent.sourceVerified &&
+              !ignoredContent.targetVerified && ignoredContent.checksumIgnored &&
+              ReadFileBytes(ignoreOut).size() == bpsTarget.size(),
+              "BPS ignore-checksum applies to a different source of the same size");
+
+        CHECK(applyIgnoring(bpsFixtureSource, badBps, ignoreOut, ignoreOptions).status ==
+                  BinaryPatchStatus::kInvalidPatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum still rejects a patch CRC mismatch");
+        // Altering the source CRC without re-sealing breaks the patch CRC
+        // too; a corrupt patch is reported as such, not as a source mismatch.
+        std::vector<unsigned char> unsealed = bpsFixture;
+        unsealed[bpsFooter] ^= 0x01;
+        CHECK(applyIgnoring(bpsFixtureSource, unsealed, ignoreOut, ignoreOptions).status ==
+                  BinaryPatchStatus::kInvalidPatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum rejects a patch whose CRC fields are corrupt");
+
+        // Structural errors in a correctly sealed patch are never ignored:
+        // only the source/target CRC comparison is relaxed.
+        const auto sealed = [](std::vector<unsigned char> body, std::uint32_t sourceCrc) {
+            AppendLe32(body, sourceCrc);
+            AppendLe32(body, 0);
+            AppendLe32(body, TestCrc32(body.data(), body.size()));
+            return body;
+        };
+        const std::uint32_t bpsSourceCrc = TestCrc32(bpsSource.data(), bpsSource.size());
+        const std::vector<unsigned char> sealedRange = sealed(
+            std::vector<unsigned char>(rangeBps.begin(), rangeBps.end() - 12), bpsSourceCrc);
+        CHECK(applyIgnoring(bpsFixtureSource, sealedRange, ignoreOut, ignoreOptions).status ==
+                  BinaryPatchStatus::kInvalidPatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum still rejects an out-of-range SourceRead");
+        const std::vector<unsigned char> sealedFuture = sealed(
+            std::vector<unsigned char>(futureCopy.begin(), futureCopy.end() - 12),
+            TestCrc32(nullptr, 0));
+        CHECK(applyIgnoring(emptySource, sealedFuture, ignoreOut, ignoreOptions).status ==
+                  BinaryPatchStatus::kInvalidPatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum still rejects a future TargetCopy");
+        std::vector<unsigned char> shortBody = {'B', 'P', 'S', '1'};
+        AppendBpsVar(shortBody, bpsSource.size());
+        AppendBpsVar(shortBody, bpsSource.size() + 1);  // one byte is never written
+        AppendBpsVar(shortBody, 0);
+        AppendBpsVar(shortBody, (bpsSource.size() - 1) * 4);  // SourceRead whole source
+        CHECK(applyIgnoring(bpsFixtureSource, sealed(shortBody, bpsSourceCrc), ignoreOut,
+                            ignoreOptions).status == BinaryPatchStatus::kInvalidPatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum still rejects a result shorter than the header size");
+
+        const fs::path longerSource = TempFile("patch_bps_ignore_longer_source");
+        std::vector<unsigned char> longerBytes = bpsSource;
+        longerBytes.push_back(0);
+        WriteFile(longerSource, longerBytes);
+        CHECK(applyIgnoring(longerSource, bpsFixture, ignoreOut, ignoreOptions).status ==
+                  BinaryPatchStatus::kSourceMismatch &&
+              ReadFileBytes(ignoreOut) == untouched,
+              "BPS ignore-checksum still rejects a source size mismatch");
+
+        fs::remove(ignoreOut, ec);
+        fs::remove(longerSource, ec);
+    }
 
     CHECK(ApplyBinaryPatch(source.wstring().c_str(), ips.wstring().c_str(),
                            source.wstring().c_str()).status == BinaryPatchStatus::kConflict,
@@ -3135,6 +3268,187 @@ static void TestFindAllFuzz() {
     CHECK(mism == 0, "find all matches naive reference");
     CHECK(totalHits > 0, "find all fuzz produced hits");
     TestPrintf("  find all fuzz: %d cases / %lld hits / %d mismatches\n", cases, totalHits, mism);
+}
+
+// ---- データ比較の相違範囲収集（Issue #307）----
+
+using DiffRanges = std::vector<stirling::DiffScan::Range>;
+
+// a と b の [0, size) の相違の連続範囲 [start, end] を返すナイーブ参照。
+static DiffRanges NaiveDiffRanges(const std::vector<unsigned char>& a,
+                                  const std::vector<unsigned char>& b, size_t size) {
+    DiffRanges out;
+    FileOffset runStart = -1;
+    for (size_t i = 0; i < size; ++i) {
+        if (a[i] != b[i]) {
+            if (runStart < 0) runStart = static_cast<FileOffset>(i);
+        } else if (runStart >= 0) {
+            out.push_back(stirling::DiffScan::Range(runStart, static_cast<FileOffset>(i) - 1));
+            runStart = -1;
+        }
+    }
+    if (runStart >= 0) out.push_back(stirling::DiffScan::Range(runStart, static_cast<FileOffset>(size) - 1));
+    return out;
+}
+
+// Step を最後まで回す。回した回数を返す（無限ループ防止の上限付き）。
+static int RunDiffScan(stirling::DiffScan& s, FileOffset budget) {
+    int steps = 0;
+    while (s.Running() && steps < 10000000) {
+        s.Step(budget);
+        ++steps;
+    }
+    return steps;
+}
+
+// 固定ケース: 範囲の区切り、末尾まで続く相違、空・不正な条件、上限、中止、文書の縮小。
+static void TestDiffScanBasic() {
+    TestPrintf("TestDiffScanBasic\n");
+    using stirling::DiffScan;
+    using stirling::DiffScanState;
+    const char* ta = "abcdefghij";
+    const char* tb = "aXcYZfghiQ";   // 相違: [1,1] [3,4] [9,9]（最後は末尾まで続く）
+    std::vector<unsigned char> da(ta, ta + 10), db(tb, tb + 10);
+    BlockList a, b;
+    BuildDoc(a, da);
+    BuildDoc(b, db);
+    const DiffRanges expect = {{1, 1}, {3, 4}, {9, 9}};
+    CHECK(NaiveDiffRanges(da, db, 10) == expect, "naive agrees on the fixed ranges");
+
+    {   // 予算 1 バイトずつでも、一度に全部でも同じ結果
+        DiffScan s;
+        CHECK(s.Start(a, b, 10) == DiffScanState::Running, "start runs");
+        RunDiffScan(s, 1);
+        CHECK(s.State() == DiffScanState::Complete, "byte steps complete");
+        CHECK(s.Diffs() == expect, "byte steps collect the ranges");
+        CHECK(s.Scanned() == s.ScanTotal() && s.ScanTotal() == 10, "progress reaches the total");
+        s.Start(a, b, 10);
+        RunDiffScan(s, 1 << 30);
+        CHECK(s.Diffs() == expect, "one step collects the ranges");
+    }
+    {   // 先頭 size バイトだけを比べる（範囲は size の手前で閉じる）
+        DiffScan s;
+        s.Start(a, b, 4);
+        RunDiffScan(s, 3);
+        const DiffRanges head = {{1, 1}, {3, 3}};
+        CHECK(s.State() == DiffScanState::Complete && s.Diffs() == head, "size limits the comparison");
+    }
+    {   // 同じ内容は相違なし。size 0 は比べずに完了
+        DiffScan s;
+        CHECK(s.Start(a, a, 10) == DiffScanState::Running, "same list runs");
+        RunDiffScan(s, 4);
+        CHECK(s.State() == DiffScanState::Complete && s.Diffs().empty(), "identical has no diffs");
+        CHECK(s.Start(a, b, 0) == DiffScanState::Complete, "zero size completes");
+        CHECK(s.Step(100) == DiffScanState::Complete, "step after completion is a no-op");
+    }
+    {   // 文書が size より短いときは読み取りエラー
+        DiffScan s;
+        CHECK(s.Start(a, b, 11) == DiffScanState::ReadError, "size past EOF");
+    }
+    {   // 上限ちょうどは完了、超えると打ち切り（上限件数までを保持）
+        DiffScan s;
+        s.Start(a, b, 10, 3);
+        RunDiffScan(s, 2);
+        CHECK(s.State() == DiffScanState::Complete && s.Diffs() == expect,
+              "ranges equal to limit complete, including the one running to EOF");
+        s.Start(a, b, 10, 2);
+        RunDiffScan(s, 2);
+        CHECK(s.State() == DiffScanState::Truncated, "one more range than the limit truncates");
+        const DiffRanges first2 = {{1, 1}, {3, 4}};
+        CHECK(s.Diffs() == first2, "truncated keeps exactly limit ranges");
+        CHECK(s.Step(100) == DiffScanState::Truncated, "truncated does not resume");
+        CHECK(s.Start(a, b, 10, 0) == DiffScanState::Complete && s.Diffs().empty(), "zero limit");
+    }
+    {   // 中止
+        DiffScan s;
+        s.Start(a, b, 10);
+        s.Step(2);
+        s.Cancel();
+        CHECK(s.State() == DiffScanState::Cancelled, "cancel stops the comparison");
+        const size_t kept = s.Diffs().size();
+        CHECK(s.Step(100) == DiffScanState::Cancelled && s.Diffs().size() == kept, "cancelled does not resume");
+        s.Cancel();
+        CHECK(s.State() == DiffScanState::Cancelled, "cancel twice is harmless");
+    }
+    {   // Step の合間に文書が縮んだら、範囲の外を読まずに打ち切る
+        BlockList shrink;
+        BuildDoc(shrink, db);
+        DiffScan s;
+        s.Start(a, shrink, 10);
+        s.Step(2);
+        BlockCursor c(&shrink);
+        CHECK(c.DeleteRange(7, 3) == 3, "shrink the document");
+        CHECK(s.Step(100) == DiffScanState::ReadError, "shrunk document ends with read error");
+    }
+}
+
+// ナイーブ参照との突合。Step の予算（1, 小, ブロック長前後, 巨大）と比較長、上限を変え、予算の
+//   区切りやブロック境界(16KB)、読み込み単位(4MB)をまたぐ相違範囲を取りこぼさないことを確かめる。
+static void TestDiffScanFuzz() {
+    TestPrintf("TestDiffScanFuzz\n");
+    using stirling::DiffScan;
+    using stirling::DiffScanState;
+    std::mt19937 rng(0x307D1F);
+    int cases = 0, mism = 0;
+    long long totalRanges = 0;
+    for (int iter = 0; iter < 80; ++iter) {
+        // 1 割は読み込み単位（4MB）を越える長さにする。
+        const bool big = (iter % 10 == 0);
+        const int size = big ? (4 * 1024 * 1024 + 1 + static_cast<int>(rng() % 70000))
+                             : (1 + static_cast<int>(rng() % 50000));
+        std::vector<unsigned char> da(size);
+        for (int i = 0; i < size; ++i) da[i] = static_cast<unsigned char>(rng());
+        std::vector<unsigned char> db = da;
+        // 相違の密度を変える（まばら／中程度／密集）。
+        const unsigned density = (iter % 3 == 0) ? 2 : (iter % 3 == 1) ? 50 : 5000;
+        for (int i = 0; i < size; ++i) {
+            if (rng() % 10000 < density) db[i] = static_cast<unsigned char>(db[i] ^ (1 + rng() % 255));
+        }
+        // ブロック境界をまたぐ相違の塊を混ぜる。
+        if (size > kBlockCapacity + 8) {
+            for (int i = kBlockCapacity - 3; i < kBlockCapacity + 3; ++i) db[i] = static_cast<unsigned char>(da[i] ^ 0x5A);
+        }
+        BlockList a, b;
+        BuildDoc(a, da);
+        BuildDoc(b, db);
+
+        for (int t = 0; t < 3; ++t) {
+            const int cmp = (rng() & 1) ? size : static_cast<int>(rng() % (size + 1));
+            // 4MB 超の比較は小さい予算だと時間がかかるため、ブロック長前後以上の予算に限る。
+            static const FileOffset kBudgets[] = {1, 7, 64, kBlockCapacity - 1, kBlockCapacity + 3, 1 << 30};
+            const size_t first = big ? 3 : 0;
+            const size_t count = sizeof(kBudgets) / sizeof(kBudgets[0]);
+            const FileOffset budget = kBudgets[first + rng() % (count - first)];
+            const DiffRanges expect = NaiveDiffRanges(da, db, static_cast<size_t>(cmp));
+            const size_t limit = (rng() % 3 == 0) ? static_cast<size_t>(rng() % 50) : DiffScan::kDefaultLimit;
+
+            DiffScan s;
+            s.Start(a, b, cmp, limit);
+            RunDiffScan(s, budget);
+            ++cases;
+            totalRanges += static_cast<long long>(s.Diffs().size());
+
+            bool ok;
+            if (cmp == 0 || limit == 0) {
+                ok = s.State() == DiffScanState::Complete && s.Diffs().empty();
+            } else if (expect.size() > limit) {
+                ok = s.State() == DiffScanState::Truncated &&
+                     s.Diffs() == DiffRanges(expect.begin(), expect.begin() + limit);
+            } else {
+                ok = s.State() == DiffScanState::Complete && s.Diffs() == expect;
+            }
+            if (!ok) {
+                ++mism;
+                if (mism <= 3)
+                    TestPrintf("  FAIL diff scan: size=%d cmp=%d budget=%lld limit=%zu got=%zu exp=%zu state=%d\n",
+                                size, cmp, static_cast<long long>(budget), limit,
+                                s.Diffs().size(), expect.size(), static_cast<int>(s.State()));
+            }
+        }
+    }
+    CHECK(mism == 0, "diff scan matches naive reference");
+    CHECK(totalRanges > 0, "diff scan fuzz produced ranges");
+    TestPrintf("  diff scan fuzz: %d cases / %lld ranges / %d mismatches\n", cases, totalRanges, mism);
 }
 
 
@@ -5853,6 +6167,277 @@ static void TestStructTree() {
     }
 }
 
+// ---- 構造体の総サイズ・ノード総数の上限（Issue #311）----------------------
+// 要素数の上限はメンバー単位のため、構造体の入れ子配列で総サイズが int を桁あふれし、
+//   数十億ノードの生成も試みていた。パース時に 64bit で積算して上限で打ち切ること、
+//   上限ちょうどは通ること、積算したノード数が BuildTree の実際の生成数と一致することを確認する。
+static size_t CountStructNodes(const std::vector<stirling::StructNode>& nodes) {
+    size_t n = nodes.size();
+    for (const auto& c : nodes) { n += CountStructNodes(c.children); }
+    return n;
+}
+
+static void TestStructDefLimits() {
+    TestPrintf("[TestStructDefLimits]\n");
+    using stirling::StructDefSet;
+    using stirling::StructNode;
+    const int kMaxSize = 4 * 1024 * 1024;
+    const int kMaxNodes = 1 << 20;
+
+    // Issue の例（32GB）。int では負のサイズになっていた。超えたフィールドは加えず、
+    //   それまでに読めた定義は残る。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText("struct A { double a[65536]; }; struct B { A x[65536]; };", &err),
+              "a 32GB nested struct is a parse error");
+        CHECK(err.find(L"B.x") != std::wstring::npos, "the message names the offending field");
+        CHECK(defs.SizeOfStruct(defs.FindByName("A")) == 65536 * 8, "the preceding struct is kept");
+        const int b = defs.FindByName("B");
+        CHECK(b >= 0 && defs.Defs()[b].fields.empty(), "the oversized field is not added");
+        CHECK(defs.SizeOfStruct(b) == 0, "the truncated struct has no size");
+    }
+
+    // サイズ上限: 512KB の構造体の配列 8 個（= 4MB ちょうど）は通り、9 個は超える。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText("struct A { double a[65536]; }; struct B { A x[8]; };", &err),
+              "a struct of exactly the size cap parses");
+        CHECK(defs.SizeOfStruct(defs.FindByName("B")) == kMaxSize, "size at the cap");
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText("struct A { double a[65536]; }; struct B { A x[9]; };", &err),
+              "a struct over the size cap is a parse error");
+        CHECK(err.find(L"サイズ") != std::wstring::npos, "the size cap is reported as a size error");
+    }
+    // メンバーの和で上限を超える場合も同じ。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        std::string src = "struct S {";
+        for (int i = 0; i < 9; ++i) { src += " double d" + std::to_string(i) + "[65536];"; }
+        src += " };";
+        CHECK(!defs.ParseText(src, &err), "the sum of members over the size cap is a parse error");
+        CHECK(defs.Defs().size() == 1 && defs.Defs()[0].fields.size() == 8,
+              "members up to the cap are kept");
+        CHECK(defs.SizeOfStruct(0) == kMaxSize, "the kept members fill the cap");
+    }
+
+    // ノード上限: byte[65536] は 65537 ノード。15 個＋byte[65520]（65521 ノード）で
+    //   2^20 ちょうど（サイズは 1MB 弱で上限内）。1 バイト足すと超える。
+    {
+        std::string src = "struct S {";
+        for (int i = 0; i < 15; ++i) { src += " byte a" + std::to_string(i) + "[65536];"; }
+        src += " byte r[65520];";
+        StructDefSet ok;
+        std::wstring err;
+        CHECK(ok.ParseText(src + " };", &err), "a struct of exactly the node cap parses");
+        CHECK(ok.Defs().size() == 1 && ok.Defs()[0].nodeCount == kMaxNodes, "node count at the cap");
+
+        StructDefSet over;
+        err.clear();
+        CHECK(!over.ParseText(src + " byte z; };", &err), "a struct over the node cap is a parse error");
+        CHECK(err.find(L"要素数") != std::wstring::npos, "the node cap is reported as a count error");
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText("struct A { byte a[65536]; }; struct B { A x[16]; };", &err),
+              "nested arrays over the node cap are a parse error");
+    }
+
+    // 積算したノード数とサイズが BuildTree の実際の生成と一致する（空構造体・要素数 1 の
+    //   配列・2 次元の構造体配列を含む）。
+    const auto matchesTree = [](const StructDefSet& defs, int index) {
+        StructNode root;
+        defs.BuildTree(index, std::vector<unsigned char>(defs.SizeOfStruct(index)), false, 0, root);
+        return CountStructNodes(root.children) ==
+               static_cast<size_t>(defs.Defs()[index].nodeCount);
+    };
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText("struct E { };"
+                             "struct E2 { E a; E b; };"
+                             "struct In { byte a; word b[2]; };"
+                             "struct Out { char c[3]; In in; In arr[2]; In grid[2][3];"
+                             " E e; E es[4]; E es2[2][3]; E2 z; double d[2][2];"
+                             " In one[1]; In col[3][1]; In row[1][3]; };", &err),
+              "mixed definition parses");
+        const int out = defs.FindByName("Out");
+        CHECK(out >= 0, "Out is defined");
+        if (out < 0) { return; }
+        // In = 1 + 2*2 = 5 バイト。Out = 3 + 5 + 10 + 30 + 0 + 0 + 0 + 0 + 32 + 5 + 15 + 15
+        //   = 115 バイト。
+        CHECK(defs.SizeOfStruct(out) == 115, "size includes nested arrays and empty structs");
+        CHECK(matchesTree(defs, out), "the measured node count matches the built tree");
+        CHECK(matchesTree(defs, defs.FindByName("E2")), "a zero size struct with members matches");
+    }
+    // 途中で打ち切られた定義（'}' 無しの終端・エラー中断）と 'struct' 前置でも一致する。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText("struct In { byte a; word b[2]; };"
+                             "struct P { struct In a[2]; byte b[2][2];", &err),
+              "a definition cut off at the end still parses");
+        CHECK(defs.SizeOfStruct(defs.FindByName("P")) == 14, "the cut off definition has its size");
+        CHECK(matchesTree(defs, defs.FindByName("P")), "the cut off definition matches");
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText("struct In { byte a; word b[2]; };"
+                              "struct Q { In a[3]; Missing m; };", &err),
+              "an undefined member type is a parse error");
+        CHECK(defs.SizeOfStruct(defs.FindByName("Q")) == 15, "the kept members have their size");
+        CHECK(matchesTree(defs, defs.FindByName("Q")), "the partially parsed definition matches");
+    }
+}
+
+// ---- 構造体の入れ子の段数の上限（Issue #322）------------------------------
+// 直列の入れ子はサイズ・ノード数が小さいまま深くでき、ツリー生成等の再帰がスタックを
+//   使い切りうる。64 段ちょうどは通ってツリーも組めること、65 段目はパースエラーで
+//   そのフィールドを加えないこと、配列を挟んでも段数は構造体の入れ子で数えることを確認する。
+static size_t StructTreeDepth(const std::vector<stirling::StructNode>& nodes) {
+    size_t depth = 0;
+    for (const auto& c : nodes) { depth = (std::max)(depth, 1 + StructTreeDepth(c.children)); }
+    return depth;
+}
+
+static void TestStructDefDepth() {
+    TestPrintf("[TestStructDefDepth]\n");
+    using stirling::StructDefSet;
+    using stirling::StructNode;
+    const int kMaxDepth = 64;
+
+    // S1 { byte x; } S2 { S1 x; } ... S{n} { S{n-1} x; }。S{n} の段数は n。
+    const auto chain = [](int n) {
+        std::string src = "struct S1 { byte x; };";
+        for (int i = 2; i <= n; ++i) {
+            src += " struct S" + std::to_string(i) + " { S" + std::to_string(i - 1) + " x; };";
+        }
+        return src;
+    };
+
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText(chain(kMaxDepth), &err), "a chain at the depth cap parses");
+        CHECK(err.empty(), "the depth cap boundary leaves err empty");
+        const int top = defs.FindByName("S64");
+        CHECK(top >= 0 && defs.Defs()[top].depth == kMaxDepth, "the depth is counted per level");
+        if (top >= 0) {
+            std::vector<unsigned char> data(1, 0x7f);
+            StructNode root;
+            defs.BuildTree(top, data, false, 0, root);
+            CHECK(StructTreeDepth(root.children) == static_cast<size_t>(kMaxDepth),
+                  "the tree is as deep as the definition");
+        }
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText(chain(kMaxDepth + 1), &err), "a chain over the depth cap is a parse error");
+        CHECK(err.find(L"S65.x") != std::wstring::npos, "the message names the offending field");
+        const int over = defs.FindByName("S65");
+        CHECK(over >= 0 && defs.Defs()[over].fields.empty(), "the too deep field is not added");
+    }
+
+    // 深い構造体の配列や、浅いメンバーの後ろに置いた場合も同じ段数で数える。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText(chain(kMaxDepth) + " struct T { byte a; S64 arr[2][3]; };", &err),
+              "an array of the deepest struct is over the cap");
+        const int t = defs.FindByName("T");
+        CHECK(t >= 0 && defs.Defs()[t].fields.size() == 1, "members before the too deep one are kept");
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText("struct A { byte a; }; struct B { A x[4]; A y[2][2]; byte z; };", &err),
+              "arrays of structs parse");
+        CHECK(defs.Defs()[defs.FindByName("B")].depth == 2, "arrays do not add nesting levels");
+    }
+
+    // 段数はメンバーの最大値で決まる（深いメンバーの後に浅いメンバーが続いても下がらない）。
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(!defs.ParseText(chain(kMaxDepth - 1) +
+                              " struct Mix { S63 deep; S1 shallow; byte z; };"
+                              " struct Over { Mix m; S1 s; };", &err),
+              "nesting a struct at the cap after a shallow member is over the cap");
+        const int mix = defs.FindByName("Mix");
+        CHECK(mix >= 0 && defs.Defs()[mix].depth == kMaxDepth, "a shallow member does not lower the depth");
+        CHECK(err.find(L"Over.m") != std::wstring::npos, "the struct holding Mix is over the cap");
+    }
+
+    // 段数が 64 のまま、2 次元配列のコンテナでツリーだけが深くなる場合も組めて破棄できる。
+    //   8 段ごとに [1][2] を挟むと、ツリーは 64 + 2*8 = 80 段になる。
+    {
+        std::string src = "struct S1 { byte x; };";
+        for (int i = 2; i <= kMaxDepth; ++i) {
+            src += " struct S" + std::to_string(i) + " { S" + std::to_string(i - 1) +
+                   ((i % 8 == 0) ? " x[1][2]; };" : " x; };");
+        }
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText(src, &err), "a chain with 2D arrays at the depth cap parses");
+        const int top = defs.FindByName("S64");
+        CHECK(top >= 0 && defs.Defs()[top].depth == kMaxDepth, "2D arrays keep the depth at the cap");
+        if (top >= 0) {
+            StructNode root;
+            defs.BuildTree(top, std::vector<unsigned char>(defs.SizeOfStruct(top)), false, 0, root);
+            CHECK(StructTreeDepth(root.children) == static_cast<size_t>(kMaxDepth + 2 * 8),
+                  "array containers deepen the tree beyond the depth");
+            CHECK(CountStructNodes(root.children) ==
+                      static_cast<size_t>(defs.Defs()[top].nodeCount),
+                  "the deep tree matches the measured node count");
+        }
+    }
+
+    // 中断・終端・同名定義のどの経路でも、登録された定義の段数は保持したフィールドから
+    //   求めた段数と一致し、上限内に収まる。
+    const auto depthsConsistent = [kMaxDepth](const StructDefSet& defs) {
+        for (const auto& d : defs.Defs()) {
+            int expect = 1;
+            for (const auto& f : d.fields) {
+                if (f.kind == stirling::FieldKind::Struct) {
+                    expect = (std::max)(expect, defs.Defs()[f.structIndex].depth + 1);
+                }
+            }
+            if (d.depth != expect || d.depth > kMaxDepth) { return false; }
+        }
+        return true;
+    };
+    const std::string kPaths[] = {
+        chain(3) + " struct P { S3 a; struct S2 b;",                    // '}' 無しで終端
+        chain(3) + " struct P { S3 a; Missing m; };",                   // 未定義の型
+        chain(3) + " struct P { S3 a; S1 b[0]; };",                     // 不正な要素数
+        "struct A { double a[65536]; }; struct B { A x; }; struct P { B x[8]; B y; };",  // サイズ上限
+        chain(kMaxDepth) + " struct P { S2 a; S64 b; };",               // 段数上限
+        chain(3) + " struct S1 { S3 a; }; struct Q { S1 q; };",         // 同名定義（先勝ち）
+    };
+    for (const auto& src : kPaths) {
+        StructDefSet defs;
+        std::wstring err;
+        defs.ParseText(src, &err);
+        CHECK(depthsConsistent(defs), "stored depths match the kept fields on every parse path");
+    }
+    {
+        StructDefSet defs;
+        std::wstring err;
+        CHECK(defs.ParseText(chain(3) + " struct S1 { S3 a; }; struct Q { S1 q; };", &err),
+              "a duplicated struct name parses");
+        const int q = defs.FindByName("Q");
+        CHECK(q >= 0 && defs.Defs()[q].depth == 2, "a duplicated name resolves to the first definition");
+    }
+}
+
 // 16進テキストの寛容パーサ（Issue #97。クリップボードの16進テキスト貼り付け）。
 //   受理形式・拒否条件と、失敗時に部分結果を返さないことを検証する。
 static void TestHexTextParse() {
@@ -5930,6 +6515,87 @@ static void TestHexTextParse() {
         CHECK(ParseHexText(text, out).Ok(), "long token parses");
         CHECK(out.size() == 4096, "long token yields every byte");
         CHECK(out.front() == 0x7F && out.back() == 0x7F, "long token values are correct");
+    }
+}
+
+// 16進ペインのコピー文字列（Issue #306）。原 FUN_0045c53f の書式（大文字 2 桁・空白区切り）と、
+//   文字列で表せない長さを確保せずに拒否すること、ParseHexText と往復できることを確認する。
+static void TestHexTextFormat() {
+    TestPrintf("[TestHexTextFormat]\n");
+    using stirling::FormatHexText;
+
+    std::wstring out = L"stale";
+    CHECK(FormatHexText(nullptr, 0, out) && out.empty(), "empty input gives empty text");
+
+    const unsigned char one[] = {0x0A};
+    CHECK(FormatHexText(one, 1, out) && out == L"0A", "single byte has no separator");
+
+    const unsigned char bytes[] = {0x00, 0x41, 0x9F, 0xFF};
+    CHECK(FormatHexText(bytes, 4, out) && out == L"00 41 9F FF",
+          "upper case, space separated, no trailing separator");
+
+    out = L"stale";
+    CHECK(!FormatHexText(nullptr, 4, out) && out.empty(), "null data with length is rejected");
+
+    // 3 * size - 1 が文字列の上限を超える長さは、確保を試みずに拒否する。
+    //   data は読まれないので、長さだけ大きな値を渡せる。
+    const size_t tooLong = (out.max_size() + 1) / 3 + 1;
+    out = L"stale";
+    CHECK(!FormatHexText(bytes, tooLong, out) && out.empty(), "unrepresentable length is rejected");
+
+    std::vector<unsigned char> all(256);
+    for (int i = 0; i < 256; ++i) { all[static_cast<size_t>(i)] = static_cast<unsigned char>(i); }
+    CHECK(FormatHexText(all.data(), all.size(), out), "every byte value formats");
+    CHECK(out.size() == 256 * 3 - 1, "length is 3 * size - 1");
+    std::vector<unsigned char> back;
+    CHECK(stirling::ParseHexText(out, back).Ok() && back == all, "formatted text parses back");
+}
+
+// バッファ長への変換可否（Issue #154 / #306）。上限は vector::max_size() と同じ
+//   ptrdiff_t の最大値で、Win32 では 2GB〜4GB を拒否する（length_error を起こさない）。
+static void TestFitsInBuffer() {
+    TestPrintf("[TestFitsInBuffer]\n");
+    using stirling::FileOffset;
+    using stirling::FitsInBuffer;
+    const FileOffset limit = static_cast<FileOffset>((std::numeric_limits<std::ptrdiff_t>::max)());
+    CHECK(!FitsInBuffer(-1), "negative length is rejected");
+    CHECK(FitsInBuffer(0), "zero fits");
+    CHECK(FitsInBuffer(limit), "ptrdiff_t max fits");
+    CHECK(static_cast<unsigned long long>(limit) <= std::vector<unsigned char>().max_size(),
+          "limit does not exceed vector::max_size()");
+    if (sizeof(std::ptrdiff_t) < sizeof(FileOffset)) {
+        CHECK(!FitsInBuffer(FileOffset(1) << 31), "2GB is rejected on 32bit builds");
+        CHECK(!FitsInBuffer(FileOffset(3) << 30), "3GB is rejected on 32bit builds");
+        CHECK(!FitsInBuffer(FileOffset(1) << 32), "4GB is rejected on 32bit builds");
+    } else {
+        CHECK(FitsInBuffer(FileOffset(5) << 30), "5GB fits on 64bit builds");
+    }
+}
+
+// 確保失敗を std::bad_alloc で受ける区間（Issue #306）。StirHex の new ハンドラはこの区間の
+//   中だけ bad_alloc を投げるため、入れ子・例外での巻き戻し・スレッドごとの独立を確認する。
+static void TestStdAllocScope() {
+    TestPrintf("[TestStdAllocScope]\n");
+    using stirling::StdAllocScope;
+    CHECK(!StdAllocScope::Active(), "inactive outside any scope");
+    {
+        const StdAllocScope outer;
+        CHECK(StdAllocScope::Active(), "active inside a scope");
+        {
+            const StdAllocScope inner;
+            CHECK(StdAllocScope::Active(), "active inside a nested scope");
+        }
+        CHECK(StdAllocScope::Active(), "still active after the nested scope ends");
+        bool otherThreadActive = true;
+        std::thread([&otherThreadActive] { otherThreadActive = StdAllocScope::Active(); }).join();
+        CHECK(!otherThreadActive, "the scope belongs to the thread that opened it");
+    }
+    CHECK(!StdAllocScope::Active(), "inactive after the scope ends");
+    try {
+        const StdAllocScope scope;
+        throw std::bad_alloc();
+    } catch (const std::bad_alloc&) {
+        CHECK(!StdAllocScope::Active(), "the scope is closed before the handler runs");
     }
 }
 
@@ -6531,6 +7197,14 @@ static void TestUndoBudget() {
     CHECK(ShiftSavePoint(1, 2) == -1, "dropped save point becomes unreachable");
     CHECK(ShiftSavePoint(-1, 2) == -1, "already unreachable stays unreachable");
     CHECK(ShiftSavePoint(3, 0) == 3, "no drop keeps save point");
+
+    // 1 件の見積もり（Issue #312）: データを持たないレコードもレコード本体の分を数え、
+    //   データを持つレコードはヒープの管理領域の概算（ポインタ 2 個分）も加える。
+    using stirling::UndoRecordBytes;
+    CHECK(UndoRecordBytes(48, 0) == 48, "a record without payload still counts its own size");
+    CHECK(UndoRecordBytes(48, 1) == 48 + 1 + 2 * sizeof(void*),
+          "a payload adds its capacity and the heap block overhead");
+    CHECK(UndoRecordBytes(48, 4096) == 48 + 4096 + 2 * sizeof(void*), "large payload");
 }
 
 // ---- 範囲一括削除（Issue #62）----
@@ -9006,6 +9680,798 @@ static void TestChecksum() {
     CHECK(hash.Start(empty, 0, 0, ChecksumAlgorithm::Sha256) == ChecksumState::Complete, "empty list");
 }
 
+// ============================================================================
+// 遅延読み込み（Issue #300）
+//   ファイル参照ノード（元ファイルの区間を指すだけのノード）を含むリストに対して、
+//   読み取り・編集・保存が全体読み込みと同じ結果になることを確かめる。
+// ============================================================================
+
+// 位置ごとに値が変わる検証用データ（周期 251 で 16KB・64KB の境界と揃わない）。
+static std::vector<unsigned char> LazyPattern(size_t size, unsigned seed) {
+    std::vector<unsigned char> data(size);
+    for (size_t i = 0; i < size; ++i) {
+        data[i] = static_cast<unsigned char>((i % 251) * 7 + seed + (i / 4099));
+    }
+    return data;
+}
+
+// ファイルを開き、pieces の長さ（合計はファイル長）で区切った参照ノード列を作る。
+//   LoadFileLazy は 1GB 単位でしか区切らないため、小さなファイルで複数の参照ノードや
+//   ノード境界を跨ぐ操作を検証するのに使う。
+static bool MakeLazyList(BlockList& list, const fs::path& path, const std::vector<int>& pieces) {
+    list.Clear();
+    HANDLE h = ::CreateFileW(path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { return false; }
+    LARGE_INTEGER li = {};
+    ::GetFileSizeEx(h, &li);
+    auto src = std::make_shared<stirling::FileSource>(h, path.wstring(), li.QuadPart,
+                                                      FILE_SHARE_READ, false);
+    FileOffset at = 0;
+    for (int len : pieces) {
+        if (list.AppendFileRef(at, len) == nullptr) { return false; }
+        at += len;
+    }
+    list.AttachSource(src);
+    return at == li.QuadPart;
+}
+
+// ファイル ID（置換で変わる。上書き保存か一時ファイル方式かの判別に使う）。
+static unsigned long long FileIdOf(const fs::path& path) {
+    HANDLE h = ::CreateFileW(path.wstring().c_str(), FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { return 0; }
+    BY_HANDLE_FILE_INFORMATION info = {};
+    ::GetFileInformationByHandle(h, &info);
+    ::CloseHandle(h);
+    return (static_cast<unsigned long long>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+}
+
+// 参照ノードを含むリストの構造検証（参照ノードは capacity 0 のため CheckInvariants は使えない）。
+static void CheckLazyStructure(BlockList& list, size_t expectedLen, const char* where) {
+    FileOffset sum = 0;
+    int seen = 0;
+    bool ok = true;
+    BlockNode* prev = nullptr;
+    for (BlockNode* n = list.GetHead(); n != nullptr && seen <= list.Count(); n = list.GetNext(n)) {
+        if (list.GetPrev(n) != prev) { ok = false; }
+        if (BlockList::IsFileRef(n)) {
+            if (n->capacity != 0 || n->usedLen < 0 || n->usedLen > stirling::kMaxFileRefLen) {
+                ok = false;
+            }
+            // 長さ 0 の参照ノードは唯一のノード（全削除）のときだけ。
+            if (n->usedLen == 0 && list.Count() != 1) { ok = false; }
+        } else if (n->capacity != kBlockCapacity || n->usedLen < 0 ||
+                   n->usedLen > n->capacity || n->data == nullptr) {
+            ok = false;
+        }
+        sum += n->usedLen;
+        prev = n;
+        ++seen;
+    }
+    CHECK(ok, where);
+    CHECK(seen == list.Count(), where);
+    CHECK(sum == static_cast<FileOffset>(expectedLen), where);
+    CHECK(list.GetTotalLength() == static_cast<FileOffset>(expectedLen), where);
+}
+
+static int CountFileRefs(BlockList& list) {
+    int refs = 0;
+    for (BlockNode* n = list.GetHead(); n != nullptr; n = list.GetNext(n)) {
+        if (BlockList::IsFileRef(n)) { ++refs; }
+    }
+    return refs;
+}
+
+// LoadFileLazy の基本: 参照ノードだけで開き、読み取り・検索・チェックサムが全体読み込みと一致する。
+static void TestLazyLoadBasics() {
+    TestPrintf("TestLazyLoadBasics\n");
+    using stirling::Checksum;
+    using stirling::ChecksumAlgorithm;
+    using stirling::ChecksumState;
+    const size_t kSize = 300000;   // 64KB ページ 5 個弱・16KB ブロック 19 個弱
+    std::vector<unsigned char> data = LazyPattern(kSize, 3);
+    const unsigned char marker[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x01};
+    const size_t markerPos = 65536 - 2;   // キャッシュページの境界を跨ぐ
+    std::memcpy(data.data() + markerPos, marker, sizeof(marker));
+    const fs::path in = TempFile("lazy_basic");
+    WriteFile(in, data);
+
+    BlockList list;
+    const stirling::FileIoResult r = stirling::LoadFileLazy(list, in.wstring().c_str());
+    CHECK(r.Ok(), "lazy load ok");
+    CHECK(r.fileSize == static_cast<FileOffset>(kSize), "lazy load reports the size");
+    CHECK(list.HasSource(), "lazy list keeps the source");
+    CHECK(list.Count() == 1 && BlockList::IsFileRef(list.GetHead()), "one file reference node");
+    CheckLazyStructure(list, kSize, "lazy load structure");
+    CheckEqual(list, data, "lazy load content");
+
+    // GetByteAt の前進・後退（同じカーソルで増分アクセス）。
+    {
+        BlockCursor c(&list);
+        CHECK(c.Seek(0, BlockCursor::kBegin, nullptr), "seek start");
+        bool allOk = true;
+        const size_t probes[] = {0, 1, 65535, 65536, 131071, 70000, 3, kSize - 1, 200000, 16384};
+        for (size_t p : probes) {
+            unsigned char b = 0;
+            if (!c.GetByteAt(static_cast<FileOffset>(p), &b) || b != data[p]) { allOk = false; }
+        }
+        CHECK(allOk, "GetByteAt on a file reference node");
+        unsigned char b = 0;
+        CHECK(!c.GetByteAt(static_cast<FileOffset>(kSize), &b), "GetByteAt past the end fails");
+    }
+    // 前方・後方検索（ページ境界を跨ぐ一致）。
+    {
+        BlockCursor c(&list);
+        FileOffset hit = -1;
+        CHECK(c.SearchPattern(marker, sizeof(marker), &hit, BlockCursor::kForward, 0, 0) &&
+              hit == static_cast<FileOffset>(markerPos), "forward search across a page boundary");
+        hit = -1;
+        CHECK(c.SearchPattern(marker, sizeof(marker), &hit, BlockCursor::kBackward,
+                              static_cast<FileOffset>(kSize - 1), 0) &&
+              hit == static_cast<FileOffset>(markerPos), "backward search across a page boundary");
+    }
+    // チェックサムは全体読み込みのリストと同じ値。
+    {
+        BlockList full;
+        CHECK(stirling::LoadFileIntoBlocks(full, in.wstring().c_str()).Ok(), "full load");
+        Checksum a, b;
+        a.Start(list, 100, kSize - 200, ChecksumAlgorithm::Sha256);
+        b.Start(full, 100, kSize - 200, ChecksumAlgorithm::Sha256);
+        while (a.Step(7777) == ChecksumState::Running) {}
+        while (b.Step(7777) == ChecksumState::Running) {}
+        CHECK(a.State() == ChecksumState::Complete, "lazy checksum completes");
+        CHECK(std::strcmp(a.Hex(), b.Hex()) == 0, "lazy checksum equals the full-load checksum");
+    }
+    // 空ファイル: 全体読み込みと同じく空ブロック 1 個（読み出し元は保持する）。
+    {
+        const fs::path empty = TempFile("lazy_empty");
+        WriteFile(empty, {});
+        BlockList e;
+        CHECK(stirling::LoadFileLazy(e, empty.wstring().c_str()).Ok(), "lazy load empty");
+        CHECK(e.Count() == 1 && e.GetTotalLength() == 0 && e.GetHead()->data != nullptr,
+              "empty file is one empty block");
+        BlockCursor c(&e);
+        CHECK(c.InsertByte(0, 0x41), "insert into the empty lazy document");
+        CheckEqual(e, {0x41}, "empty lazy insert");
+        e.Clear();
+        std::error_code ec;
+        fs::remove(empty, ec);
+    }
+    // 開いている間は他プロセスが書き込めない（参照ノードの内容を守るロック）。
+    {
+        HANDLE w = ::CreateFileW(in.wstring().c_str(), GENERIC_WRITE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+        const DWORD err = ::GetLastError();
+        CHECK(w == INVALID_HANDLE_VALUE && err == ERROR_SHARING_VIOLATION,
+              "writers are locked out while the file is lazily loaded");
+        if (w != INVALID_HANDLE_VALUE) { ::CloseHandle(w); }
+    }
+    list.Clear();
+    CHECK(!list.HasSource(), "Clear releases the source");
+    std::error_code ec;
+    fs::remove(in, ec);
+    CHECK(!fs::exists(in), "the file can be deleted after Clear (handle closed)");
+}
+
+// 複合編集ファズ: 参照ノードを含むリストを線形参照モデルと突き合わせる。
+static void TestLazyEditFuzz() {
+    TestPrintf("TestLazyEditFuzz\n");
+    // 編集が全体へ行き渡ると参照ノードが残らないため、編集量に比べて十分大きくする。
+    const size_t kSize = 40000000;
+    std::vector<unsigned char> ref = LazyPattern(kSize, 11);
+    const fs::path in = TempFile("lazy_fuzz");
+    WriteFile(in, ref);
+
+    std::mt19937 rng(0x300300);
+    // 参照ノードを不揃いな長さで区切る（ノード境界を跨ぐ操作を増やす）。
+    std::vector<int> pieces;
+    for (size_t left = kSize; left > 0;) {
+        const size_t n = (std::min)(left, static_cast<size_t>(1 + rng() % 7000000));
+        pieces.push_back(static_cast<int>(n));
+        left -= n;
+    }
+    BlockList list;
+    CHECK(MakeLazyList(list, in, pieces), "build lazy list");
+    BlockCursor c(&list);   // 同じカーソルを使い回す（窓のキャッシュの検証も兼ねる）
+
+    const int kOps = 3000;
+    int mismatchAt = -1;
+    for (int op = 0; op < kOps && mismatchAt < 0; ++op) {
+        const int size = static_cast<int>(ref.size());
+        int kind = static_cast<int>(rng() % 8);
+        if (size < 64) { kind = 1; }
+        switch (kind) {
+        case 0: {   // InsertByte
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const unsigned char v = static_cast<unsigned char>(rng());
+            if (!c.InsertByte(pos, v)) { mismatchAt = op; break; }
+            ref.insert(ref.begin() + pos, v);
+            break;
+        }
+        case 1: {   // Insert
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const int n = 1 + static_cast<int>(rng() % 3000);
+            std::vector<unsigned char> src(n);
+            for (int i = 0; i < n; ++i) { src[i] = static_cast<unsigned char>(rng()); }
+            if (!c.Insert(pos, src.data(), n)) { mismatchAt = op; break; }
+            ref.insert(ref.begin() + pos, src.begin(), src.end());
+            break;
+        }
+        case 2: {   // DeleteByte
+            const int pos = static_cast<int>(rng() % size);
+            unsigned char got = 0;
+            if (!c.DeleteByte(pos, &got) || got != ref[pos]) { mismatchAt = op; break; }
+            ref.erase(ref.begin() + pos);
+            break;
+        }
+        case 3: {   // DeleteRange（参照ノードの内側・跨ぎ・丸ごとを含む）
+            const int pos = static_cast<int>(rng() % (size + 1));
+            const int n = 1 + static_cast<int>(rng() % 90000);
+            const FileOffset want = ExpectedDeleteCount(ref.size(), pos, n);
+            if (c.DeleteRange(pos, n) != want) { mismatchAt = op; break; }
+            if (want > 0) {
+                ref.erase(ref.begin() + pos, ref.begin() + pos + static_cast<size_t>(want));
+            }
+            break;
+        }
+        case 4: {   // Write
+            const int pos = static_cast<int>(rng() % size);
+            const int n = 1 + static_cast<int>(rng() % 40000);
+            std::vector<unsigned char> src(n);
+            for (int i = 0; i < n; ++i) { src[i] = static_cast<unsigned char>(rng()); }
+            const FileOffset want = (n < size - pos) ? n : (size - pos);
+            if (c.Write(pos, src.data(), n) != want) { mismatchAt = op; break; }
+            std::copy(src.begin(), src.begin() + static_cast<size_t>(want), ref.begin() + pos);
+            break;
+        }
+        case 5: {   // FillRange
+            const int pos = static_cast<int>(rng() % size);
+            const int n = 1 + static_cast<int>(rng() % 40000);
+            const unsigned char v = static_cast<unsigned char>(rng());
+            const FileOffset want = (n < size - pos) ? n : (size - pos);
+            if (c.FillRange(pos, n, v) != want) { mismatchAt = op; break; }
+            std::fill(ref.begin() + pos, ref.begin() + pos + static_cast<size_t>(want), v);
+            break;
+        }
+        case 6: {   // SetByteAt
+            const int pos = static_cast<int>(rng() % size);
+            const unsigned char v = static_cast<unsigned char>(rng());
+            if (!c.SetByteAt(pos, v)) { mismatchAt = op; break; }
+            ref[static_cast<size_t>(pos)] = v;
+            break;
+        }
+        default: {  // 読み取り: Read と GetByteAt（参照ノード・実体化ブロックの混在）
+            const int pos = static_cast<int>(rng() % size);
+            const int n = 1 + static_cast<int>(rng() % 100000);
+            const int want = (n < size - pos) ? n : (size - pos);
+            std::vector<unsigned char> buf(static_cast<size_t>(want));
+            if (!c.Seek(pos, BlockCursor::kBegin, nullptr) ||
+                c.Read(want, buf.data()) != want ||
+                !std::equal(buf.begin(), buf.end(), ref.begin() + pos)) {
+                mismatchAt = op;
+                break;
+            }
+            unsigned char b = 0;
+            const int q = static_cast<int>(rng() % size);
+            if (!c.GetByteAt(q, &b) || b != ref[static_cast<size_t>(q)]) { mismatchAt = op; }
+            break;
+        }
+        }
+        if (mismatchAt < 0 && (op % 500) == 499) {
+            CheckLazyStructure(list, ref.size(), "lazy fuzz structure");
+            CheckEqual(list, ref, "lazy fuzz content");
+        }
+    }
+    if (mismatchAt >= 0) { TestPrintf("  lazy fuzz mismatch at op %d\n", mismatchAt); }
+    CHECK(mismatchAt < 0, "lazy fuzz ops all match the model");
+    CheckLazyStructure(list, ref.size(), "lazy fuzz final structure");
+    CheckEqual(list, ref, "lazy fuzz final content");
+    CHECK(CountFileRefs(list) > 0, "untouched regions stay as file references");
+
+    // 編集結果を保存すると、保存先は文書と同じ内容になり、参照ノードだけの構造へ戻る。
+    const stirling::FileIoResult saved = stirling::SaveBlocksToFile(list, in.wstring().c_str());
+    CHECK(saved.Ok(), "save the fuzzed lazy document over the source");
+    CHECK(ReadFileBytes(in) == ref, "saved file equals the model");
+    CHECK(list.Count() == 1 && BlockList::IsFileRef(list.GetHead()), "reloaded as one reference");
+    CheckEqual(list, ref, "content after the reload");
+    list.Clear();
+    std::error_code ec;
+    fs::remove(in, ec);
+}
+
+// 保存: 長さ・位置が変わらなければ上書き保存（ファイル ID 不変・変更ブロックだけ書く）、
+//   挿入・削除があれば一時ファイル方式（ファイル ID が変わる）。別名保存はロックを移す。
+#ifdef STIRLING_TEST_IO_HOOK
+static void TestLazySave() {
+    TestPrintf("TestLazySave\n");
+    const size_t kSize = 250000;
+    const std::vector<unsigned char> data = LazyPattern(kSize, 29);
+
+    // 1) 上書き保存。
+    {
+        const fs::path in = TempFile("lazy_inplace");
+        WriteFile(in, data);
+        const unsigned long long idBefore = FileIdOf(in);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load for in-place");
+        std::vector<unsigned char> ref = data;
+        BlockCursor c(&list);
+        CHECK(c.SetByteAt(10, 0x5A), "set byte");
+        ref[10] = 0x5A;
+        const unsigned char w[] = {1, 2, 3, 4, 5, 6, 7, 8};
+        CHECK(c.Write(100000 - 3, w, sizeof(w)) == static_cast<FileOffset>(sizeof(w)), "write");
+        std::copy(std::begin(w), std::end(w), ref.begin() + (100000 - 3));
+        CHECK(c.FillRange(kSize - 5, 5, 0xEE) == 5, "fill tail");
+        std::fill(ref.end() - 5, ref.end(), static_cast<unsigned char>(0xEE));
+        io_fault::ScopedHooks hooks;
+        const stirling::FileIoResult r = stirling::SaveBlocksToFile(list, in.wstring().c_str());
+        CHECK(r.Ok(), "in-place save ok");
+        CHECK(io_fault::g_plan.replaceCalls == 0 && io_fault::g_plan.moveCalls == 0,
+              "in-place save does not replace the file");
+        CHECK(io_fault::g_plan.writeCalls <= 4, "only the materialized blocks are written");
+        CHECK(FileIdOf(in) == idBefore, "file id unchanged by the in-place save");
+        CHECK(ReadFileBytes(in) == ref, "in-place saved content");
+        CheckEqual(list, ref, "document after the in-place save");
+        // 書いた後もキャッシュが古い内容を返さない。
+        BlockList again;
+        list.Clear();
+        CHECK(stirling::LoadFileLazy(again, in.wstring().c_str()).Ok(), "reload");
+        CheckEqual(again, ref, "reloaded after the in-place save");
+        again.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 2) 挿入・削除で長さが同じに戻っても、位置がずれたので一時ファイル方式になる。
+    {
+        const fs::path in = TempFile("lazy_temp");
+        WriteFile(in, data);
+        const unsigned long long idBefore = FileIdOf(in);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load for temp save");
+        std::vector<unsigned char> ref = data;
+        BlockCursor c(&list);
+        CHECK(c.InsertByte(5000, 0x11), "insert");
+        ref.insert(ref.begin() + 5000, static_cast<unsigned char>(0x11));
+        CHECK(c.DeleteRange(200000, 1) == 1, "delete");
+        ref.erase(ref.begin() + 200000);
+        const stirling::FileIoResult r = stirling::SaveBlocksToFile(list, in.wstring().c_str());
+        CHECK(r.Ok(), "temp save over the lazily loaded source");
+        CHECK(FileIdOf(in) != idBefore, "the file was replaced");
+        CHECK(ReadFileBytes(in) == ref, "temp saved content");
+        CHECK(list.Count() == 1 && BlockList::IsFileRef(list.GetHead()),
+              "reloaded from the saved file");
+        CheckEqual(list, ref, "document after the temp save");
+        // 保存後も編集・保存を続けられる（今度は上書き保存）。
+        CHECK(c.SetByteAt(0, 0x99), "edit after the reload");
+        ref[0] = 0x99;
+        CHECK(stirling::SaveBlocksToFile(list, in.wstring().c_str()).Ok(), "second save");
+        CHECK(ReadFileBytes(in) == ref, "second saved content");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 3) 別名保存: 保存先を読み出し元にし直し、元ファイルのロックを外す。
+    {
+        const fs::path in = TempFile("lazy_saveas_src");
+        const fs::path out = TempFile("lazy_saveas_dst");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load for save-as");
+        std::vector<unsigned char> ref = data;
+        BlockCursor c(&list);
+        CHECK(c.DeleteRange(0, 1000) == 1000, "delete head");
+        ref.erase(ref.begin(), ref.begin() + 1000);
+        CHECK(stirling::SaveBlocksToFile(list, out.wstring().c_str()).Ok(), "save as");
+        CHECK(ReadFileBytes(out) == ref, "save-as content");
+        CHECK(ReadFileBytes(in) == data, "source untouched by save-as");
+        CHECK(list.Source() != nullptr && list.Source()->Path() == out.wstring(),
+              "the document now reads from the save-as target");
+        HANDLE w = ::CreateFileW(in.wstring().c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(w != INVALID_HANDLE_VALUE, "the old source is no longer locked");
+        if (w != INVALID_HANDLE_VALUE) { ::CloseHandle(w); }
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+        fs::remove(out, ec);
+    }
+    // 4) 置換に失敗しても、元ファイルを開き直して編集を続けられる。
+    {
+        const fs::path in = TempFile("lazy_replace_fail");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load for replace failure");
+        std::vector<unsigned char> ref = data;
+        BlockCursor c(&list);
+        CHECK(c.InsertByte(0, 0x77), "insert");
+        ref.insert(ref.begin(), static_cast<unsigned char>(0x77));
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.replaceFailures = 100;
+            io_fault::g_plan.replaceError = ERROR_ACCESS_DENIED;
+            io_fault::g_plan.moveFailures = 100;
+            io_fault::g_plan.moveError = ERROR_ACCESS_DENIED;
+            const stirling::FileIoResult r =
+                stirling::SaveBlocksToFile(list, in.wstring().c_str());
+            CHECK(!r.Ok(), "replace failure is reported");
+        }
+        CHECK(ReadFileBytes(in) == data, "the source is unchanged");
+        CHECK(list.Source() != nullptr && list.Source()->IsOpen(), "the source was reopened");
+        CheckEqual(list, ref, "document intact after the failed save");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 6) 上書き保存の途中で書込に失敗しても、自分の書込を外部の変更と見なさず、
+    //   読み出し元を開き直して文書を読み続けられる。
+    {
+        const fs::path in = TempFile("lazy_inplace_partial");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load for partial write");
+        std::vector<unsigned char> ref = data;
+        BlockCursor c(&list);
+        CHECK(c.SetByteAt(100, 0x01), "edit the first block");
+        ref[100] = 0x01;
+        CHECK(c.SetByteAt(200000, 0x02), "edit a later block");
+        ref[200000] = 0x02;
+        stirling::FileIoResult r;
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.writeCallsBeforeFault = 1;   // 2 個目のブロックの書込で失敗
+            io_fault::g_plan.writeFail = true;
+            io_fault::g_plan.writeError = ERROR_DISK_FULL;
+            r = stirling::SaveBlocksToFile(list, in.wstring().c_str());
+        }
+        CHECK(!r.Ok() && r.partialInPlace, "partial in-place failure is reported");
+        CHECK(!r.sourceLost, "our own partial write does not lose the source");
+        CHECK(list.Source() != nullptr && list.Source()->IsOpen(), "the source was reopened");
+        CheckEqual(list, ref, "document still readable after the partial failure");
+        CHECK(stirling::SaveBlocksToFile(list, in.wstring().c_str()).Ok(), "retry the save");
+        CHECK(ReadFileBytes(in) == ref, "retried save content");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 5) バックアップ用の複写: 読み書き禁止で開いていても読み出し元から複写できる。
+    {
+        const fs::path in = TempFile("lazy_backup_src");
+        const fs::path bak = TempFile("lazy_backup_bak");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str(),
+                                     stirling::FileShareMode::kExclusive).Ok(),
+              "load exclusively");
+        CHECK(!::CopyFileW(in.wstring().c_str(), bak.wstring().c_str(), FALSE),
+              "CopyFileW is blocked by our own exclusive lock");
+        CHECK(stirling::CopyFileForBackup(list, in.wstring().c_str(), bak.wstring().c_str()).Ok(),
+              "backup copy falls back to the source handle");
+        list.Clear();
+        CHECK(ReadFileBytes(bak) == data, "backup content");
+        std::error_code ec;
+        fs::remove(in, ec);
+        fs::remove(bak, ec);
+    }
+}
+
+#endif  // STIRLING_TEST_IO_HOOK
+
+// 読み出し元の開き直しは、閉じている間の置き換え・変更を検出する（同じサイズでも）。
+static void TestLazyReopenIdentity() {
+    TestPrintf("TestLazyReopenIdentity\n");
+    const std::vector<unsigned char> data = LazyPattern(100000, 53);
+    // 1) 同じサイズの別内容へ書き換えられたら開き直さない。
+    {
+        const fs::path in = TempFile("lazy_reopen_modified");
+        WriteFile(in, data);
+        // 直後の書き換えは時刻の刻み（既定 約 15.6ms）が粗いと同じ最終更新時刻になり、
+        // 変更を検出できない。読み込む前に時刻を過去へずらしておく（Issue #331）。
+        std::error_code tec;
+        fs::last_write_time(in, fs::last_write_time(in, tec) - std::chrono::seconds(10), tec);
+        CHECK(!tec, "backdate the last write time");
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        stirling::FileSource* src = list.Source();
+        src->Close();
+        CHECK(src->Reopen(false), "reopening the untouched file succeeds");
+        src->Close();
+        std::vector<unsigned char> other = data;
+        other[500] ^= 0xFF;
+        WriteFile(in, other);   // 同じサイズ（閉じている間は保護されない）
+        CHECK(!src->Reopen(false), "a same-size modification is detected");
+        CHECK(src->LastError() == ERROR_FILE_INVALID, "identity mismatch is reported");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 2) 同じ内容の別ファイルへ置き換えられても（ファイル ID が変わる）開き直さない。
+    {
+        const fs::path in = TempFile("lazy_reopen_replaced");
+        const fs::path twin = TempFile("lazy_reopen_twin");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        stirling::FileSource* src = list.Source();
+        src->Close();
+        WriteFile(twin, data);
+        CHECK(::MoveFileExW(twin.wstring().c_str(), in.wstring().c_str(),
+                            MOVEFILE_REPLACE_EXISTING) != FALSE, "replace the file");
+        CHECK(!src->Reopen(false), "a replaced file is detected");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+    // 3) ファイル範囲外の読み取りは失敗する（位置が末尾を越えても桁あふれしない）。
+    {
+        const fs::path in = TempFile("lazy_read_range");
+        WriteFile(in, data);
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        unsigned char b[4] = {};
+        stirling::FileSource* src = list.Source();
+        CHECK(!src->Read(static_cast<FileOffset>(data.size()) + 10, b, 1),
+              "read beyond the end fails");
+        CHECK(!src->Read(static_cast<FileOffset>(data.size()) - 2, b, 4),
+              "read straddling the end fails");
+        CHECK(src->Read(static_cast<FileOffset>(data.size()) - 4, b, 4) &&
+              std::memcmp(b, data.data() + data.size() - 4, 4) == 0, "read the last bytes");
+        list.Clear();
+        std::error_code ec;
+        fs::remove(in, ec);
+    }
+}
+
+// 失敗時の全か無か: 実体化の確保失敗・読取失敗で内容が変わらない。
+static void TestLazyFailures() {
+    TestPrintf("TestLazyFailures\n");
+    const size_t kSize = 200000;
+    const std::vector<unsigned char> data = LazyPattern(kSize, 41);
+    const fs::path in = TempFile("lazy_fail");
+    WriteFile(in, data);
+
+#ifdef STIRLING_TEST_ALLOC_HOOK
+    // 1) 複数ブロックの実体化の途中で確保に失敗 → Write は 0、内容・構造は無変更。
+    for (int nth = 1; nth <= 6; ++nth) {
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        const int countBefore = list.Count();
+        std::vector<unsigned char> src(50000, 0xAB);
+        BlockCursor c(&list);
+        stirling::SetAllocFailCountdown(nth);
+        const FileOffset wrote = c.Write(30000, src.data(), static_cast<FileOffset>(src.size()));
+        stirling::SetAllocFailCountdown(0);
+        CHECK(wrote == 0, "write fails as a whole when materializing fails");
+        CHECK(list.Count() == countBefore, "no nodes were linked");
+        CheckEqual(list, data, "content unchanged after a failed materialization");
+    }
+    // 2) 参照ノードの内側の削除で、分割ノードの確保に失敗 → 0 を返し無変更。
+    {
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        BlockCursor c(&list);
+        stirling::SetAllocFailCountdown(1);
+        const FileOffset deleted = c.DeleteRange(1000, 500);
+        stirling::SetAllocFailCountdown(0);
+        CHECK(deleted == 0, "inner delete fails when the split node cannot be allocated");
+        CheckEqual(list, data, "content unchanged after a failed inner delete");
+        CHECK(c.DeleteRange(1000, 500) == 500, "the same delete succeeds afterwards");
+        std::vector<unsigned char> ref = data;
+        ref.erase(ref.begin() + 1000, ref.begin() + 1500);
+        CheckEqual(list, ref, "inner delete result");
+        CHECK(CountFileRefs(list) == 2, "inner delete splits the reference without reading");
+    }
+    // 3) 挿入の実体化で確保に失敗 → false、無変更。
+    {
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        BlockCursor c(&list);
+        const unsigned long long readFailures = list.Source()->ReadFailures();
+        stirling::SetAllocFailCountdown(1);
+        CHECK(!c.InsertByte(12345, 0x01), "insert fails when materializing fails");
+        stirling::SetAllocFailCountdown(0);
+        CheckEqual(list, data, "content unchanged after a failed insert");
+        // 確保の失敗は読み取りの失敗として数えない（失敗理由の表示を分ける。Issue #306）。
+        CHECK(list.Source()->ReadFailures() == readFailures,
+              "an allocation failure is not counted as a read failure");
+    }
+#endif
+#ifdef STIRLING_TEST_IO_HOOK
+    // 4) 元ファイルの読取失敗: 読み取りは短く返り、変更系は何も変えずに失敗する。
+    {
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        {
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.readFailAtCall = 0;
+            io_fault::g_plan.readError = ERROR_CRC;
+            BlockCursor c(&list);
+            std::vector<unsigned char> buf(1000);
+            CHECK(c.Seek(0, BlockCursor::kBegin, nullptr), "seek");
+            const unsigned long long readFailures = list.Source()->ReadFailures();
+            CHECK(c.Read(1000, buf.data()) == 0, "read failure returns a short count");
+            CHECK(list.Source()->ReadFailures() > readFailures, "a read failure is counted");
+            io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls;   // 次の読みも失敗
+            const unsigned long long beforeSet = list.Source()->ReadFailures();
+            CHECK(!c.SetByteAt(5, 0x00), "set byte fails when the block cannot be read");
+            CHECK(list.Source()->ReadFailures() > beforeSet,
+                  "a failed materialization caused by reading is counted");
+            CHECK(list.Source()->LastError() == ERROR_CRC, "the cause code is kept");
+        }
+        CheckEqual(list, data, "content unchanged after read failures");
+        CHECK(list.Count() == 1, "no partial materialization");
+    }
+    // 5) 検索中の読取失敗は「見つからない」と区別できる（Issue #312）。
+    //   一致はページ境界（64KB）より先に置き、最初のページを読んだ後の読みで失敗させる。
+    //   LazyPattern は周期的で同じ並びが手前にも現れるため、一意な並びを埋めたファイルを使う。
+    {
+        const size_t kAt = 150000;
+        const std::vector<unsigned char> pat = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23, 0x45, 0x67};
+        std::vector<unsigned char> sdata = data;
+        std::copy(pat.begin(), pat.end(), sdata.begin() + kAt);
+        // 先頭 70000 バイトは 0。前方の不一致検索が先頭ページ（キャッシュ済み）を抜けて
+        //   次のページを読むところで失敗させるため。
+        std::fill(sdata.begin(), sdata.begin() + 70000, static_cast<unsigned char>(0));
+        const fs::path sin = TempFile("lazy_search_fail");
+        WriteFile(sin, sdata);
+        const FileOffset total = static_cast<FileOffset>(sdata.size());
+        // 故障なし: 見つかり、ReadFailed は立たない。無い値の不一致検索も同様。
+        {
+            BlockList list;
+            CHECK(stirling::LoadFileLazy(list, sin.wstring().c_str()).Ok(), "load");
+            BlockCursor c(&list);
+            FileOffset hit = -1;
+            CHECK(c.SearchPattern(pat.data(), 8, &hit, BlockCursor::kForward, 0, 0) && hit == static_cast<FileOffset>(kAt),
+                  "search finds the pattern without faults");
+            CHECK(!c.ReadFailed(), "a successful search is not a read failure");
+            const unsigned char none[] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0xF7};
+            CHECK(!c.SearchPattern(none, 9, &hit, BlockCursor::kForward, 0, 0),
+                  "an absent pattern is not found");
+            CHECK(!c.ReadFailed(), "not found is not a read failure");
+            // 終端が総長を超えても、実データ外は読取失敗として扱わない。
+            CHECK(!c.SearchMismatch(sdata.back(), &hit, BlockCursor::kForward, total - 1,
+                                    total + 10),
+                  "mismatch search runs off the end of data");
+            CHECK(!c.ReadFailed(), "running off the end is not a read failure");
+        }
+        // 前方・後方の検索（ワイルドカード含む）と不一致検索、FindAll を、それぞれ途中の
+        //   読みで失敗させる。後方の 5・6 は末尾ページを先に読んでおき、走査の途中で失敗させる。
+        const unsigned char wildPat[] = {0x00, 0xAD, 0xBE, 0xEF};
+        const unsigned char wildMask[] = {1, 0, 0, 0};   // 先頭はワイルドカード
+        for (int kind = 0; kind < 8; ++kind) {
+            BlockList list;
+            CHECK(stirling::LoadFileLazy(list, sin.wstring().c_str()).Ok(), "load");
+            BlockCursor c(&list);
+            unsigned char first = 0;
+            CHECK(c.GetByteAt(0, &first), "read the first page");   // 先頭ページはキャッシュ済み
+            if (kind == 5 || kind == 6) {
+                unsigned char lastByte = 0;
+                CHECK(c.GetByteAt(total - 1, &lastByte), "read the last page");
+            }
+            io_fault::ScopedHooks hooks;
+            io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls;   // 次の読みを失敗させる
+            io_fault::g_plan.readError = ERROR_CRC;
+            FileOffset hit = -1;
+            if (kind == 0) {
+                CHECK(!c.SearchPattern(pat.data(), 8, &hit, BlockCursor::kForward, 0, 0),
+                      "forward search stops at an unreadable page");
+                CHECK(c.ReadFailed(), "forward search reports the read failure");
+            } else if (kind == 1) {
+                CHECK(!c.SearchPattern(pat.data(), 8, &hit, BlockCursor::kBackward, total - 1, 0),
+                      "backward search stops at an unreadable page");
+                CHECK(c.ReadFailed(), "backward search reports the read failure");
+            } else if (kind == 2) {
+                CHECK(!c.SearchMismatch(first, &hit, BlockCursor::kBackward, total - 1, 0),
+                      "mismatch search stops at an unreadable page");
+                CHECK(c.ReadFailed(), "mismatch search reports the read failure");
+            } else if (kind == 3) {
+                stirling::FindAll f;
+                f.Start(list, MakePattern(pat, {}), 0, total);
+                RunFindAll(f, 1 << 30);
+                CHECK(f.State() == stirling::FindAllState::ReadError,
+                      "find all stops with a read error instead of completing");
+            } else if (kind == 4) {
+                CHECK(!c.SearchMismatch(0x00, &hit, BlockCursor::kForward, 0, 0),
+                      "forward mismatch search stops at an unreadable page");
+                CHECK(c.ReadFailed(), "forward mismatch search reports the read failure");
+            } else if (kind == 5) {
+                CHECK(!c.SearchPattern(pat.data(), 8, &hit, BlockCursor::kBackward, total - 1, 0),
+                      "backward search stops in the middle of the scan");
+                CHECK(c.ReadFailed(), "a failure in the middle of a backward scan is reported");
+            } else if (kind == 6) {
+                CHECK(!c.SearchPattern(wildPat, 4, &hit, BlockCursor::kBackward, total - 1, 0,
+                                       wildMask),
+                      "backward wildcard search stops in the middle of the scan");
+                CHECK(c.ReadFailed(), "a backward wildcard search reports the read failure");
+            } else {
+                // 小さい budget で複数回の Step に分かれても、失敗した Step で止まる。
+                stirling::FindAll f;
+                f.Start(list, MakePattern(pat, {}), 0, total);
+                const int steps = RunFindAll(f, 1000);
+                CHECK(steps > 1, "find all runs in several steps");
+                CHECK(f.State() == stirling::FindAllState::ReadError,
+                      "find all over several steps stops with a read error");
+            }
+            // 次の検索の開始時に下ろされる（直前の失敗を引きずらない）。
+            io_fault::g_plan.readFailAtCall = -1;
+            CHECK(c.SearchPattern(pat.data(), 8, &hit, BlockCursor::kForward, 0, 0) && hit == static_cast<FileOffset>(kAt),
+                  "the search succeeds once the file can be read");
+            CHECK(!c.ReadFailed(), "the flag is cleared by the next search");
+        }
+        std::error_code sec;
+        fs::remove(sin, sec);
+    }
+#endif
+    std::error_code ec;
+    fs::remove(in, ec);
+}
+
+// 4GB を超えるファイル（スパースファイルで作るため実ディスクはほぼ消費しない）を遅延読み込みし、
+//   4GB 超の位置の読み取り・編集・上書き保存ができること。Win32 ビルドでも動く。
+static void TestLazyLargeSparse() {
+    TestPrintf("TestLazyLargeSparse\n");
+    const FileOffset kSize = (5LL << 30) + 12345;   // 5GB 強（参照ノード 6 個）
+    const FileOffset kMarkPos = (4LL << 30) + 777;
+    const unsigned char marker[] = {0xCA, 0xFE, 0xBA, 0xBE};
+    const fs::path in = TempFile("lazy_sparse");
+    {
+        HANDLE h = ::CreateFileW(in.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD bytes = 0;
+        const bool sparse = h != INVALID_HANDLE_VALUE &&
+                            ::DeviceIoControl(h, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0,
+                                              &bytes, nullptr);
+        bool ok = sparse;
+        if (ok) {
+            LARGE_INTEGER li;
+            li.QuadPart = kMarkPos;
+            DWORD wrote = 0;
+            ok = ::SetFilePointerEx(h, li, nullptr, FILE_BEGIN) &&
+                 ::WriteFile(h, marker, sizeof(marker), &wrote, nullptr);
+            li.QuadPart = kSize;
+            ok = ok && ::SetFilePointerEx(h, li, nullptr, FILE_BEGIN) && ::SetEndOfFile(h);
+        }
+        if (h != INVALID_HANDLE_VALUE) { ::CloseHandle(h); }
+        if (!ok) {
+            std::error_code ec;
+            fs::remove(in, ec);
+            SkipTest("TestLazyLargeSparse", "sparse files are not available here");
+            return;
+        }
+    }
+    BlockList list;
+    CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "lazy load 5GB");
+    CHECK(list.GetTotalLength() == kSize, "total length beyond 4GB");
+    CHECK(list.Count() == 6, "split into 1GB references");
+    BlockCursor c(&list);
+    FileOffset hit = -1;
+    CHECK(c.SearchPattern(marker, sizeof(marker), &hit, BlockCursor::kForward,
+                          kMarkPos - 100000, kMarkPos + 100000) && hit == kMarkPos,
+          "search finds the marker beyond 4GB");
+    CHECK(c.SetByteAt(kMarkPos + 1, 0x00), "edit beyond 4GB");
+    CHECK(c.SetByteAt(kSize - 1, 0x42), "edit the last byte");
+    const unsigned long long idBefore = FileIdOf(in);
+    CHECK(stirling::SaveBlocksToFile(list, in.wstring().c_str()).Ok(), "in-place save of 5GB");
+    CHECK(FileIdOf(in) == idBefore, "saved in place (no 5GB rewrite)");
+    list.Clear();
+    {
+        std::FILE* f = _wfopen(in.wstring().c_str(), L"rb");
+        unsigned char got[4] = {};
+        unsigned char last = 0;
+        bool ok = f != nullptr && _fseeki64(f, kMarkPos, SEEK_SET) == 0 &&
+                  std::fread(got, 1, 4, f) == 4 && _fseeki64(f, kSize - 1, SEEK_SET) == 0 &&
+                  std::fread(&last, 1, 1, f) == 1;
+        if (f) { std::fclose(f); }
+        CHECK(ok && got[0] == 0xCA && got[1] == 0x00 && got[2] == 0xBA && got[3] == 0xBE,
+              "edit beyond 4GB reached the file");
+        CHECK(ok && last == 0x42, "last byte reached the file");
+    }
+    std::error_code ec;
+    fs::remove(in, ec);
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::filesystem::path reportDirectory;
     if (argc == 3 && std::wcscmp(argv[1], L"--report-dir") == 0) {
@@ -9049,6 +10515,8 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestSearchWildcardFuzz", g_checks, g_failures, TestSearchWildcardFuzz);
     g_report.Run("TestFindAllBasic", g_checks, g_failures, TestFindAllBasic);
     g_report.Run("TestFindAllFuzz", g_checks, g_failures, TestFindAllFuzz);
+    g_report.Run("TestDiffScanBasic", g_checks, g_failures, TestDiffScanBasic);
+    g_report.Run("TestDiffScanFuzz", g_checks, g_failures, TestDiffScanFuzz);
     g_report.Run("TestSetByteAt", g_checks, g_failures, TestSetByteAt);
     g_report.Run("TestLargeOffsetSeek", g_checks, g_failures, TestLargeOffsetSeek);
     g_report.Run("TestLargeOffsetDataOps", g_checks, g_failures, TestLargeOffsetDataOps);
@@ -9082,7 +10550,12 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestStructScalarFormat", g_checks, g_failures, TestStructScalarFormat);
     g_report.Run("TestStructScalarEncode", g_checks, g_failures, TestStructScalarEncode);
     g_report.Run("TestStructTree", g_checks, g_failures, TestStructTree);
+    g_report.Run("TestStructDefLimits", g_checks, g_failures, TestStructDefLimits);
+    g_report.Run("TestStructDefDepth", g_checks, g_failures, TestStructDefDepth);
     g_report.Run("TestHexTextParse", g_checks, g_failures, TestHexTextParse);
+    g_report.Run("TestHexTextFormat", g_checks, g_failures, TestHexTextFormat);
+    g_report.Run("TestFitsInBuffer", g_checks, g_failures, TestFitsInBuffer);
+    g_report.Run("TestStdAllocScope", g_checks, g_failures, TestStdAllocScope);
     g_report.Run("TestChecksum", g_checks, g_failures, TestChecksum);
     g_report.Run("TestUtf8Text", g_checks, g_failures, TestUtf8Text);
     g_report.Run("TestUtf16Text", g_checks, g_failures, TestUtf16Text);
@@ -9103,6 +10576,14 @@ int wmain(int argc, wchar_t** argv) {
     g_report.Run("TestBlockFileIoReadFaults", g_checks, g_failures, TestBlockFileIoReadFaults);
 #endif
     g_report.Run("TestAtomicSave", g_checks, g_failures, TestAtomicSave);
+    g_report.Run("TestLazyLoadBasics", g_checks, g_failures, TestLazyLoadBasics);
+    g_report.Run("TestLazyEditFuzz", g_checks, g_failures, TestLazyEditFuzz);
+#ifdef STIRLING_TEST_IO_HOOK
+    g_report.Run("TestLazySave", g_checks, g_failures, TestLazySave);
+#endif
+    g_report.Run("TestLazyFailures", g_checks, g_failures, TestLazyFailures);
+    g_report.Run("TestLazyReopenIdentity", g_checks, g_failures, TestLazyReopenIdentity);
+    g_report.Run("TestLazyLargeSparse", g_checks, g_failures, TestLazyLargeSparse);
     g_report.Run("TestBgrepNotify", g_checks, g_failures, TestBgrepNotify);
 #ifdef STIRLING_TEST_ALLOC_HOOK
     g_report.Run("TestAllocFailureRollback", g_checks, g_failures, TestAllocFailureRollback);

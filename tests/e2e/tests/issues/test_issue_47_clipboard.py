@@ -65,7 +65,6 @@ class TestIssue47Clipboard:
             time.sleep(0.3)
             drv.select_all()
             drv.copy()
-            time.sleep(0.3)
 
             text = _read_clipboard(win32clipboard.CF_UNICODETEXT)
             first = _first_clipboard_format()
@@ -91,7 +90,6 @@ class TestIssue47Clipboard:
             time.sleep(0.2)
             drv.select_all()
             drv.copy()
-            time.sleep(0.3)
 
             raw = _read_clipboard(win32clipboard.CF_TEXT)
             first = _first_clipboard_format()
@@ -123,7 +121,6 @@ class TestIssue47Clipboard:
             time.sleep(0.2)
             drv.select_all()
             drv.copy()
-            time.sleep(0.3)
 
             text = _read_clipboard(win32clipboard.CF_UNICODETEXT)
 

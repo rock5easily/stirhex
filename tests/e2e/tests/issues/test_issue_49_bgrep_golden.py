@@ -55,12 +55,10 @@ class TestIssue49BgrepGolden:
 
         with StirlingDriver(original_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
             orig_lines, orig_applied = bgrep.run(drv, orig_dir, PATTERN_HEX)
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
             port_lines, port_applied = bgrep.run(drv, port_dir, PATTERN_HEX)
 
         orig_norm = bgrep.normalize(orig_lines, orig_dir)
@@ -95,7 +93,6 @@ class TestIssue49BgrepOptions:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
 
             off_lines, off_applied = bgrep.run(drv, root, PATTERN_HEX, recurse=False)
             off = bgrep.normalize(off_lines, root)
@@ -120,7 +117,6 @@ class TestIssue49BgrepOptions:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
 
             dat_only = bgrep.normalize(bgrep.run(drv, root, PATTERN_HEX, file_mask="*.dat")[0], root)
             assert dat_only, "*.dat のヒットが無い"
@@ -148,7 +144,6 @@ class TestIssue49BgrepOptions:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
             lines, applied = bgrep.run(drv, root, needle, hex_mode=False)
 
         found = bgrep.normalize(lines, root)
@@ -171,7 +166,6 @@ class TestIssue49BgrepOptions:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
             lines, _applied = bgrep.run(drv, root, PATTERN_HEX)
             assert lines, "結果が無いと開く操作を確認できない"
 

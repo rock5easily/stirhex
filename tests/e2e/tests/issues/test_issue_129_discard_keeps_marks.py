@@ -7,7 +7,6 @@
 """
 
 import contextlib
-import time
 
 import pytest
 import win32con
@@ -116,7 +115,6 @@ class TestIssue129DiscardKeepsMarks:
                 drv.start(target)
                 _insert_a_byte(drv)
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.5)
 
             assert len(target.read_bytes()) == len(SAMPLE) + 1, "保存されていない"
 

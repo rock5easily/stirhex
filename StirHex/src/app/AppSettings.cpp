@@ -92,6 +92,8 @@ void CAppSettings::Load() {
     defaultFolder        = GetStr(_T("DefaultFolder"));
     largeFileWarn        = GetBool(_T("LargeFileWarn"), largeFileWarn);
     largeFileWarnMB      = GetInt(_T("LargeFileWarnMB"), largeFileWarnMB);
+    lazyLoad             = GetBool(_T("LazyLoad"), lazyLoad);
+    lazyLoadMB           = GetInt(_T("LazyLoadMB"), lazyLoadMB);
 
     winPlacement    = GetInt(_T("WinPlacement"), winPlacement);
     winLeft         = GetInt(_T("WinLeft"), winLeft);
@@ -177,6 +179,8 @@ void CAppSettings::Load() {
     if (backupGenerations > 999) { backupGenerations = 999; }
     if (largeFileWarnMB <= 0)          { largeFileWarnMB = 512; }
     if (largeFileWarnMB > 1024 * 1024) { largeFileWarnMB = 1024 * 1024; }
+    if (lazyLoadMB <= 0)               { lazyLoadMB = 512; }
+    if (lazyLoadMB > 1024 * 1024)      { lazyLoadMB = 1024 * 1024; }
     if (exclusiveControl < 0 || exclusiveControl > 2) { exclusiveControl = 0; }
     if (winPlacement < 0 || winPlacement > 3) { winPlacement = 1; }
     if (structBarPos < 0 || structBarPos > 2) { structBarPos = 0; }
@@ -216,6 +220,8 @@ void CAppSettings::Save() const {
     PutStr(_T("DefaultFolder"), defaultFolder);
     PutBool(_T("LargeFileWarn"), largeFileWarn);
     PutInt(_T("LargeFileWarnMB"), largeFileWarnMB);
+    PutBool(_T("LazyLoad"), lazyLoad);
+    PutInt(_T("LazyLoadMB"), lazyLoadMB);
 
     PutInt(_T("WinPlacement"), winPlacement);
     PutInt(_T("WinLeft"), winLeft);

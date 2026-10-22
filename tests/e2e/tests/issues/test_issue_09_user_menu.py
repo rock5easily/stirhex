@@ -66,7 +66,6 @@ class TestIssue09UserMenu:
 
             # Invoke User Menu 1
             drv.post_command(ID_USERMENU_1)
-            time.sleep(0.3)
             # If user menu 1 is empty in clean registry, it should ignore or show menu
             # Dismiss if opened
             drv.dismiss_popup_menu()
@@ -116,7 +115,6 @@ class TestIssue09UserMenu:
 
             # Invoke User Menu 2 (0x803B)
             drv.post_command(ID_USERMENU_BASE + 1)
-            time.sleep(0.3)
             # Should not crash
             assert win32gui.IsWindow(drv.hwnd)
 
@@ -135,7 +133,6 @@ class TestIssue09UserMenu:
 
                 # Invoke User Menu 2 (0x803B)
                 drv.post_command(ID_USERMENU_BASE + 1)
-                time.sleep(0.3)
                 popup = drv.find_popup_menu(timeout=0.2)
                 assert popup is None, "Empty user menu should not display popup"
                 assert win32gui.IsWindow(drv.hwnd)
@@ -187,7 +184,6 @@ class TestIssue09UserMenu:
             time.sleep(0.3)
 
             drv.post_command(ID_RUN_APP)
-            time.sleep(0.5)
             # Check if modal dialog appeared
             found = False
             for h, cls, title in drv._get_process_windows():
@@ -209,7 +205,6 @@ class TestIssue09UserMenu:
             time.sleep(0.3)
 
             drv.post_command(ID_RUN_APP)
-            time.sleep(0.5)
             found = False
             for h, cls, title in drv._get_process_windows():
                 if any(k in title for k in ["名前を指定して実行", "実行", "Run"]):
@@ -273,7 +268,6 @@ class TestIssue09UserMenu:
 
                 # Trigger 2-stroke command 1
                 drv.post_command(ID_TWOSTROKE_1)
-                time.sleep(0.3)
 
                 popup = drv.find_popup_menu(timeout=2.0)
                 assert popup is not None, "Two-stroke popup menu not displayed"

@@ -1,6 +1,5 @@
 import shutil
 import struct
-import time
 from pathlib import Path
 
 import pytest
@@ -217,11 +216,9 @@ class TestHelpCoreBehavior:
             )
 
             drv.type_hex_chars("A")
-            time.sleep(0.3)
             assert any(title.endswith("*") for title in drv.get_mdi_child_titles())
 
             drv.post_command(CMD_FILE_SAVE)
-            time.sleep(0.5)
             assert all(
                 not title.endswith("*") for title in drv.get_mdi_child_titles()
             )
@@ -239,7 +236,6 @@ class TestHelpCoreBehavior:
             assert len(_mdi_children(drv.hwnd)) == 2
 
             drv.post_command(ID_WINDOW_NEW)
-            time.sleep(0.3)
             assert len(_mdi_children(drv.hwnd)) == 3
 
             for command in (
@@ -248,7 +244,6 @@ class TestHelpCoreBehavior:
                 ID_WINDOW_TILE_VERT,
             ):
                 drv.post_command(command)
-                time.sleep(0.3)
                 rects = [win32gui.GetWindowRect(hwnd) for hwnd in _mdi_children(drv.hwnd)]
                 assert len(rects) == 3
                 assert len(set(rects)) > 1
@@ -268,7 +263,6 @@ class TestHelpCoreBehavior:
                 for value in ("10", "20", "30"):
                     drv.type_hex_chars(value)
                     drv.post_command(CMD_FILE_SAVE)
-                    time.sleep(0.25)
 
         assert (tmp_path / "backup.dat.bak").read_bytes() == b"\x10\x20AA"
         assert (tmp_path / "backup.dat.bk1").read_bytes() == b"\x10AAA"

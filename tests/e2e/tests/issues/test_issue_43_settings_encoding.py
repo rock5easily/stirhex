@@ -1,5 +1,4 @@
 import ctypes
-import time
 import winreg
 from contextlib import ExitStack
 
@@ -55,7 +54,6 @@ def _run_once(exe, test_file):
     """Open `test_file` and exit cleanly so the settings are loaded and written back."""
     with StirlingDriver(exe) as drv:
         drv.start(test_file)
-        time.sleep(0.5)
         assert _close_and_wait(drv), "Stirling did not exit cleanly; settings were not saved"
 
 

@@ -5,6 +5,7 @@
 #include "frame/MainFrame.h"
 #include "core/BlockFileIO.h"
 #include "core/BlockCursor.h"
+#include "core/FileSource.h"   // 元ファイルの読取失敗回数（失敗理由の判定。Issue #306）
 #include "core/UndoBudget.h"   // Undo 履歴の容量管理ポリシー（Issue #30）
 #include "app/StirlingApp.h"
 #include "app/UiStrings.h"   // ui::MsgBox / ui::LoadW（表題はアプリ名で統一）
@@ -13,6 +14,7 @@
 #include <utility>   // std::move（ScopedHandle の所有権移動）
 #include <new>        // std::bad_alloc（巨大範囲の退避失敗を捕捉する。Issue #30）
 #include <stdexcept>   // std::length_error（Undo 記録の予約長が max_size を超える場合。Issue #153）
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
 
 namespace {
 
@@ -32,6 +34,14 @@ namespace {
 stirling::FileOffset LargeFileConfirmBytes(const CAppSettings& settings) {
     if (!settings.largeFileWarn) { return 0; }   // 0 = 確認しない
     const int mb = (settings.largeFileWarnMB > 0) ? settings.largeFileWarnMB : 512;
+    return static_cast<stirling::FileOffset>(mb) * 1024 * 1024;
+}
+
+// 全体を読み込まずに開く（遅延読み込み）しきい値（Issue #300）。0 = 使わない。
+//   0 以下の値は LargeFileConfirmBytes と同じく既定値へ倒す。
+stirling::FileOffset LazyLoadBytes(const CAppSettings& settings) {
+    if (!settings.lazyLoad) { return 0; }
+    const int mb = (settings.lazyLoadMB > 0) ? settings.lazyLoadMB : 512;
     return static_cast<stirling::FileOffset>(mb) * 1024 * 1024;
 }
 
@@ -85,6 +95,13 @@ stirling::FileShareMode ExclusiveControlToShareMode(int exclusiveControl) {
     }
 }
 
+// 遅延読み込みで開くときの共有モード（Issue #300）。参照ノードが指す内容を他プロセスに
+//   書き換えられないよう、排他制御が「しない」でも書込は拒否する。「読み書き禁止」はそのまま。
+stirling::FileShareMode LazyLoadShareMode(int exclusiveControl) {
+    return (exclusiveControl == 2) ? stirling::FileShareMode::kExclusive
+                                   : stirling::FileShareMode::kDenyWrite;
+}
+
 // 他プロセスが共有を許していないためのオープン失敗か（原 CFileException::sharingViolation）。
 bool IsSharingViolation(const stirling::FileIoResult& r) {
     if (r.status != stirling::FileIoStatus::kOpenFailed) { return false; }
@@ -117,7 +134,17 @@ void ShowFileIoError(UINT headlineId, LPCTSTR path, const stirling::FileIoResult
     }
     // 出力先が消え、書いた内容が一時ファイルにしか無い場合はその場所も知らせる（Issue #186）。
     text += ui::KeptTempPathNoteW(r.keptTempPath);
+    // 上書き保存の途中で失敗した場合は、一部だけ書き込まれた可能性を知らせる（Issue #300）。
+    if (r.partialInPlace) { text += ui::LoadW(IDS_ERR_SAVE_PARTIAL_NOTE); }
+    // 読み出し元を失い、文書の内容を読めなくなった場合は開き直しを促す（Issue #300）。
+    if (r.sourceLost) { text += ui::LoadW(IDS_ERR_SOURCE_LOST_NOTE); }
     ui::MsgBox(MainWndHandle(), text, MB_OK | MB_ICONEXCLAMATION);
+}
+
+// 編集をメモリ不足で実行できなかったことを知らせる（Issue #306）。
+//   呼出側は中止と失敗を区別できないため、失敗を確定した編集プリミティブ側で表示する。
+void ShowEditOutOfMemory() {
+    ui::MsgBoxRes(MainWndHandle(), IDS_ERR_EDIT_OUT_OF_MEMORY);
 }
 
 }  // namespace
@@ -169,6 +196,7 @@ void CStirlingDoc::ReleaseLock() {
 }
 
 // 排他制御（原 exclusiveControl）の再取得: 共有モード付きの参照ハンドルを保持する。
+//   遅延読み込み（Issue #300）中は m_blocks の読み出し元がロックを兼ねるため何もしない。
 //   0=しない（保持しない）/ 1=書込禁止（FILE_SHARE_READ で他プロセスの書込を拒否）/
 //   2=読書禁止（共有なし＝排他）。
 //   オープン時のロックは読み込みハンドルをそのまま保持する（OnOpenDocument。Issue #120）。
@@ -178,6 +206,7 @@ void CStirlingDoc::ReleaseLock() {
 void CStirlingDoc::AcquireLock(LPCTSTR path) {
     ReleaseLock();
     if (path == nullptr || *path == _T('\0')) { return; }
+    if (m_blocks.HasSource()) { return; }
     const int mode = theApp.AppSettings().exclusiveControl;
     if (mode == 0) { return; }                       // 排他しない
     const DWORD share = (mode == 1) ? FILE_SHARE_READ : 0;   // 1=書込禁止 / 2=読書禁止
@@ -212,7 +241,8 @@ bool CStirlingDoc::CreateBackup(LPCTSTR path) {
     bak.Format(_T("%s\\%s.bak"), (LPCTSTR)dir, (LPCTSTR)name);
     if (gen == 1) {
         // 上書きコピー（原 CopyFileA(...,FALSE)）。原は戻り値を見ないが、失敗を伝える。
-        return ::CopyFile(path, bak, FALSE) != FALSE;
+        //   遅延読み込み中に自分のロックで複写できない場合は読み出し元から複写する（Issue #300）。
+        return stirling::CopyFileForBackup(m_blocks, CStringW(path), CStringW(bak)).Ok();
     }
     // 世代ローテーション: 最古 .bk{gen-1} を削除→ .bk{k}→.bk{k+1} 繰り下げ→ .bak→.bk1→ 現ファイル→.bak。
     CString oldest;
@@ -227,7 +257,7 @@ bool CStirlingDoc::CreateBackup(LPCTSTR path) {
     CString bk1;
     bk1.Format(_T("%s\\%s.bk1"), (LPCTSTR)dir, (LPCTSTR)name);
     ::MoveFile(bak, bk1);           // .bak → .bk1
-    return ::CopyFile(path, bak, FALSE) != FALSE;   // 現ファイル → .bak
+    return stirling::CopyFileForBackup(m_blocks, CStringW(path), CStringW(bak)).Ok();   // 現ファイル → .bak
 }
 
 BOOL CStirlingDoc::OnNewDocument() {
@@ -273,12 +303,16 @@ BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
     // core は 64bit オフセット・ワイドパスの API（Issue #20）。MBCS ビルドのため境界で変換する。
     const CStringW wpath(lpszPathName);
 
+    // しきい値以上のファイルは全体を読み込まず、必要な部分だけ元ファイルから読む
+    //   （遅延読み込み。Issue #300）。この場合はメモリを消費しないため確認も出さない。
+    stirling::FileOffset probeSize = 0;
+    const bool probed = stirling::QueryFileSize(wpath, &probeSize, nullptr);
+    const stirling::FileOffset lazyBytes = LazyLoadBytes(theApp.AppSettings());
+    const bool lazy = probed && lazyBytes > 0 && probeSize >= lazyBytes;
+
     // 巨大ファイルは読み込み前に確認する（ファイルサイズ相当のメモリを消費するため）。
     const stirling::FileOffset confirmBytes = LargeFileConfirmBytes(theApp.AppSettings());
-    stirling::FileOffset probeSize = 0;
-    if (confirmBytes > 0 &&
-        stirling::QueryFileSize(wpath, &probeSize, nullptr) &&
-        probeSize >= confirmBytes) {
+    if (!lazy && confirmBytes > 0 && probed && probeSize >= confirmBytes) {
         CStringW confirm;
         confirm.Format(ui::LoadW(IDS_CONFIRM_LARGE_FILE), (LPCWSTR)FormatBytesW(probeSize));
         if (ui::MsgBox(MainWndHandle(), confirm, MB_YESNO | MB_ICONQUESTION) != IDYES) {
@@ -297,9 +331,11 @@ BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
     bool viewMode = IsReadOnlyFile(wpath);
 
     void* keepHandle = nullptr;
+    // 遅延読み込みでは、開いたハンドルを m_blocks の読み出し元が保持する（それがロックも兼ねる）。
     stirling::FileIoResult loaded =
-        stirling::LoadFileIntoBlocks(m_blocks, wpath, share,
-                                     (exclusive != 0) ? &keepHandle : nullptr);
+        lazy ? stirling::LoadFileLazy(m_blocks, wpath, LazyLoadShareMode(exclusive))
+             : stirling::LoadFileIntoBlocks(m_blocks, wpath, share,
+                                            (exclusive != 0) ? &keepHandle : nullptr);
     if (!loaded.Ok() && IsSharingViolation(loaded)) {
         // 他のアプリケーションが排他制御している。原と同じく閲覧モードで開くか確認する。
         //   [キャンセル] は追加のメッセージを出さずに中止（原 IDCANCEL 経路）。
@@ -310,8 +346,10 @@ BOOL CStirlingDoc::OnOpenDocument(LPCTSTR lpszPathName) {
         // 閲覧モードは共有を全許可で開き直す（原 modeRead | shareDenyNone）。
         //   何も排他しないハンドルを保持する意味は無いため、ここでは保持しない。
         keepHandle = nullptr;
-        loaded = stirling::LoadFileIntoBlocks(m_blocks, wpath,
-                                              stirling::FileShareMode::kDenyNone, nullptr);
+        //   遅延読み込みでも同じく共有を全許可で開く（他プロセスが書き換えうる）。
+        loaded = lazy ? stirling::LoadFileLazy(m_blocks, wpath, stirling::FileShareMode::kDenyNone)
+                      : stirling::LoadFileIntoBlocks(m_blocks, wpath,
+                                                     stirling::FileShareMode::kDenyNone, nullptr);
         if (loaded.Ok()) { viewMode = true; }
     }
     if (!loaded.Ok()) {
@@ -361,7 +399,17 @@ BOOL CStirlingDoc::OnSaveDocument(LPCTSTR lpszPathName) {
         }
     }
     const stirling::FileIoResult saved = stirling::SaveBlocksToFile(m_blocks, CStringW(lpszPathName));
-    if (!saved.Ok()) {
+    if (saved.Ok() && saved.sourceNotSwitched) {
+        // 遅延読み込み（Issue #300）の別名保存で、保存先を開き直せなかった。保存は済んでおり、
+        //   文書は保存前のファイルから読み続けられる（そのファイルは使用中のまま）ことを知らせる。
+        ShowFileIoError(IDS_WARN_SAVEAS_SOURCE_KEPT, lpszPathName, saved);
+    }
+    if (saved.status == stirling::FileIoStatus::kReopenFailed) {
+        // 遅延読み込み（Issue #300）: 保存は済んだが、保存したファイルを読み出し元として
+        //   開き直せなかった。ファイルは正しく保存されているため保存済みとして扱い、
+        //   文書を開き直すよう知らせる。
+        ShowFileIoError(IDS_ERR_SAVE_REOPEN, lpszPathName, saved);
+    } else if (!saved.Ok()) {
         AcquireLock(lpszPathName);   // 書込失敗時もロックを復帰
         // オープン失敗（使用中・権限）と書込失敗（ディスク不足等）で見出しを分ける。
         const UINT headline = (saved.status == stirling::FileIoStatus::kOpenFailed)
@@ -487,11 +535,19 @@ void CStirlingDoc::SyncDiskTime() {
 }
 
 // 編集前に戻す（原 FUN_0043621f）: 保存済みファイルを再読込（DeleteContents→再読込→
-//   SetModifiedFlag(FALSE)）。パスが無ければ false。
-bool CStirlingDoc::RevertToSaved() {
+//   SetModifiedFlag(FALSE)）。
+//   OnOpenDocument は先頭で内容を破棄するため、失敗すると空の文書が「変更あり」のまま残り、
+//   保存すると元ファイルが 0 バイトになっていた（Issue #306）。原と同じく文書を閉じる。
+//   失敗の理由（読込エラー）は OnOpenDocument が表示済み。
+CStirlingDoc::RevertResult CStirlingDoc::RevertToSaved() {
     const CString path = GetPathName();
-    if (path.IsEmpty()) { return false; }
-    return OnOpenDocument(path) != FALSE;
+    if (path.IsEmpty()) { return RevertResult::kNoPath; }
+    if (OnOpenDocument(path)) { return RevertResult::kReloaded; }
+    // マークは破棄済みのため、空のマークでマークストアを上書きする CStirlingDoc::OnCloseDocument
+    //   を通さず基底を直接呼ぶ。基底は保存確認を出さず、パスも残るのでビューの OnDestroy が
+    //   キャレット位置を記録できる。m_bAutoDelete により this も破棄される。
+    CDocument::OnCloseDocument();
+    return RevertResult::kClosed;
 }
 
 // ---- 編集プリミティブ（絶対バイト位置。Undo記録付き） ----
@@ -517,7 +573,11 @@ bool CStirlingDoc::OverwriteByteAt(stirling::FileOffset pos, unsigned char b) {
     const stirling::FileOffset total = GetTotalLength();
     if (pos < total) {
         unsigned char old = 0;
-        GetByteAt(pos, &old);
+        // 遅延読み込み（Issue #300）では元ファイルの読取に失敗しうる。旧値が無いと逆レコードを
+        //   作れないため、読めなければ変更しない。
+        if (!GetByteAt(pos, &old)) {
+            return false;
+        }
         stirling::BlockCursor c(&m_blocks);
         if (!c.SetByteAt(pos, b)) {
             return false;
@@ -569,9 +629,6 @@ bool CStirlingDoc::DeleteRange(stirling::FileOffset pos, stirling::FileOffset co
     if (count > total - pos) { count = total - pos; }
     // 削除前に対象バイトを退避（逆＝再挿入用）。退避は削除量と同容量のメモリを使うため、
     //   上限（環境設定 undoMemoryLimitMB）を超える場合は Undo を諦めるか確認する（Issue #30）。
-    if (!FitsInBuffer(count)) {
-        return false;   // このビルドのバッファに載らない長さ（データは無傷）
-    }
     bool undoless = false;
     switch (CheckUndoCapacity(count)) {
     case UndoCapacityDecision::kCancel:   return false;   // 中止（データは無傷）
@@ -580,23 +637,33 @@ bool CStirlingDoc::DeleteRange(stirling::FileOffset pos, stirling::FileOffset co
     }
     std::vector<unsigned char> captured;   // undoless のときは空のまま（退避しない）
     if (!undoless) {
+        // バッファ長の検査は退避する場合だけ行う。退避しない削除は長さに依存しない（Issue #306）。
+        if (!FitsInBuffer(count)) {
+            ShowEditOutOfMemory();
+            return false;   // このビルドのバッファに載らない長さ（データは無傷）
+        }
         try {
+            const stirling::StdAllocScope allocScope;
             captured.resize(static_cast<size_t>(count));
         } catch (const std::bad_alloc&) {
+            ShowEditOutOfMemory();
             return false;   // 退避できないなら編集自体を行わない（データは無傷）
         }
         stirling::BlockCursor c(&m_blocks);
         if (!c.Seek(pos, stirling::BlockCursor::kBegin, nullptr)) {
             return false;
         }
+        const unsigned long long readFailures = SourceReadFailures();
         const stirling::FileOffset n = c.Read(count, captured.data());
-        if (n < count) { count = n; }
-        captured.resize(static_cast<size_t>(count));
-        if (count <= 0) {
+        // count は実データ長へ丸め済みなので、短いのは読取失敗（遅延読み込み。Issue #300）。
+        //   一部だけ削除しないよう、変更せずに失敗する。
+        if (n != count) {
+            ShowAccessFailure(readFailures);   // 読取失敗、またはページキャッシュの確保失敗
             return false;
         }
     }
     if (!undoless && !ReserveUndoSlot()) {
+        ShowEditOutOfMemory();
         return false;   // 変更前に記録領域を確保（Issue #153）。データは無傷
     }
     stirling::FileOffset deleted = 0;
@@ -610,7 +677,10 @@ bool CStirlingDoc::DeleteRange(stirling::FileOffset pos, stirling::FileOffset co
         if (!undoless) { captured.resize(static_cast<size_t>(count)); }
     }
     if (count <= 0) {
-        return false;   // 1バイトも削除できなかった（ドキュメントは無変更）
+        // 1バイトも削除できなかった（ドキュメントは無変更）。位置は検証済みなので、
+        //   参照ノードを前後に分けるノードの確保に失敗した場合だけ（Issue #300）。
+        ShowEditOutOfMemory();
+        return false;
     }
     if (undoless) {
         ClearUndoHistory(true);   // この操作は取り消せない＝保存点も到達不能にする
@@ -641,9 +711,6 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
     bool undoless = false;
     stirling::FileOffset target = 0;   // 削除を試みるバイト数
     if (delLen > 0) {
-        if (!FitsInBuffer(delLen)) {
-            return false;   // このビルドのバッファに載らない長さ（データは無傷）
-        }
         switch (CheckUndoCapacity(delLen)) {
         case UndoCapacityDecision::kCancel:   return false;   // 中止（データは無傷）
         case UndoCapacityDecision::kUndoless: undoless = true; break;
@@ -651,21 +718,35 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
         }
         target = delLen;
         if (!undoless) {
+            // バッファ長の検査は退避する場合だけ行う（DeleteRange と同じ。Issue #306）。
+            if (!FitsInBuffer(delLen)) {
+                ShowEditOutOfMemory();
+                return false;   // このビルドのバッファに載らない長さ（データは無傷）
+            }
             try {
+                const stirling::StdAllocScope allocScope;
                 removed.resize(static_cast<size_t>(delLen));
             } catch (const std::bad_alloc&) {
+                ShowEditOutOfMemory();
                 return false;   // 退避できないなら編集自体を行わない（データは無傷）
             }
             stirling::BlockCursor c(&m_blocks);
             if (!c.Seek(pos, stirling::BlockCursor::kBegin, nullptr)) {
                 return false;
             }
+            const unsigned long long readFailures = SourceReadFailures();
             target = c.Read(delLen, removed.data());
-            removed.resize(static_cast<size_t>(target));
+            // delLen は実データ長へ丸め済みなので、短いのは読取失敗（遅延読み込み。Issue #300）。
+            //   削除範囲を欠いたまま置換（＝挿入）しないよう、変更せずに失敗する。
+            if (target != delLen) {
+                ShowAccessFailure(readFailures);   // 読取失敗、またはページキャッシュの確保失敗
+                return false;
+            }
         }
     }
     // Undo レコードの領域も、ドキュメントを変更する前に確保しておく（Issue #153）。
     if (!undoless && !ReserveUndoSlot()) {
+        ShowEditOutOfMemory();
         return false;   // データは無傷
     }
     // Issue #153: 「挿入 → 削除」の順で行う。挿入は全ブロックの確保に成功したときだけ
@@ -673,18 +754,46 @@ bool CStirlingDoc::ReplaceRange(stirling::FileOffset pos, stirling::FileOffset d
     //   この順序なら、確保失敗時にドキュメント・マーク・履歴のいずれも変化しない
     //   （逆順だと削除だけが成立した部分編集が残る）。
     stirling::FileOffset insLen = 0;   // 実際に挿入できたバイト数
-    if (!ins.empty()) {
+    stirling::FileOffset actualDel = 0;   // 実際に削除できたバイト数
+    if (!ins.empty() && static_cast<stirling::FileOffset>(ins.size()) == target) {
+        // 同じ長さの置換（上書きモードの貼り付け・構造体編集・同じ長さの全置換など）は、
+        //   挿入→削除と同じ内容になる上書きで行う。ブロックの位置がずれないため、遅延読み込み
+        //   （Issue #300）の文書を上書き保存できる。Undo レコードとマークの扱いは置換のまま。
+        //   Write は参照ノードの実体化に失敗すると何も書かずに 0 を返す。
         stirling::BlockCursor c(&m_blocks);
+        const unsigned long long readFailures = SourceReadFailures();
+        const stirling::FileOffset wrote = c.Write(pos, ins.data(), target);
+        if (wrote != target) {
+            ShowAccessFailure(readFailures);   // 実体化の確保失敗または元ファイルの読取失敗
+            return false;   // ドキュメントは無変更
+        }
+        insLen = target;
+        actualDel = target;
+        target = 0;   // 下の削除は行わない
+    } else if (!ins.empty()) {
+        stirling::BlockCursor c(&m_blocks);
+        const unsigned long long readFailures = SourceReadFailures();
         if (!c.Insert(pos, ins.data(), static_cast<stirling::FileOffset>(ins.size()))) {
-            return false;   // メモリ不足。ドキュメントは無変更
+            // 挿入位置の参照ノードの実体化（Issue #300）は元ファイルを読むため、確保失敗とは限らない。
+            ShowAccessFailure(readFailures);
+            return false;   // ドキュメントは無変更
         }
         insLen = static_cast<stirling::FileOffset>(ins.size());
     }
-    stirling::FileOffset actualDel = 0;   // 実際に削除できたバイト数
     if (target > 0) {
         stirling::BlockCursor d(&m_blocks);
         // 挿入した分だけ削除開始位置が後ろへずれる。
         actualDel = d.DeleteRange(pos + insLen, target);   // ブロック単位の一括削除（Issue #62）
+    }
+    if (target > 0 && actualDel == 0) {
+        // 参照ノードの分割に失敗して削除できなかった（Issue #300）。挿入した分を取り除いて
+        //   無変更へ戻す（挿入分はメモリ上のブロックなので、この削除は失敗しない）。
+        if (insLen > 0) {
+            stirling::BlockCursor u(&m_blocks);
+            u.DeleteRange(pos, insLen);
+        }
+        ShowEditOutOfMemory();   // 分割用ノードの確保失敗
+        return false;
     }
     if (actualDel < target && !undoless) {
         removed.resize(static_cast<size_t>(actualDel));   // 実削除数へ合わせる
@@ -736,6 +845,7 @@ CStirlingDoc::FillRangeResult CStirlingDoc::FillRange(stirling::FileOffset pos,
             return FillRangeResult::kOutOfMemory;   // このビルドのバッファに載らない長さ
         }
         try {
+            const stirling::StdAllocScope allocScope;
             captured.resize(static_cast<size_t>(count));
         } catch (const std::bad_alloc&) {
             return FillRangeResult::kOutOfMemory;   // 退避できないなら実行しない（データは無傷）
@@ -747,9 +857,9 @@ CStirlingDoc::FillRangeResult CStirlingDoc::FillRange(stirling::FileOffset pos,
             return FillRangeResult::kInvalid;
         }
         const stirling::FileOffset n = c.Read(count, captured.data());
-        if (n < count) { count = n; }
-        captured.resize(static_cast<size_t>(count));
-        if (count <= 0) {
+        // count は実データ長へ丸め済みなので、短いのは読取失敗（遅延読み込み。Issue #300）。
+        //   一部だけ初期化しないよう、変更せずに失敗する。
+        if (n != count) {
             return FillRangeResult::kInvalid;
         }
         if (!ReserveUndoSlot()) {
@@ -759,10 +869,13 @@ CStirlingDoc::FillRangeResult CStirlingDoc::FillRange(stirling::FileOffset pos,
     stirling::FileOffset filled = 0;
     {
         stirling::BlockCursor c(&m_blocks);
-        filled = c.FillRange(pos, count, value);   // 確保を伴わないため失敗しない
+        // 確保は参照ノードの実体化（遅延読み込み。Issue #300）でだけ発生し、失敗すると
+        //   何も書かずに 0 を返す。
+        filled = c.FillRange(pos, count, value);
     }
     if (filled <= 0) {
-        return FillRangeResult::kInvalid;   // ドキュメントは無変更
+        // 範囲は検証済みなので、書けなかったのは実体化の失敗（メモリ不足・読取失敗）。
+        return FillRangeResult::kOutOfMemory;   // ドキュメントは無変更
     }
     if (undoless) {
         ClearUndoHistory(true);   // この操作は取り消せない＝保存点も到達不能にする
@@ -812,6 +925,7 @@ std::vector<unsigned char> CStirlingDoc::ReadRange(stirling::FileOffset pos,
         return out;   // このビルドのバッファに載らない長さ（空を返す）
     }
     try {
+        const stirling::StdAllocScope allocScope;
         out.resize(static_cast<size_t>(count));   // 要求長がメモリに載らない場合は空を返す
     } catch (const std::bad_alloc&) {
         return out;
@@ -838,6 +952,19 @@ stirling::FileOffset CStirlingDoc::ReadInto(stirling::FileOffset pos,
         return 0;
     }
     return c.Read(count, dst);
+}
+
+unsigned long long CStirlingDoc::SourceReadFailures() const {
+    const stirling::FileSource* src = m_blocks.Source();
+    return (src != nullptr) ? src->ReadFailures() : 0;
+}
+
+void CStirlingDoc::ShowAccessFailure(unsigned long long readFailuresBefore) const {
+    if (SourceReadFailures() != readFailuresBefore) {
+        ui::MsgBoxRes(MainWndHandle(), IDS_ERR_RANGE_READ_FAILED);
+    } else {
+        ShowEditOutOfMemory();
+    }
 }
 
 bool CStirlingDoc::SetByteNoUndo(stirling::FileOffset pos, unsigned char b) {
@@ -882,6 +1009,7 @@ bool ReserveOneSlot(Vec& v) {
     }
     const size_t grown = (v.capacity() == 0) ? 8 : v.capacity() * 2;
     try {
+        const stirling::StdAllocScope allocScope;
         v.reserve(grown);
         return true;
     } catch (const std::bad_alloc&) {
@@ -890,6 +1018,7 @@ bool ReserveOneSlot(Vec& v) {
         // 要求長が max_size 超過。以下の最小要求で判定し直す。
     }
     try {
+        const stirling::StdAllocScope allocScope;
         v.reserve(v.size() + 1);
     } catch (const std::bad_alloc&) {
         return false;
@@ -911,6 +1040,7 @@ bool CStirlingDoc::ReserveRedoSlot() {
 
 bool CStirlingDoc::PushUndoRecord(EditRecord&& r) {
     try {
+        const stirling::StdAllocScope allocScope;
         m_undoStack.push_back(std::move(r));       // 確保に失敗しても計上が狂わないよう
     } catch (const std::bad_alloc&) {
         // 予約済みならここへは来ない。万一記録できなければ履歴を捨て、
@@ -924,6 +1054,7 @@ bool CStirlingDoc::PushUndoRecord(EditRecord&& r) {
 
 bool CStirlingDoc::PushRedoRecord(EditRecord&& r) {
     try {
+        const stirling::StdAllocScope allocScope;
         m_redoStack.push_back(std::move(r));
     } catch (const std::bad_alloc&) {
         ClearUndoHistory(true);
@@ -1000,6 +1131,7 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
         //   1 バイトずつ Seek し直す実装（O(n^2)）をやめ、Read/Write で一括処理する。
         std::vector<unsigned char> old;
         try {
+            const stirling::StdAllocScope allocScope;
             old.resize(r.bytes.size());
         } catch (const std::bad_alloc&) {
             return false;   // 退避できないならドキュメントを変更しない（Issue #153）
@@ -1011,9 +1143,17 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
                 return false;
             }
             const stirling::FileOffset got = c.Read(n, old.data());
-            old.resize(static_cast<size_t>(got));
+            // 退避の読み取りが要求量に満たない場合（遅延読み込みの元ファイルの読取失敗。Issue #300）は、
+            //   逆レコードを作れないため変更せずに失敗する。
+            if (got != n) {
+                return false;
+            }
             const stirling::FileOffset wrote = c.Write(r.pos, r.bytes.data(), got);
-            old.resize(static_cast<size_t>(wrote));   // 実書込数へ合わせる
+            // Write は参照ノードの実体化に失敗すると何も書かずに 0 を返す（Issue #300）。
+            //   このときドキュメントは無変更なので、適用できなかったとして戻る。
+            if (wrote != got) {
+                return false;
+            }
         }
         inv.kind = EditRecord::kOverwrite; inv.pos = r.pos; inv.bytes = std::move(old);
         break;
@@ -1036,6 +1176,7 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
         if (!FitsInBuffer(r.count)) { return false; }
         std::vector<unsigned char> cap;
         try {
+            const stirling::StdAllocScope allocScope;
             cap.resize(static_cast<size_t>(r.count));   // 退避量は Issue #30 参照
         } catch (const std::bad_alloc&) {
             return false;
@@ -1049,10 +1190,19 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
                 cap.clear();
             }
         }
+        // 退避の読み取りが要求量に満たない場合（遅延読み込みの元ファイルの読取失敗。Issue #300）は、
+        //   逆レコードを作れないため変更せずに失敗する。
+        if (static_cast<stirling::FileOffset>(cap.size()) != r.count) {
+            return false;
+        }
         stirling::FileOffset nDel = 0;
         {
             stirling::BlockCursor d(&m_blocks);
             nDel = d.DeleteRange(r.pos, r.count);   // ブロック単位の一括削除（Issue #62）
+        }
+        // 参照ノードの分割に失敗すると何も削除せずに 0 を返す（Issue #300）。無変更で戻る。
+        if (nDel == 0 && !cap.empty()) {
+            return false;
         }
         if (nDel < static_cast<stirling::FileOffset>(cap.size())) {
             cap.resize(static_cast<size_t>(nDel));   // 実削除数へ合わせる
@@ -1067,6 +1217,7 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
         if (!FitsInBuffer(r.count)) { return false; }
         std::vector<unsigned char> cap;
         try {
+            const stirling::StdAllocScope allocScope;
             cap.resize(static_cast<size_t>(r.count));   // 退避量は Issue #30 参照
         } catch (const std::bad_alloc&) {
             return false;
@@ -1080,10 +1231,28 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
                 cap.clear();
             }
         }
+        // 退避の読み取りが要求量に満たない場合（遅延読み込みの元ファイルの読取失敗。Issue #300）は、
+        //   逆レコードを作れないため変更せずに失敗する。
+        if (static_cast<stirling::FileOffset>(cap.size()) != r.count) {
+            return false;
+        }
         // ReplaceRange と同じく「挿入 → 削除」の順で行う。挿入は全か無かで失敗し得るが、
         // 削除は確保を伴わないため、この順序なら失敗時にドキュメントが無変更で済む
         //（Issue #153）。
         const stirling::FileOffset insLen = static_cast<stirling::FileOffset>(r.bytes.size());
+        if (insLen > 0 && insLen == r.count &&
+            static_cast<stirling::FileOffset>(cap.size()) == r.count) {
+            // 同じ長さの置換は上書きで行う（ReplaceRange と同じ理由。Issue #300）。
+            stirling::BlockCursor c(&m_blocks);
+            if (c.Write(r.pos, r.bytes.data(), insLen) != insLen) {
+                return false;   // 実体化の失敗。ドキュメントは無変更
+            }
+            inv.kind = EditRecord::kReplace; inv.pos = r.pos;
+            inv.count = insLen;
+            inv.bytes = std::move(cap);
+            AdjustMarksForSplice(r.pos, insLen, insLen);   // ダイナミックマーク追従
+            break;
+        }
         if (!r.bytes.empty()) {
             stirling::BlockCursor c(&m_blocks);
             if (!c.Insert(r.pos, r.bytes.data(), insLen)) {
@@ -1095,6 +1264,15 @@ bool CStirlingDoc::ApplyRecord(const EditRecord& r, EditRecord& outInv) {
             stirling::BlockCursor d(&m_blocks);
             // 挿入した分だけ削除開始位置が後ろへずれる。
             nDel = d.DeleteRange(r.pos + insLen, r.count);   // ブロック単位の一括削除（Issue #62）
+        }
+        // 参照ノードの分割に失敗して削除できなかった（Issue #300）。挿入した分を取り除いて
+        //   無変更へ戻す（挿入分はメモリ上のブロックなので、この削除は失敗しない）。
+        if (nDel == 0 && !cap.empty()) {
+            if (insLen > 0) {
+                stirling::BlockCursor u(&m_blocks);
+                u.DeleteRange(r.pos, insLen);
+            }
+            return false;
         }
         if (nDel < static_cast<stirling::FileOffset>(cap.size())) {
             cap.resize(static_cast<size_t>(nDel));   // 実削除数へ合わせる

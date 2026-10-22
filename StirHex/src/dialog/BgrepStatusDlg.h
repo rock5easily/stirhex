@@ -35,6 +35,9 @@ struct BgrepJob {
 
 class CBgrepStatusDlg : public CDialog {
 public:
+    // ヒット件数の上限（Issue #307。[全て検索] と同じ）。超えるヒットが見つかったら検索を止める。
+    static constexpr int kHitLimit = 10000;
+
     CBgrepStatusDlg(const std::vector<unsigned char>& pattern, const BgrepSettings& s,
                     CStirlingOutputBar* outbar, CWnd* pParent);
 
@@ -50,5 +53,6 @@ protected:
     CStirlingOutputBar* m_outbar;
     int                 m_hitCount;
     int                 m_fileCount;
+    bool                m_truncated = false;   // 上限を超えるヒットがあり、検索を打ち切った
     DECLARE_MESSAGE_MAP()
 };

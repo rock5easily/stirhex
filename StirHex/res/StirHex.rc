@@ -258,7 +258,7 @@ FONT 9, "ＭＳ Ｐゴシック"
 BEGIN
   CONTROL 128, -1, "STATIC", 0x50000003, 8, 9, 24, 24
   CONTROL "BinaryEditor  StirHex", 1027, "STATIC", 0x50020001, 38, 8, 164, 10
-  CONTROL "Version 2.4.1", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
+  CONTROL "Version 3.0.0", 1028, "STATIC", 0x50020000, 38, 21, 164, 8
   CONTROL "Copyright (C) 2026 StirHex Project", 1093, "STATIC", 0x50020000, 38, 34, 164, 8
   CONTROL "https://github.com/rock5easily/stirhex", 1100, "STATIC", 0x50020000, 38, 47, 164, 8
   CONTROL "", -1, "STATIC", 0x50000010, 8, 63, 194, 1
@@ -357,7 +357,7 @@ BEGIN
   CONTROL "", 1021, "LISTBOX", 0x50A10101, 0, 20, 100, 126
 END
 
-157 DIALOG 0, 0, 283, 190
+157 DIALOG 0, 0, 283, 216
 STYLE 0x48C00040  EXSTYLE 0x00000000
 CAPTION "ファイル"
 FONT 9, "ＭＳ Ｐゴシック"
@@ -384,11 +384,15 @@ BEGIN
   CONTROL "", 1151, "STATIC", 0x50020000, 148, 93, 120, 8
   CONTROL "", 1154, "STATIC", 0x50020000, 148, 104, 120, 18
   CONTROL "フォルダを開く(&E)", 1153, "BUTTON", 0x50010000, 196, 124, 72, 14
-  CONTROL "大きいファイル", 1155, "BUTTON", 0x50000007, 144, 147, 128, 39
+  CONTROL "大きいファイル", 1155, "BUTTON", 0x50000007, 144, 147, 128, 64
   CONTROL "開く前に確認する(&W)", 1156, "BUTTON", 0x50010003, 148, 158, 100, 10
   CONTROL "", 1157, "EDIT", 0x50812080, 148, 170, 56, 14
   CONTROL "Spin2", 1158, "msctls_updown32", 0x50000036, 195, 171, 9, 14
   CONTROL "MB 以上", 1159, "STATIC", 0x50020000, 210, 173, 50, 8
+  CONTROL "必要な部分だけ読み込む(&Z)", 1166, "BUTTON", 0x50010003, 148, 188, 110, 10
+  CONTROL "", 1167, "EDIT", 0x50812080, 148, 200, 56, 14
+  CONTROL "Spin3", 1168, "msctls_updown32", 0x50000036, 195, 201, 9, 14
+  CONTROL "MB 以上", 1169, "STATIC", 0x50020000, 210, 203, 50, 8
 END
 
 158 DIALOG 0, 0, 250, 226
@@ -1852,10 +1856,22 @@ BEGIN
   LTEXT "", IDC_BP_FORMAT_NOTE, 190, 104, 230, 18, SS_LEFT | SS_NOPREFIX
   LTEXT "", IDC_BP_STATUS, 10, 125, 410, 25, SS_LEFT | SS_NOPREFIX
   CONTROL "成功時に結果ファイルを開く(&O)", IDC_BP_OPEN_RESULT, "BUTTON", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 154, 180, 10
+  CONTROL "チェックサム不一致を無視して適用(&I)", IDC_BP_IGNORE_CHECKSUM, "BUTTON", BS_AUTOCHECKBOX | WS_TABSTOP, 200, 154, 220, 10
   CONTROL "", IDC_BP_PROGRESS, "msctls_progress32", PBS_SMOOTH, 10, 169, 410, 14
   DEFPUSHBUTTON "作成", IDC_BP_START, 10, 190, 60, 16
   PUSHBUTTON "中止", IDC_BP_STOP, 76, 190, 60, 16, WS_DISABLED
   PUSHBUTTON "閉じる", IDCANCEL, 360, 190, 60, 16
+END
+
+// --- 比較の進捗ダイアログ（IDD_COMPARE_PROGRESS 263, モーダル。Issue #307） ---
+263 DIALOGEX 0, 0, 200, 62
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "比較中"
+FONT 9, "ＭＳ Ｐゴシック"
+BEGIN
+  LTEXT "データを比較しています...", -1, 8, 8, 184, 8
+  CONTROL "", IDC_COMPARE_PROGRESS, "msctls_progress32", PBS_SMOOTH, 8, 20, 184, 12
+  PUSHBUTTON "中止", IDCANCEL, 75, 40, 50, 14
 END
 
 STRINGTABLE
@@ -1940,6 +1956,19 @@ BEGIN
   1307, "IPS パッチ (*.ips)|*.ips|すべてのファイル (*.*)|*.*||"
   1308, "%s は既に存在します。上書きしますか？"
   1309, "パッチファイルは元ファイル、変更後ファイル、または開いている文書と別のファイルを指定してください。\n\n%s"
+  1310, "\n\n上書き保存の途中で失敗したため、ファイルには変更の一部だけが書き込まれている可能性があります。"
+  1311, "保存しましたが、保存したファイルを開き直せませんでした。\n%s\n\nこのウィンドウの内容は正しく表示できません。ファイルを開き直してください。"
+  1312, "\n\nこのウィンドウの内容は正しく表示できません。ファイルを開き直してください。"
+  1313, "保存しましたが、保存したファイルを開き直せませんでした。\n%s\n\nこのウィンドウは引き続き保存前のファイルから内容を読むため、保存前のファイルは使用中のままになります。"
+  1314, "結果ファイルを作成しましたが、%sのCRCが一致しません。\n\n%s"
+  1315, "元ファイル"
+  1316, "結果ファイル"
+  1317, "BPS の元ファイル・結果のCRC不一致を無視して適用します。"
+  1318, "元ファイルと結果ファイル"
+  1319, "%d件を超えたため、検索を打ち切りました"
+  1320, "相違箇所が%d件を超えたため、比較を打ち切りました\n\n先頭から%d件を表示します"
+  1321, "比較中にデータが変更されたため、比較を中止しました"
+  1322, "データを読み取れなかったため、比較を中止しました"
   33020, "ファイル全体または選択範囲のチェックサム・ハッシュ値を計算\nチェックサム・ハッシュ計算"
   33021, "ディスク上の2つのファイルからBPS/IPSパッチを作成\nパッチを作成"
   33022, "ディスク上の元ファイルへIPS/BPSパッチを適用\nパッチを適用"

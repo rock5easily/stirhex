@@ -309,21 +309,23 @@ void CStirlingOutputBar::CopyToClipboard() {
         return;
     }
     // 結果が数万行に及ぶことがあるため、連結前に必要量を見積もって確保する。
-    int total = 0;
+    //   合計長は int（CStringW の長さ）を超えうるため size_t で数え、std::wstring で連結する
+    //   （Issue #307）。
+    size_t total = 0;
     for (int i = 0; i < count; ++i) {
-        total += m_list.GetTextLen(i) + 2;   // 各行 + CR/LF
+        const int len = m_list.GetTextLen(i);
+        total += static_cast<size_t>((len > 0) ? len : 0) + 2;   // 各行 + CR/LF
     }
-    CStringW all;
-    all.Preallocate(total);
+    std::wstring all;
+    all.reserve(total);
     for (int i = 0; i < count; ++i) {
         CStringW line;
         m_list.GetText(i, line);
-        all += line;
+        all.append(line.GetString(), static_cast<size_t>(line.GetLength()));
         all += L"\r\n";
     }
     DWORD error = ERROR_SUCCESS;
-    if (!ui::PutClipboardTextW(GetSafeHwnd(), all.GetString(),
-                               static_cast<size_t>(all.GetLength()), error)) {
+    if (!ui::PutClipboardTextW(GetSafeHwnd(), all.c_str(), all.size(), error)) {
         // 他プロセスがクリップボードをロックしている等。無言で中断せず理由を提示する。
         ui::MsgBox(GetSafeHwnd(),
                    ui::AppendErrorReason(ui::LoadW(IDS_ERR_CLIPBOARD_COPY), error));

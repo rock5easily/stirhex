@@ -28,11 +28,9 @@ class TestIssue07SelectRange:
 
             # Select range 0x10 .. 0x1F (16 bytes) in Hex
             drv.select_range_dialog(start_addr="10", end_addr="1F", is_hex=True)
-            time.sleep(0.3)
 
             # Delete the selected range
             drv.press_delete()
-            time.sleep(0.3)
 
             drv.save_as_via_dialog(out_file)
 
@@ -58,11 +56,9 @@ class TestIssue07SelectRange:
 
             # Select decimal range 10 .. 19 (10 bytes)
             drv.select_range_dialog(start_addr="10", end_addr="19", is_hex=False)
-            time.sleep(0.3)
 
             # Fill selected range with 0xFF
             drv.fill_range_dialog("FF")
-            time.sleep(0.3)
 
             drv.save_as_via_dialog(out_file)
 
@@ -86,11 +82,9 @@ class TestIssue07SelectRange:
 
             # Select range 0x10 .. 0x1F (16 bytes) in Hex
             drv.select_range_dialog(start_addr="10", end_addr="1F", is_hex=True)
-            time.sleep(0.3)
 
             # Delete the selected range
             drv.press_delete()
-            time.sleep(0.3)
 
             drv.save_as_via_dialog(out_file)
 
@@ -115,11 +109,9 @@ class TestIssue07SelectRange:
 
             # Select decimal range 10 .. 19 (10 bytes)
             drv.select_range_dialog(start_addr="10", end_addr="19", is_hex=False)
-            time.sleep(0.3)
 
             # Fill selected range with 0xFF
             drv.fill_range_dialog("FF")
-            time.sleep(0.3)
 
             drv.save_as_via_dialog(out_file)
 

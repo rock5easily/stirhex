@@ -45,11 +45,8 @@ def _open_with_face(drv, exe_path, test_file, charset_cmd):
     safe_set_focus(drv.hwnd)
     time.sleep(0.3)
     drv.post_command(charset_cmd)
-    time.sleep(0.3)
     drv.toggle_struct_bar(show=True)
-    time.sleep(0.4)
     drv.select_struct_type("LOGFONT")
-    time.sleep(0.5)
 
 
 @pytest.mark.ported

@@ -1,6 +1,9 @@
 // HexText 実装（HexText.h 参照）。
 #include "core/HexText.h"
 
+#include <new>
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
+
 namespace stirling {
 
 namespace {
@@ -75,6 +78,36 @@ HexTextParseResult ParseHexText(const wchar_t* text, size_t length,
     }
     out.swap(bytes);
     return HexTextParseResult();
+}
+
+bool FormatHexText(const unsigned char* data, size_t size, std::wstring& out) {
+    out.clear();
+    if (size == 0) {
+        return true;
+    }
+    if (data == nullptr) {
+        return false;
+    }
+    // 長さ = 3 * size - 1。乗算の桁あふれを避けるため、割り算で上限と比べる。
+    std::wstring text;
+    if (size > (text.max_size() + 1) / 3) {
+        return false;   // 文字列で表せない長さ
+    }
+    try {
+        const stirling::StdAllocScope allocScope;
+        text.resize(size * 3 - 1);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    static const wchar_t kDigits[] = L"0123456789ABCDEF";
+    wchar_t* p = &text[0];
+    for (size_t i = 0; i < size; ++i) {
+        if (i != 0) { *p++ = L' '; }
+        *p++ = kDigits[data[i] >> 4];
+        *p++ = kDigits[data[i] & 0x0F];
+    }
+    out.swap(text);
+    return true;
 }
 
 }  // namespace stirling

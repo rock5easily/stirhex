@@ -9,6 +9,12 @@
 // 本移植では FileOffset(64bit) へ置換している（2GB 超のファイル対応）。
 // ノード内オフセット(curOffset_)・ブロック長は 16KB 上限のため int のままとし、
 // 境界で明示的に変換する。
+//
+// 遅延読み込み(Issue #300): リストはファイル参照ノード（BlockList::IsFileRef。最大 1GB）を
+// 含みうる。読み取り系は参照ノードを元ファイルから読む。変更系は、変更する位置を含む
+// 参照ノードの区間を先に 16KB ブロックへ読み込んで（実体化して）から従来の処理を行う。
+// 実体化はメモリ確保と元ファイルの読み取りを伴うため、変更系はその失敗でも false / 0 を
+// 返す。その場合もリストの内容（バイト列）は呼出前のまま変わらない。
 #pragma once
 
 #include "BlockList.h"
@@ -80,14 +86,15 @@ public:
     bool SetByteAt(FileOffset pos, unsigned char b);
 
     // 絶対位置 pos から count バイトを、既存データ上へ一括で上書きする（Issue #154）。
-    //   実際に上書きできたバイト数を返す。ドキュメント長は変わらず、確保も発生しない
-    //   （＝メモリ不足で失敗しない）。データ末尾を越える分は書かずに打ち切る。
+    //   実際に上書きできたバイト数を返す。ドキュメント長は変わらない。
+    //   データ末尾を越える分は書かずに打ち切る。確保は参照ノードの実体化でだけ発生し、
+    //   失敗したら 1 バイトも書かずに 0 を返す（Issue #300）。
     // SetByteAt を count 回呼ぶのと結果は同じだが、ブロックを 1 度だけ辿るため
     //   （SetByteAt は 1 バイトごとに先頭から Seek し直す）長い範囲でも線形で済む。
     FileOffset Write(FileOffset pos, const void* src, FileOffset count);
 
     // 絶対位置 pos から count バイトを定数 value で埋める（範囲初期化。Issue #154）。
-    //   Write と同じく長さ不変・確保なし。呼出側で count バイトの一時バッファを
+    //   Write と同じく長さ不変（確保は参照ノードの実体化のみ）。呼出側で count バイトの一時バッファを
     //   組み立てる必要が無いため、Win32 でも選択範囲の大きさに依存せず実行できる。
     FileOffset FillRange(FileOffset pos, FileOffset count, unsigned char value);
 
@@ -107,6 +114,11 @@ public:
     bool SearchMismatch(unsigned char value, FileOffset* outPos,
                         int direction, FileOffset start, FileOffset end);
 
+    // 直近の SearchPattern / SearchMismatch が、実データ内の位置を読めずに打ち切ったか
+    //   （遅延読み込みの読取エラー・ページキャッシュの確保失敗。Issue #312）。
+    //   検索は false を返すため、呼出側はこれで「見つからない」と区別する。
+    bool ReadFailed() const { return readFailed_; }
+
     BlockNode* CurNode() const { return curNode_; }
     int        CurOffset() const { return curOffset_; }  // ノード内オフセット(<=16KB)
     BlockList* List() const { return list_; }
@@ -118,6 +130,18 @@ private:
     bool InsertWorker(int curUsedLen, int capacity, unsigned char* data,
                       FileOffset insertCount, const unsigned char* src);
 
+    // ---- 遅延読み込み（Issue #300） ----
+    // 絶対位置 [pos, pos+count) に重なる参照ノードの区間を 16KB ブロックへ読み込む。
+    //   全か無か: 確保・読み取りに失敗したらリストを変更せずに false。
+    bool MaterializeRange(FileOffset pos, FileOffset count);
+    // 挿入位置 pos（総長と等しくてもよい）の前後を、InsertWorker / InsertByte が
+    //   データを持つブロックとして扱えるようにする。失敗で false（リストは無変更）。
+    bool PrepareInsertAt(FileOffset pos);
+    // 現ノード/オフセットのバイトを読む（参照ノードは窓を介して読む）。
+    bool ByteAtCursor(unsigned char* out);
+    // 検索用の GetByteAt。実データ内（0 <= pos < total）で読めなければ readFailed_ を立てる。
+    bool SearchByteAt(FileOffset pos, FileOffset total, unsigned char* out);
+
     BlockList* list_;
     BlockNode* curNode_;
     int        curOffset_;  // ノード内オフセット（0..capacity, 16KB 上限のため int）
@@ -128,6 +152,13 @@ private:
     //   無効なら GetByteAt が先頭から解決し直す。検索の内側ループは走査開始時の
     //   Seek(kBegin) で有効化されるため、増分アクセスの速度は保たれる。
     bool       curAbsValid_;
+    bool       readFailed_ = false;   // ReadFailed() の値（検索の開始時に下ろす）
+    // ByteAtCursor が直近に得た読み取り窓（Issue #300）。ノードの解放・再利用と
+    //   キャッシュページの追い出しを、リストの世代と FileSource の世代で検知する。
+    const BlockNode*   spanNode_ = nullptr;
+    NodeSpan           span_;
+    unsigned long long spanVersion_ = 0;
+    unsigned long long spanEpoch_ = 0;
 };
 
 }  // namespace stirling

@@ -37,7 +37,10 @@ CStringW JoinPath(const CStringW& dir, const wchar_t* name) {
 void SearchOneFile(BgrepJob* job, const CStringW& full) {
     stirling::BlockList bl;
     // core はワイドパス・結果型の API（Issue #20）。パスは wide 層のまま渡す。
-    const bool ok = stirling::LoadFileIntoBlocks(bl, full).Ok();
+    //   検索は読むだけなので、ファイル全体を読み込まず必要な部分だけ読む（Issue #300）。
+    //   共有は従来の全体読み込みと同じく全許可（他プロセスの編集を妨げない）。
+    const bool ok =
+        stirling::LoadFileLazy(bl, full, stirling::FileShareMode::kDenyNone).Ok();
     // 総長は 64bit で保持する。int に丸めると 2GB 超で負値となり、
     // 下の走査ループが初回で打ち切られる（Issue #19）。
     const stirling::FileOffset total = ok ? stirling::RecalcTotalLength(bl) : 0;
@@ -54,19 +57,29 @@ void SearchOneFile(BgrepJob* job, const CStringW& full) {
     const int plen = (int)job->pattern.size();
     if (plen == 0 || total < plen) { return; }
 
+    // 一致の開始位置を kWindow バイトずつの区間に分けて検索し、区間ごとに中止を確認する。
+    //   ファイル末尾まで一度に検索すると、一致しない巨大ファイルでは読み終えるまで
+    //   中止できなかった（Issue #306）。区間の終端は、区間内で始まる一致が収まるよう
+    //   パターン長 - 1 だけ先まで含める（SearchPattern の end は一致の末尾の上限）。
+    const stirling::FileOffset kWindow = 16 * 1024 * 1024;
     stirling::BlockCursor cur(&bl);
     stirling::FileOffset pos = 0;         // core は 64bit 位置（Issue #19）
-    stirling::FileOffset hit = 0;
-    while (job->running != 0 &&
-           cur.SearchPattern(job->pattern.data(), plen, &hit,
-                             stirling::BlockCursor::kForward, pos, 0)) {
+    while (job->running != 0 && pos <= total - plen) {
+        const stirling::FileOffset end =
+            (total - pos > kWindow + plen - 1) ? pos + kWindow + plen - 1 : total;
+        stirling::FileOffset hit = 0;
+        if (!cur.SearchPattern(job->pattern.data(), plen, &hit,
+                               stirling::BlockCursor::kForward, pos, end)) {
+            if (end == total) { break; }  // 末尾まで検索し終えた
+            pos = end - (plen - 1);       // 次の区間（= pos + kWindow）
+            continue;
+        }
         // Issue #156: ヒット位置も 64bit のまま構造体で渡す（同上）。
         stirling::BgrepHitNotify notify;
         notify.path = full.GetString();
         notify.pos = hit;
         ::SendMessageW(job->notify, WM_BGREP_HIT, 0, (LPARAM)&notify);
         pos = hit + plen;
-        if (pos > total - plen) { break; }
     }
 }
 
@@ -182,7 +195,15 @@ LRESULT CBgrepStatusDlg::OnScan(WPARAM /*wParam*/, LPARAM lParam) {
 //   lParam は送信側スタック上の BgrepHitNotify（Issue #156）。
 LRESULT CBgrepStatusDlg::OnHit(WPARAM /*wParam*/, LPARAM lParam) {
     const stirling::BgrepHitNotify* n = (const stirling::BgrepHitNotify*)lParam;
-    if (n == nullptr) { return 0; }
+    if (n == nullptr || m_truncated) { return 0; }
+    // 上限を超えるヒットは追加せず、ワーカに停止を求める（Issue #307）。ヒットが数十億件に
+    //   なる検索（巨大ファイルで 00 を探す等）でも、出力ペインとメモリが際限なく増えない。
+    //   ワーカは SendMessage から戻った後のループで停止に気付く。それまでの通知は捨てる。
+    if (m_hitCount >= kHitLimit) {
+        m_truncated = true;
+        ::InterlockedExchange(&m_job.running, 0);
+        return 0;
+    }
     ++m_hitCount;
     SetDlgItemInt(IDC_BGREP_STAT_COUNT, m_hitCount);
     if (m_outbar != nullptr) {
@@ -196,6 +217,10 @@ LRESULT CBgrepStatusDlg::OnDone(WPARAM /*wParam*/, LPARAM /*lParam*/) {
     if (m_outbar != nullptr) {
         if (m_fileCount == 0) {
             m_outbar->AddMessage(ui::LoadW(IDS_BGREP_NO_FILES));
+        } else if (m_truncated) {
+            CStringW w;
+            w.Format(ui::LoadW(IDS_BGREP_TRUNCATED), kHitLimit);
+            m_outbar->AddMessage(w);
         } else if (m_hitCount == 0) {
             m_outbar->AddMessage(ui::LoadW(IDS_SEARCH_NOTFOUND));   // 原 1006
         } else {

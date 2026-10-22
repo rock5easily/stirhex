@@ -28,7 +28,6 @@ def _image_of(drv: StirlingDriver, wnd: int):
     alone - and an edit would look like an update even if the data were never redrawn.
     """
     drv.jump_to_address("0", is_hex=True)
-    time.sleep(0.5)
     captured = drv.capture_window_image(wnd)
     assert captured is not None, "the bit image window must be capturable"
     return captured
@@ -58,7 +57,6 @@ class TestIssue08BitImage:
 
             wnd = _open_bit_image(drv)
             drv.reload_bit_image()
-            time.sleep(0.3)
             assert win32gui.IsWindow(wnd)
 
     @pytest.mark.ported
@@ -82,7 +80,6 @@ class TestIssue08BitImage:
 
                 # Reverting discards the edit; revert_file answers the confirmation.
                 drv.revert_file()
-                time.sleep(0.5)
                 assert win32gui.IsWindow(wnd)
                 assert _image_of(drv, wnd) == original, (
                     "after reverting, the image must show the file again"
@@ -109,7 +106,6 @@ class TestIssue08BitImage:
                 )
 
                 drv.post_command(ID_BITIMAGE_RELOAD)
-                time.sleep(0.5)
                 assert _image_of(drv, wnd) != original, (
                     "the manual reload must redraw the image with the edited data"
                 )

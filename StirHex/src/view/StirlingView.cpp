@@ -13,6 +13,7 @@
 #include "app/StirlingApp.h"
 #include "app/ShellUtil.h"   // ui::DragQueryPath（MAX_PATH 非依存のドロップパス取得）
 #include "app/ClipboardUtil.h"   // クリップボード転送の RAII（#47）
+#include "app/AllocFailure.h"    // 確保失敗の例外型の統一（Issue #306）
 #include "app/MarkFile.h"        // マークファイルの直列化（Issue #99）
 #include "app/SettingsFile.h"    // UTF-8 テキストファイルの読み書き
 #include "core/HexText.h"   // 16進テキスト → バイト列（Issue #97）
@@ -36,8 +37,10 @@
 #include "dialog/FileChangedDlg.h"
 #include "dialog/CompareDlg.h"
 #include "dialog/DiffListDlg.h"
+#include "dialog/CompareProgressDlg.h"   // データ比較の進捗と中止（Issue #307）
 #include "dialog/SyncScrollDlg.h"
 #include "core/BlockCursor.h"
+#include "core/DiffScan.h"   // データ比較の相違範囲収集（Issue #307）
 #include "core/StreamFileWriter.h"   // 一時ファイル経由の逐次書込（Issue #155）
 #include "core/Cp932Text.h"   // IsCp932LeadByte（byte 層の CP932 先行バイト判定）
 
@@ -46,6 +49,7 @@
 
 #include <string>
 #include <commctrl.h>   // SetWindowSubclass（プレビューツールバー固定用）
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
 
 IMPLEMENT_DYNCREATE(CStirlingView, CView)
 
@@ -277,6 +281,11 @@ CStirlingView::CStirlingView()
 }
 
 CStirlingView::~CStirlingView() {}
+
+LRESULT CStirlingView::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) {
+    return ui::TranslateAllocFailure(
+        [&] { return CView::WindowProc(message, wParam, lParam); });
+}
 
 CStirlingDoc* CStirlingView::GetDocument() const {
     return STATIC_DOWNCAST(CStirlingDoc, m_pDocument);
@@ -736,7 +745,12 @@ void CStirlingView::DrawContent(CDC* pDC) {
                 int n = (avail > m_bytesPerRow) ? m_bytesPerRow : static_cast<int>(avail);
                 unsigned char buf[256] = {0};
                 if (n > static_cast<int>(sizeof(buf))) { n = static_cast<int>(sizeof(buf)); }
-                if (n > 0 && cur.Seek(off, stirling::BlockCursor::kBegin, nullptr)) { cur.Read(n, buf); }
+                // 読めたバイト数。遅延読み込みの読取エラー等で短い場合、残りは値が無いため
+                //   00 ではなく "??" を既定色で描く（Issue #312）。
+                int nRead = 0;
+                if (n > 0 && cur.Seek(off, stirling::BlockCursor::kBegin, nullptr)) {
+                    nRead = static_cast<int>(cur.Read(n, buf));   // 0..n
+                }
                 const int y = (r + 1) * m_rowH;
 
                 // 16進欄（バイト毎に色付き2桁描画）。原は同じ色属性の連続バイトを束ねて
@@ -747,10 +761,17 @@ void CStirlingView::DrawContent(CDC* pDC) {
                 //   編集該当部にあるマークは2桁分だけが着色される。
                 pDC->SetBkMode(OPAQUE);
                 for (int i = 0; i < n; ++i) {
-                    rowMark[i] = GetByteColor(off + i, buf[i], rowFg[i], rowBg[i]);
+                    if (i < nRead) {
+                        rowMark[i] = GetByteColor(off + i, buf[i], rowFg[i], rowBg[i]);
+                    } else {
+                        rowMark[i] = false;
+                        rowFg[i] = m_clrDataText;
+                        rowBg[i] = m_clrDataBack;
+                    }
                 }
                 for (int i = 0; i < n; ++i) {
-                    CStringW cell; cell.Format(L"%02X", buf[i]);
+                    CStringW cell;
+                    if (i < nRead) { cell.Format(L"%02X", buf[i]); } else { cell = L"??"; }
                     pDC->SetTextColor(rowFg[i]);
                     pDC->SetBkColor(rowBg[i]);
                     pDC->TextOutW(ColHexX() + i * 3 * m_charW, y, cell);
@@ -1778,22 +1799,31 @@ void CStirlingView::OnUpdateEditRedo(CCmdUI* pCmdUI) {
 //   文字ペイン: 生バイトを CF_TEXT で渡す。byte 層＝原版と同じバイト列が他アプリへ
 //               渡ることが仕様（設計メモ §6.5）。ワイド化すると不正バイト列が
 //               置換文字へ潰れ、貼り付け先の内容が変わる。
-void CStirlingView::SetClipboardText(const std::vector<unsigned char>& bytes) {
+// 書き出す文字列の準備（PrepareClipboardText）と転送（PutClipboardText）を分けるのは、
+//   切り取りで準備に失敗したときに、削除だけが成立してデータを失わないため（Issue #306）。
+bool CStirlingView::PrepareClipboardText(const std::vector<unsigned char>& bytes,
+                                         std::wstring& hexText) const {
+    hexText.clear();
+    if (m_activePane != 0) {
+        return true;   // 文字ペインはバイト列をそのまま渡すので準備は不要
+    }
+    // 1 バイトあたり 3 文字。CStringW（長さが int）では約 715MB を超える選択を表せない。
+    if (stirling::FormatHexText(bytes.data(), bytes.size(), hexText)) {
+        return true;
+    }
+    ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_EDIT_OUT_OF_MEMORY);
+    return false;
+}
+
+void CStirlingView::PutClipboardText(const std::vector<unsigned char>& bytes,
+                                     const std::wstring& hexText) {
     if (bytes.empty()) {
         return;
     }
     DWORD error = ERROR_SUCCESS;
     bool ok = false;
     if (m_activePane == 0) {
-        CStringW text;
-        // 1 バイトあたり 3 文字（先頭のみ 2 文字）。選択範囲が大きいので事前に確保する。
-        text.Preallocate(static_cast<int>(
-            std::min<size_t>(bytes.size() * 3, static_cast<size_t>(INT_MAX))));
-        for (size_t i = 0; i < bytes.size(); ++i) {
-            text.AppendFormat((i == 0) ? L"%02X" : L" %02X", bytes[i]);
-        }
-        ok = ui::PutClipboardTextW(GetSafeHwnd(), text.GetString(),
-                                   static_cast<size_t>(text.GetLength()), error);
+        ok = ui::PutClipboardTextW(GetSafeHwnd(), hexText.c_str(), hexText.size(), error);
     } else {
         // [byte層] 編集対象のバイト列をそのまま渡す。詳細は ClipboardUtil.h / 設計メモ §6.5
         ok = ui::PutClipboardTextA(GetSafeHwnd(),
@@ -1815,13 +1845,26 @@ void CStirlingView::OnEditCopy() {
     }
     const stirling::FileOffset lo = SelLo();
     const stirling::FileOffset len = SelHi() - lo;
-    std::vector<unsigned char> bytes = pDoc->ReadRange(lo, len);
-    if (bytes.empty()) {
+    if (len <= 0) {
         ::MessageBeep(0);
         return;
     }
-    SetClipboardText(bytes);              // Windows クリップボード(CF_TEXT)
-    theApp.m_binClipboard = bytes;        // 内部バイナリクリップボード（原 WM_USER+8）
+    // 選択範囲を全バイト読めたときだけ続ける（Issue #306）。一部しか読めないまま切り取ると、
+    //   取り消しなしで続行した場合に読めなかった分がどこにも残らない。読めない理由
+    //   （バッファに載らない長さ・確保失敗・元ファイルの読取失敗）は表示する。
+    const unsigned long long readFailures = pDoc->SourceReadFailures();
+    std::vector<unsigned char> bytes = pDoc->ReadRange(lo, len);
+    if (static_cast<stirling::FileOffset>(bytes.size()) != len) {
+        pDoc->ShowAccessFailure(readFailures);
+        return;
+    }
+    std::wstring hexText;
+    if (!PrepareClipboardText(bytes, hexText)) {
+        return;                           // 理由は表示済み。クリップボードは変更しない
+    }
+    PutClipboardText(bytes, hexText);     // Windows クリップボード(CF_TEXT)
+    hexText = std::wstring();             // 大きな選択では数 GB になるため先に解放する
+    theApp.m_binClipboard = std::move(bytes);   // 内部バイナリクリップボード（原 WM_USER+8）
     // コピー後の選択解除（原 FUN_0044985f: view+0x270 有効時に FUN_004497b3 で解除）。
     if (theApp.AppSettings().deselectAfterCopy) {
         m_selActive = false;
@@ -1839,17 +1882,32 @@ void CStirlingView::OnEditCut() {
     }
     const stirling::FileOffset lo = SelLo();
     const stirling::FileOffset len = SelHi() - lo;
-    std::vector<unsigned char> bytes = pDoc->ReadRange(lo, len);
-    if (bytes.empty()) {
+    if (len <= 0) {
         ::MessageBeep(0);
         return;
+    }
+    // 選択範囲を全バイト読めたときだけ続ける（Issue #306）。一部しか読めないまま切り取ると、
+    //   取り消しなしで続行した場合に読めなかった分がどこにも残らない。読めない理由
+    //   （バッファに載らない長さ・確保失敗・元ファイルの読取失敗）は表示する。
+    const unsigned long long readFailures = pDoc->SourceReadFailures();
+    std::vector<unsigned char> bytes = pDoc->ReadRange(lo, len);
+    if (static_cast<stirling::FileOffset>(bytes.size()) != len) {
+        pDoc->ShowAccessFailure(readFailures);
+        return;
+    }
+    // クリップボードへ渡す文字列は削除より前に用意する。削除後に失敗すると、取り消しなしで
+    //   続行した場合にデータがどこにも残らない（Issue #306）。
+    std::wstring hexText;
+    if (!PrepareClipboardText(bytes, hexText)) {
+        return;                           // 理由は表示済み。データも選択も維持する
     }
     // 削除を先に行う。中止された場合にクリップボードを書き換えないため（Issue #30）。
     if (!pDoc->DeleteRange(lo, len)) {    // 選択範囲削除（1 Undo レコード）
         return;                           // データも選択も維持する
     }
-    SetClipboardText(bytes);              // Windows クリップボード(CF_TEXT)
-    theApp.m_binClipboard = bytes;        // 内部バイナリクリップボード（原 Cut も格納する）
+    PutClipboardText(bytes, hexText);     // Windows クリップボード(CF_TEXT)
+    hexText = std::wstring();             // 大きな選択では数 GB になるため先に解放する
+    theApp.m_binClipboard = std::move(bytes);   // 内部バイナリクリップボード（原 Cut も格納する）
     m_selActive = false;
     m_nibbleLow = false;
     AfterEdit(lo);
@@ -1876,7 +1934,9 @@ void CStirlingView::PasteBytes(const std::vector<unsigned char>& clip) {
     if (pDoc == nullptr || clip.empty()) {
         return;
     }
-    const int len = static_cast<int>(clip.size());
+    // 貼り付け長は 64bit のまま扱う。int へ切り詰めると、2GB 超で負値になって上書き貼り付けが
+    //   失敗し、4GB 超では上書きする長さが下位 32bit だけになって挿入に化ける（Issue #306）。
+    const stirling::FileOffset len = static_cast<stirling::FileOffset>(clip.size());
     if (m_selActive) {
         // 選択あり: 範囲を貼付データで置換（原 ReplaceRange）
         const stirling::FileOffset lo = SelLo();
@@ -1893,12 +1953,13 @@ void CStirlingView::PasteBytes(const std::vector<unsigned char>& clip) {
         //   それ以外は挿入。いずれも新カーソル＝pos+len。
         const stirling::FileOffset pos = m_caretPos;
         const stirling::FileOffset total = Total();
+        stirling::FileOffset delLen = 0;   // 挿入
         if (pDoc->IsOverwriteMode() && theApp.AppSettings().pasteOverwrite && pos < total) {
-            stirling::FileOffset delLen = len;
+            delLen = len;                  // 上書き
             if (pos + delLen > total) { delLen = total - pos; }   // 末尾を越えない範囲だけ上書き
-            pDoc->ReplaceRange(pos, delLen, clip);   // 上書き（1 Undo レコード）
-        } else {
-            pDoc->ReplaceRange(pos, 0, clip);        // 挿入（1 Undo レコード）
+        }
+        if (!pDoc->ReplaceRange(pos, delLen, clip)) {   // 上書き／挿入（1 Undo レコード）
+            return;   // 中止・メモリ不足。貼り付けていないのでキャレットも動かさない
         }
         m_nibbleLow = false;
         AfterEdit(pos + len);
@@ -2656,12 +2717,12 @@ void CStirlingView::InputBytes(std::vector<unsigned char> bytes) {
         if (del > static_cast<stirling::FileOffset>(bytes.size())) {
             del = static_cast<stirling::FileOffset>(bytes.size());
         }
-        pDoc->ReplaceRange(pos, del, bytes);
-    } else {
-        pDoc->ReplaceRange(pos, 0, bytes);   // 挿入（単一Undoレコード）
+        if (!pDoc->ReplaceRange(pos, del, bytes)) { return; }   // 入力していないのでキャレットも動かさない
+    } else if (!pDoc->ReplaceRange(pos, 0, bytes)) {   // 挿入（単一Undoレコード）
+        return;   // 中止・メモリ不足（Issue #306。PasteBytes と同じ扱い）
     }
     m_nibbleLow = false;
-    AfterEdit(pos + static_cast<int>(bytes.size()));
+    AfterEdit(pos + static_cast<stirling::FileOffset>(bytes.size()));
 }
 
 // IME 確定の全角文字（既定処理を呼ばず二重入力を防ぐ）。文字ペインでのみ受理。
@@ -2740,13 +2801,13 @@ void CStirlingView::ClearStructHighlight() {
 // pos が相違範囲[start,end]（昇順）内か（二分探索）。
 bool CStirlingView::InCompareDiff(stirling::FileOffset pos) const {
     // start <= pos となる最後の範囲を探し、その end を確認する。
-    int lo = 0, hi = static_cast<int>(m_compareDiffs.size()) - 1, found = -1;
-    while (lo <= hi) {
-        const int mid = (lo + hi) / 2;
-        if (m_compareDiffs[mid].first <= pos) { found = mid; lo = mid + 1; }
-        else { hi = mid - 1; }
-    }
-    return found >= 0 && pos <= m_compareDiffs[found].second;
+    //   範囲の件数は int を超えうるため、添字を int へ落とさない（Issue #306）。
+    const auto it = std::upper_bound(
+        m_compareDiffs.begin(), m_compareDiffs.end(), pos,
+        [](stirling::FileOffset p, const std::pair<stirling::FileOffset, stirling::FileOffset>& r) {
+            return p < r.first;
+        });
+    return it != m_compareDiffs.begin() && pos <= std::prev(it)->second;
 }
 
 void CStirlingView::SetCompareResult(const std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>>& diffs) {
@@ -3333,35 +3394,18 @@ void ApplyCompareToDoc(CDocument* pDoc, const std::vector<std::pair<stirling::Fi
     }
 }
 
-// 2文書の先頭 size バイトを比較し、相違の連続範囲[start,end]（昇順）を収集（原 FUN_0044c96c）。
-std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>> ComputeCompareDiffs(CStirlingDoc* a, CStirlingDoc* b, stirling::FileOffset size) {
-    std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>> diffs;
-    const int kChunk = 65536;                 // 読取チャンクはメモリ上のバッファ長のため int
-    stirling::FileOffset runStart = -1;
-    stirling::FileOffset pos = 0;
-    while (pos < size) {
-        const int n = (size - pos < kChunk) ? static_cast<int>(size - pos) : kChunk;
-        const std::vector<unsigned char> ba = a->ReadRange(pos, n);
-        const std::vector<unsigned char> bb = b->ReadRange(pos, n);
-        const int m = static_cast<int>((ba.size() < bb.size()) ? ba.size() : bb.size());
-        for (int i = 0; i < m; ++i) {
-            if (ba[i] != bb[i]) {
-                if (runStart < 0) { runStart = pos + i; }
-            } else if (runStart >= 0) {
-                diffs.push_back(std::make_pair(runStart, pos + i - 1));
-                runStart = -1;
-            }
-        }
-        pos += m;
-        if (m < n) { break; }   // 読み取り不足（想定外の安全弁）
-    }
-    if (runStart >= 0) { diffs.push_back(std::make_pair(runStart, size - 1)); }
-    return diffs;
-}
-
 void ShowCompareMsg(HWND hWnd, UINT strId) {
     ui::MsgBox(hWnd, ui::LoadW(strId), MB_OK | MB_ICONEXCLAMATION);
 }
+
+// ビューがまだ破棄されていないか。HWND の再利用に備え、HWND に対応する CWnd も確かめる。
+bool ViewAliveByHandle(HWND hWnd, const CWnd* view) {
+    return hWnd != nullptr && ::IsWindow(hWnd) && CWnd::FromHandlePermanent(hWnd) == view;
+}
+
+// 進捗ダイアログを出さずに比べる時間（ミリ秒）。小さい比較は従来どおり画面を変えずに終える。
+constexpr ULONGLONG kCompareInlineMillis = 300;
+constexpr stirling::FileOffset kCompareStepBytes = 4 * 1024 * 1024;
 
 } // namespace
 
@@ -3386,23 +3430,99 @@ void CStirlingView::RunCompareWith(CStirlingView* pTargetView) {
     CStirlingDoc* pTargetDoc = pTargetView->GetDocument();
     if (pTargetDoc == nullptr) { return; }
 
+    // メッセージボックスや進捗ダイアログの表示中は、メッセージループの中でモードレスの
+    //   ダイアログ（置換など）や外部変更の確認（再読込・失敗時の文書クローズ）が動き、
+    //   比較中の文書が変更・クローズされうる（Issue #307）。表示から戻るたびに確かめ、
+    //   閉じた文書や変更後のデータに触れない。ビューが閉じられていれば、このビュー自身も
+    //   破棄済みのため、メンバーに触れずに戻る。
+    const HWND hSelf = GetSafeHwnd();
+    const HWND hTarget = pTargetView->GetSafeHwnd();
+    const CWnd* self = this;
+    const auto viewsAlive = [&]() {
+        return ViewAliveByHandle(hSelf, self) && ViewAliveByHandle(hTarget, pTargetView);
+    };
+
     const stirling::FileOffset size1 = pDoc->GetTotalLength();
     const stirling::FileOffset size2 = pTargetDoc->GetTotalLength();
     if (size1 == 0 || size2 == 0) {
-        ShowCompareMsg(GetSafeHwnd(), IDS_COMPARE_EMPTY);       // 原 1023
+        ShowCompareMsg(hSelf, IDS_COMPARE_EMPTY);       // 原 1023
         return;
     }
-    stirling::FileOffset cmpSize = size1;
     if (size1 != size2) {
-        ShowCompareMsg(GetSafeHwnd(), IDS_COMPARE_SIZEDIFF);   // 原 1024（先に通知し小さい方まで）
-        cmpSize = (size2 < size1) ? size2 : size1;
+        ShowCompareMsg(hSelf, IDS_COMPARE_SIZEDIFF);   // 原 1024（先に通知し小さい方まで）
+        if (!viewsAlive()) { return; }
     }
+    // 比べる長さと変更の基準は、通知の後の文書から取る。
+    const stirling::FileOffset len1 = pDoc->GetTotalLength();
+    const stirling::FileOffset len2 = pTargetDoc->GetTotalLength();
+    if (len1 == 0 || len2 == 0) {
+        ShowCompareMsg(hSelf, IDS_COMPARE_EMPTY);
+        return;
+    }
+    const stirling::FileOffset cmpSize = (len2 < len1) ? len2 : len1;
+    const long seq1 = pDoc->DataChangeSeq();
+    const long seq2 = pTargetDoc->DataChangeSeq();
+    const auto dataUnchanged = [&]() {
+        return pDoc->DataChangeSeq() == seq1 && pTargetDoc->DataChangeSeq() == seq2;
+    };
 
-    const std::vector<std::pair<stirling::FileOffset, stirling::FileOffset>> diffs = ComputeCompareDiffs(pDoc, pTargetDoc, cmpSize);
+    // 2文書の先頭 cmpSize バイトの相違範囲を集める（原 FUN_0044c96c）。大きい文書でも UI を
+    //   止めないよう、まず画面を変えずに少し比べ、終わらなければ進捗ダイアログで続ける。
+    //   相違範囲は上限件数で打ち切る（Issue #307）。
+    stirling::DiffScan scan;
+    scan.Start(pDoc->Blocks(), pTargetDoc->Blocks(), cmpSize);
+    {
+        CWaitCursor wait;
+        const ULONGLONG until = ::GetTickCount64() + kCompareInlineMillis;
+        while (scan.Running() && ::GetTickCount64() < until) {
+            scan.Step(kCompareStepBytes);
+        }
+    }
+    if (scan.Running()) {
+        // 比べる前に毎回確かめ、閉じた文書や変更後のデータを読まない。
+        CCompareProgressDlg progress(scan, [&]() { return viewsAlive() && dataUnchanged(); },
+                                     AfxGetMainWnd());
+        progress.DoModal();
+        if (!viewsAlive()) { return; }
+        // 進捗ダイアログに重なった別のモーダル（外部変更の確認など）の中で比較が終わり、
+        //   その後に文書が変わることもあるため、コールバックの結果ではなく現在の値で判定する。
+        if (!dataUnchanged()) {
+            ShowCompareMsg(hSelf, IDS_COMPARE_DATA_CHANGED);
+            return;
+        }
+    }
+    switch (scan.State()) {
+    case stirling::DiffScanState::Complete:
+        break;
+    case stirling::DiffScanState::Truncated: {
+        const int limit = static_cast<int>(stirling::DiffScan::kDefaultLimit);
+        CStringW text;
+        text.Format(ui::LoadW(IDS_COMPARE_TRUNCATED), limit, limit);
+        ui::MsgBox(hSelf, text, MB_OK | MB_ICONEXCLAMATION);
+        if (!viewsAlive()) { return; }
+        if (!dataUnchanged()) {
+            ShowCompareMsg(hSelf, IDS_COMPARE_DATA_CHANGED);
+            return;
+        }
+        break;   // 先頭から上限件数までを表示する
+    }
+    case stirling::DiffScanState::Cancelled:
+        return;   // 利用者が中止した。結果は表示せず、既存の比較表示も変えない
+    case stirling::DiffScanState::ReadError:
+        ShowCompareMsg(hSelf, IDS_COMPARE_READ_FAILED);
+        return;
+    case stirling::DiffScanState::OutOfMemory:
+        ui::MsgBoxRes(hSelf, IDS_ERR_EDIT_OUT_OF_MEMORY);
+        return;
+    default:
+        return;   // Idle / Running は来ない
+    }
+    const std::vector<stirling::DiffScan::Range>& diffs = scan.Diffs();
     if (diffs.empty()) {
-        ShowCompareMsg(GetSafeHwnd(), IDS_COMPARE_NODIFF);     // 原 1025
-        ApplyCompareToDoc(pDoc, nullptr);                     // 既存の比較モードを解除
+        // 既存の比較モードを解除してから知らせる（通知の表示中に文書が閉じられうるため）。
+        ApplyCompareToDoc(pDoc, nullptr);
         ApplyCompareToDoc(pTargetDoc, nullptr);
+        ShowCompareMsg(hSelf, IDS_COMPARE_NODIFF);     // 原 1025
         return;
     }
 
@@ -3461,17 +3581,15 @@ void CStirlingView::OnRevertFile() {
     const int r = ui::MsgBox(GetSafeHwnd(), ui::LoadW(IDS_REVERT_CONFIRM), MB_YESNO | MB_ICONQUESTION);
     if (r != IDYES) { return; }
 
-    if (pDoc->RevertToSaved()) {        // DeleteContents→再読込→SetModifiedFlag(FALSE)
-        m_caretPos = 0;
-        m_selActive = false;
-        m_nibbleLow = false;
-        m_topLine = 0;
-        pDoc->UpdateAllViews(nullptr);  // 全ビュー再描画（キャレット等は各 OnUpdate で再計算）
-        UpdateScrollInfo();
-        UpdateCaret();
-    } else {
-        ::MessageBeep(0);              // 再読込失敗（原は文書クローズ。ここでは beep）
-    }
+    // 再読込に失敗すると文書は閉じられ、このビューも破棄済みになる（Issue #306）。
+    if (pDoc->RevertToSaved() != CStirlingDoc::RevertResult::kReloaded) { return; }
+    m_caretPos = 0;
+    m_selActive = false;
+    m_nibbleLow = false;
+    m_topLine = 0;
+    pDoc->UpdateAllViews(nullptr);  // 全ビュー再描画（キャレット等は各 OnUpdate で再計算）
+    UpdateScrollInfo();
+    UpdateCaret();
 }
 
 // --- 外部プロセスによるファイル変更の検知（原 CView::OnActivateView @0x00450d2c）---
@@ -3503,17 +3621,16 @@ LRESULT CStirlingView::OnCheckFileChanged(WPARAM /*wParam*/, LPARAM /*lParam*/) 
         break;
 
     case CFileChangedDlg::kReload:
-        if (pDoc->RevertToSaved()) {   // 編集内容を破棄してディスクから読み直す
-            m_caretPos = 0;
-            m_selActive = false;
-            m_nibbleLow = false;
-            m_topLine = 0;
-            pDoc->UpdateAllViews(nullptr);
-            UpdateScrollInfo();
-            UpdateCaret();
-        } else {
-            ::MessageBeep(0);
-        }
+        // 編集内容を破棄してディスクから読み直す。失敗すると文書は閉じられ、このビューも
+        //   破棄済みになるため、以後は文書にもメンバーにも触れない（Issue #306）。
+        if (pDoc->RevertToSaved() != CStirlingDoc::RevertResult::kReloaded) { return 0; }
+        m_caretPos = 0;
+        m_selActive = false;
+        m_nibbleLow = false;
+        m_topLine = 0;
+        pDoc->UpdateAllViews(nullptr);
+        UpdateScrollInfo();
+        UpdateCaret();
         pDoc->SyncDiskTime();
         break;
 
@@ -3861,6 +3978,7 @@ bool CStirlingView::WriteRangeToFile(const CString& path, stirling::FileOffset l
 
     std::vector<unsigned char> chunk;
     try {
+        const stirling::StdAllocScope allocScope;
         chunk.resize(kSaveChunkBytes);
     } catch (const std::bad_alloc&) {
         ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_EDIT_OUT_OF_MEMORY);
@@ -4492,6 +4610,7 @@ bool CStirlingView::WriteDumpImage(const CString& path, stirling::FileOffset sta
         if (bufEnd > endPos) { bufEnd = endPos; }
         const stirling::FileOffset bufLen = bufEnd - bufBase + 1;
         try {
+            const stirling::StdAllocScope allocScope;
             buf.resize(static_cast<size_t>(bufLen));
         } catch (const std::bad_alloc&) {
             failed = true; failMsg = IDS_ERR_EDIT_OUT_OF_MEMORY; break;
@@ -4642,16 +4761,18 @@ std::vector<unsigned char> CStirlingView::EncodeText(int charset, LPCWSTR text) 
     return out;
 }
 
-bool CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode) {
+CStirlingView::SearchOutcome CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, int rangeMode) {
     CStirlingDoc* pDoc = GetDocument();
-    if (pDoc == nullptr || pattern.Empty()) { return false; }
+    if (pDoc == nullptr || pattern.Empty()) { return SearchOutcome::kNotFound; }
     const stirling::FileOffset total = Total();
     const int plen = static_cast<int>(pattern.Size());
-    if (plen > total) { return false; }
+    if (plen > total) { return SearchOutcome::kNotFound; }
 
     // 検索範囲 [start, end] の決定。core SearchPattern:
     //   forward: start=一致先頭の下限, end=走査上限(0で全長)。backward: start=一致末尾側の上限, end=下限。
     stirling::FileOffset start = 0, end = 0;
+    bool capturedSel = false;    // この呼出で「選択範囲内」の対象範囲を確定したか
+    bool startedWhole = false;   // この呼出で「データ全体」の初回を始めたか
 
     if (rangeMode == 2) {
         // 選択範囲内: 最初の検索で対象範囲を確定し、以降は固定（一致で選択が変わっても不変）。
@@ -4659,6 +4780,7 @@ bool CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, 
             if (m_selActive) { m_findSelLo = SelLo(); m_findSelHi = SelHi(); }
             else { m_findSelLo = 0; m_findSelHi = total; }
             m_findSelCaptured = true;
+            capturedSel = true;
             // 初回: 前方=範囲先頭 / 後方=範囲末尾 から検索。
             if (forward) { start = m_findSelLo; end = m_findSelHi; }
             else         { start = m_findSelHi - 1; end = m_findSelLo; }
@@ -4675,6 +4797,7 @@ bool CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, 
     } else if (rangeMode == 1 && !m_wholeSearchStarted) {
         // データ全体の初回: 先頭(前方)/末尾(後方)から。以降はカーソル継続。
         m_wholeSearchStarted = true;
+        startedWhole = true;
         start = forward ? 0 : (total - 1);
         end = 0;
     } else {
@@ -4691,10 +4814,16 @@ bool CStirlingView::DoSearch(const stirling::HexPattern& pattern, bool forward, 
     const bool found = cur.SearchPattern(pattern.bytes.data(), plen, &foundPos, dir, start, end,
                                          pattern.WildcardData());
     if (!found) {
-        return false;   // 未発見は無反応（原は beep しない）
+        // 未発見は無反応（原は beep しない）。読み取れずに打ち切った場合は区別する（Issue #312）。
+        if (!cur.ReadFailed()) { return SearchOutcome::kNotFound; }
+        // 読めずに打ち切った初回は、範囲を調べ終えていない。復旧後に同じ条件で検索し直した
+        //   とき初回からやり直せるよう、この呼出で確定した初回状態を戻す。
+        if (capturedSel) { m_findSelCaptured = false; }
+        if (startedWhole) { m_wholeSearchStarted = false; }
+        return SearchOutcome::kReadFailed;
     }
     SelectMatch(foundPos, plen);
-    return true;
+    return SearchOutcome::kFound;
 }
 
 // 一致範囲 [pos, pos+size) を選択。キャレットは一致先頭に置き、次回検索を継続可能に。
@@ -4710,20 +4839,23 @@ void CStirlingView::SelectMatch(stirling::FileOffset pos, stirling::FileOffset s
 
 // 不一致検索の実体（原 FUN_0044b654 の不一致分岐 + コア FUN_0041d6bf）。
 //   範囲/セッション決定は DoSearch と同一（対象は長さ1のバイト value）。
-bool CStirlingView::DoMismatchSearch(unsigned char value, bool forward, int rangeMode) {
+CStirlingView::SearchOutcome CStirlingView::DoMismatchSearch(unsigned char value, bool forward, int rangeMode) {
     CStirlingDoc* pDoc = GetDocument();
-    if (pDoc == nullptr) { return false; }
+    if (pDoc == nullptr) { return SearchOutcome::kNotFound; }
     const stirling::FileOffset total = Total();
-    if (total <= 0) { return false; }
+    if (total <= 0) { return SearchOutcome::kNotFound; }
 
     // 検索範囲 [start, end] の決定（DoSearch と同一ロジック。plen=1 相当）。
     stirling::FileOffset start = 0, end = 0;
+    bool capturedSel = false;    // この呼出で「選択範囲内」の対象範囲を確定したか
+    bool startedWhole = false;   // この呼出で「データ全体」の初回を始めたか
     if (rangeMode == 2) {
         // 選択範囲内: 初回に対象範囲を確定し以降固定（一致で選択が変わっても不変）。
         if (!m_findSelCaptured) {
             if (m_selActive) { m_findSelLo = SelLo(); m_findSelHi = SelHi(); }
             else { m_findSelLo = 0; m_findSelHi = total; }
             m_findSelCaptured = true;
+            capturedSel = true;
             if (forward) { start = m_findSelLo; end = m_findSelHi; }
             else         { start = m_findSelHi - 1; end = m_findSelLo; }
         } else {
@@ -4737,6 +4869,7 @@ bool CStirlingView::DoMismatchSearch(unsigned char value, bool forward, int rang
         }
     } else if (rangeMode == 1 && !m_wholeSearchStarted) {
         m_wholeSearchStarted = true;
+        startedWhole = true;
         start = forward ? 0 : (total - 1);
         end = 0;
     } else {
@@ -4750,7 +4883,13 @@ bool CStirlingView::DoMismatchSearch(unsigned char value, bool forward, int rang
     const int dir = forward ? stirling::BlockCursor::kForward
                             : stirling::BlockCursor::kBackward;
     if (!cur.SearchMismatch(value, &foundPos, dir, start, end)) {
-        return false;   // 未発見は無反応（原は beep しない）
+        // 未発見は無反応（原は beep しない）。読み取れずに打ち切った場合は区別する（Issue #312）。
+        if (!cur.ReadFailed()) { return SearchOutcome::kNotFound; }
+        // 読めずに打ち切った初回は、範囲を調べ終えていない。復旧後に同じ条件で検索し直した
+        //   とき初回からやり直せるよう、この呼出で確定した初回状態を戻す。
+        if (capturedSel) { m_findSelCaptured = false; }
+        if (startedWhole) { m_wholeSearchStarted = false; }
+        return SearchOutcome::kReadFailed;
     }
     const stirling::FileOffset outPos = foundPos;
     // 不一致箇所 [outPos, outPos+1) を選択。キャレットは不一致先頭に置き継続可能に。
@@ -4761,7 +4900,7 @@ bool CStirlingView::DoMismatchSearch(unsigned char value, bool forward, int rang
     CenterCaretRow();
     Invalidate(FALSE);
     UpdateCaret();
-    return true;
+    return SearchOutcome::kFound;
 }
 
 // キャレット行が可視範囲外なら、その行が縦中央に来るようスクロール（検索ジャンプ用）。
@@ -4800,8 +4939,12 @@ void CStirlingView::FindWithPattern(const stirling::HexPattern& pattern,
 }
 
 // 検索不一致時のフィードバック（原 FUN_0044b654: view+0x264 有効=メッセージ / 無効=ビープ）。
-void CStirlingView::NotifySearchResult(bool found) {
-    if (found) { return; }
+void CStirlingView::NotifySearchResult(SearchOutcome outcome) {
+    if (outcome == SearchOutcome::kFound) { return; }
+    if (outcome == SearchOutcome::kReadFailed) {
+        ShowSearchReadFailure();   // 「見つからない」と誤認させない（設定に依らず通知）
+        return;
+    }
     if (theApp.AppSettings().searchNotFoundMsg) {
         wchar_t msg[128] = {0};
         ::LoadStringW(AfxGetResourceHandle(), IDS_SEARCH_NOTFOUND, msg, 128);   // "見つかりませんでした"
@@ -4809,6 +4952,10 @@ void CStirlingView::NotifySearchResult(bool found) {
     } else {
         ::MessageBeep(0);
     }
+}
+
+void CStirlingView::ShowSearchReadFailure() {
+    ui::MsgBoxRes(GetSafeHwnd(), IDS_ERR_RANGE_READ_FAILED);
 }
 
 // 不一致検索（原 0x8032）: 直近条件を記録し、条件変更時は全体検索フラグをリセット。
@@ -4910,7 +5057,8 @@ void CStirlingView::OnFindMismatch() {
 // [lo,hi) 内の search を repl で前方一括置換（原 FUN_0044c0d1）。返り値=置換件数。
 int CStirlingView::ReplaceAll(const stirling::HexPattern& search,
                               const std::vector<unsigned char>& repl,
-                              stirling::FileOffset lo, stirling::FileOffset hi) {
+                              stirling::FileOffset lo, stirling::FileOffset hi, bool* readFailed) {
+    *readFailed = false;
     CStirlingDoc* pDoc = GetDocument();
     if (pDoc == nullptr || search.Empty()) { return 0; }
     const int slen = static_cast<int>(search.Size());
@@ -4926,6 +5074,7 @@ int CStirlingView::ReplaceAll(const stirling::HexPattern& search,
         if (!cur.SearchPattern(search.bytes.data(), slen, &foundPos,
                                stirling::BlockCursor::kForward, p, endBound,
                                search.WildcardData())) {
+            *readFailed = cur.ReadFailed();   // 読めずに打ち切った（Issue #312）
             break;
         }
         const stirling::FileOffset outPos = foundPos;
@@ -4975,18 +5124,22 @@ void CStirlingView::OnEditReplace() {
     }
 
     if (act == CReplaceDlg::kAll) {
-        const int n = ReplaceAll(spattern, rbytes, rlo, rhi);
+        bool readFailed = false;
+        const int n = ReplaceAll(spattern, rbytes, rlo, rhi, &readFailed);
         CStringW msg;
         msg.Format(ui::LoadW(IDS_REPLACE_COUNT), n);   // "%d個置換しました"
         ui::MsgBox(GetSafeHwnd(), msg, MB_OK | MB_ICONINFORMATION);
+        if (readFailed) { ShowSearchReadFailure(); }   // 範囲の残りは調べられていない
         return;
     }
 
     // 対話置換（次検索=前方 / 前検索=後方）。一致→確認→実行/スキップ/一括/キャンセルのループ。
     const bool forward = (act == CReplaceDlg::kNext);
     for (;;) {
-        if (!DoSearch(spattern, forward, range)) {
-            break;   // これ以上一致が無い
+        const SearchOutcome outcome = DoSearch(spattern, forward, range);
+        if (outcome != SearchOutcome::kFound) {
+            if (outcome == SearchOutcome::kReadFailed) { ShowSearchReadFailure(); }
+            break;   // これ以上一致が無い（または読み取れずに打ち切った）
         }
         CReplaceConfirmDlg confirm(this);
         const int r = static_cast<int>(confirm.DoModal());
@@ -5005,10 +5158,12 @@ void CStirlingView::OnEditReplace() {
             // 何もしない（キャレットは一致先頭。次の DoSearch が先へ進む）。
         } else if (r == CReplaceConfirmDlg::kAll) {
             // 残りを一括置換（現在位置から範囲終端まで、前方）。
-            const int n = ReplaceAll(spattern, rbytes, m_caretPos, rhi);
+            bool readFailed = false;
+            const int n = ReplaceAll(spattern, rbytes, m_caretPos, rhi, &readFailed);
             CStringW msg;   // 原 1017「%d個置換しました」（wsprintf は長さ制限なしのため不使用）
             msg.Format(ui::LoadW(IDS_REPLACE_COUNT), n);
             ui::MsgBox(GetSafeHwnd(), msg, MB_OK | MB_ICONINFORMATION);
+            if (readFailed) { ShowSearchReadFailure(); }
             break;
         } else {
             break;   // キャンセル/閉じる

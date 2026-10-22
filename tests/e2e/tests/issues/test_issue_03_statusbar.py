@@ -25,7 +25,6 @@ DETAIL_ITEMS = [
 def _detail_panes(drv: StirlingDriver, address: str) -> dict:
     """Jump to `address` and read the detail panes as {"B": "0x12", "W": ..., ...}."""
     drv.jump_to_address(address, is_hex=True)
-    time.sleep(0.5)
     panes = drv.get_all_statusbar_text()
     values = {}
     for text in panes:
@@ -60,7 +59,6 @@ class TestIssue03StatusBar:
         with stirling_settings(show_status_bar=True):
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 sb_info = drv.get_statusbar_info()
                 assert sb_info is not None, "msctls_statusbar32 window not found"
@@ -77,7 +75,6 @@ class TestIssue03StatusBar:
         with stirling_settings(show_status_bar=False):
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 sb_info = drv.get_statusbar_info()
                 if sb_info is not None:
@@ -93,7 +90,6 @@ class TestIssue03StatusBar:
         with stirling_settings(show_status_bar=True):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 sb_info = drv.get_statusbar_info()
                 assert sb_info is not None, "msctls_statusbar32 window not found"
@@ -110,7 +106,6 @@ class TestIssue03StatusBar:
         with stirling_settings(show_status_bar=False):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 sb_info = drv.get_statusbar_info()
                 if sb_info is not None:
@@ -150,7 +145,6 @@ class TestIssue03StatusBar:
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
                 drv.focus_view()
-                time.sleep(0.4)
                 if byte_order == "big":
                     drv.set_byteorder_big()
                 else:
@@ -199,7 +193,6 @@ class TestIssue03StatusBar:
                 with StirlingDriver(ported_exe_path) as drv:
                     drv.start(test_file)
                     drv.focus_view()
-                    time.sleep(0.4)
                     if byte_order == "big":
                         drv.set_byteorder_big()
                     else:
@@ -249,7 +242,6 @@ class TestIssue03StatusBar:
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
                 drv.focus_view()
-                time.sleep(0.4)
                 if byte_order == "big":
                     drv.set_byteorder_big()
                 else:
@@ -286,9 +278,7 @@ class TestIssue03StatusBar:
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
                 drv.focus_view()
-                time.sleep(0.4)
                 drv.set_byteorder_little()
-                time.sleep(0.4)
 
                 four_left = _detail_panes(drv, "1C")
                 assert four_left["B"] == "0x9A", f"@0x1C: {four_left}"

@@ -127,11 +127,9 @@ class TestIssue98CharsetUtf8:
             time.sleep(0.3)
 
             drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.5)
             before = _statusbar_texts(drv)
 
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.5)
             after = _statusbar_texts(drv)
 
         assert "SHIFT-JIS" in before, "status bar before: %r" % (before,)
@@ -148,11 +146,9 @@ class TestIssue98CharsetUtf8:
             time.sleep(0.3)
 
             drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.6)
             sjis_px = drv.capture_view_pixels()
 
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.6)
             utf8_px = drv.capture_view_pixels()
 
         assert sjis_px and utf8_px, "could not capture the view"
@@ -170,7 +166,6 @@ class TestIssue98CharsetUtf8:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.5)
 
             _find_text_from_top(drv, "한국어")
             pos = _caret_address(drv)
@@ -188,11 +183,9 @@ class TestIssue98CharsetUtf8:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.5)
             drv.press_tab()          # 文字ペインへ
             time.sleep(0.2)
             drv.type_ime_chars("あ")
-            time.sleep(0.3)
             drv.save_as_via_dialog(out_file)
 
         assert out_file.read_bytes() == "あ".encode("utf-8"), out_file.read_bytes().hex()
@@ -208,7 +201,6 @@ class TestIssue98CharsetUtf8:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.5)
             drv.save_dump_via_dialog(dump_file)
 
         raw = dump_file.read_bytes()

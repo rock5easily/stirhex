@@ -25,10 +25,13 @@ using FileOffset = std::int64_t;
 //   Win32 では size_t が 32bit のため、4GB 超をそのままキャストすると下位32bitへ
 //   黙って切り捨てられ、確保した領域より大きな読み書きでヒープを破壊しうる。
 //   FileOffset をバッファ長へ落とす箇所は必ずこの検査を通すこと。
+// 上限は size_t ではなく ptrdiff_t の最大値（std::vector の max_size() と同じ）。
+//   Win32 で 2GB〜4GB を resize すると bad_alloc ではなく length_error になり、
+//   bad_alloc だけを捕捉する呼出側を素通りして異常終了していた（Issue #306）。
 inline bool FitsInBuffer(FileOffset n) {
     if (n < 0) { return false; }
     return static_cast<unsigned long long>(n) <=
-           static_cast<unsigned long long>((std::numeric_limits<size_t>::max)());
+           static_cast<unsigned long long>((std::numeric_limits<std::ptrdiff_t>::max)());
 }
 
 }  // namespace stirling

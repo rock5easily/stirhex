@@ -30,6 +30,9 @@ enum class FileIoStatus {
     kReadFailed,    // 読取失敗
     kWriteFailed,   // 書込失敗（ディスク不足を含む）
     kOutOfMemory,   // ブロック確保に失敗（大容量ファイル）
+    // 遅延読み込み（Issue #300）で、保存は済んだが保存先を読み出し元として開き直せなかった。
+    //   文書の参照ノードはもう読めない（呼出側は文書を開き直すよう利用者へ知らせる）。
+    kReopenFailed,
 };
 
 // I/O の結果。失敗理由を握りつぶさず呼出側へ返す。
@@ -43,6 +46,14 @@ struct FileIoResult {
     // その一時ファイルのパス（それ以外は空。Issue #186）。呼出側は失敗メッセージへ併記して
     // 利用者へ知らせる。詳細は StreamFileWriter::Commit のコメントを参照。
     std::wstring  keptTempPath;
+    // 上書き保存（Issue #300）の途中で失敗し、出力先へ一部だけ書き込まれた可能性があるとき true。
+    bool          partialInPlace = false;
+    // 遅延読み込み（Issue #300）の保存が失敗し、文書の読み出し元（元ファイルのハンドル）を
+    //   開き直せなかったとき true。文書の参照ノードはもう読めない（呼出側は開き直しを促す）。
+    bool          sourceLost = false;
+    // 遅延読み込みの別名保存は成功したが、保存先を読み出し元として開き直せなかったとき true。
+    //   文書は保存前のファイルから読み続け、そのファイルのロックも保持したままになる。
+    bool          sourceNotSwitched = false;
 
     bool Ok() const { return status == FileIoStatus::kOk; }
 };
@@ -80,6 +91,15 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
                                 FileShareMode share = FileShareMode::kDenyNone,
                                 void** outKeepHandle = nullptr);
 
+// 遅延読み込み（Issue #300。移植独自）: ファイルを読み込まず、元ファイルの区間を指す
+//   参照ノード（最大 1GB ずつ）だけを作る。開いたハンドルは FileSource として list が保持し
+//   （share の共有モードのまま。これが排他制御のロックも兼ねる）、参照ノードの読み出しに使う。
+//   編集した位置だけが 16KB ブロックへ読み込まれる（BlockCursor の実体化）。
+//   空ファイルは LoadFileIntoBlocks と同じく空の 16KB ブロック 1 個。失敗時は list を空にする。
+//   share に kDenyNone を渡すと他プロセスが内容を書き換えうる（閲覧モード用）。
+FileIoResult LoadFileLazy(BlockList& list, const wchar_t* path,
+                          FileShareMode share = FileShareMode::kDenyWrite);
+
 // list の各ブロックの usedLen バイトを先頭から順次ファイルへ書き出す
 //   （原 SaveFile_WriteLoop の本質: 全ブロックを head→tail で Write）。
 //   書込先は StreamFileWriter 経由の一時ファイルで、明示フラッシュ後に出力先へ置換する
@@ -87,7 +107,21 @@ FileIoResult LoadFileIntoBlocks(BlockList& list, const wchar_t* path,
 //   変更されない。既存の出力先へ置換できない場合（読み取り専用・権限・使用中）は、書き
 //   始める前に kOpenFailed を返す。一時ファイルは出力先と同じディレクトリに作るため、
 //   保存中は「元のファイル + 新しい内容」の分のディスク容量が必要になる。
-FileIoResult SaveBlocksToFile(const BlockList& list, const wchar_t* path);
+// 遅延読み込みの list（Issue #300）:
+//   - 参照ノードは元ファイルから読み出して書く。
+//   - 元ファイル自身への保存で、長さが変わらず挿入・削除でノードの位置がずれていなければ、
+//     一時ファイルを使わずに実体化したブロックだけを元ファイルへ書き戻す（上書き保存）。
+//     書込権付きで一時的に開き直すため、その間だけ他プロセスの読み取りと競合しうる。
+//     途中で失敗すると一部だけ書き込まれうる（FileIoResult::partialInPlace）。
+//   - それ以外は一時ファイル方式。元ファイル自身へ置換する場合は置換の直前に元ファイルを
+//     閉じる。成功したら保存先を同じ共有モードで開き直し、list を参照ノードだけの構造へ
+//     作り直す（別名保存では元ファイルのロックが外れ、保存先がロックされる）。
+FileIoResult SaveBlocksToFile(BlockList& list, const wchar_t* path);
+
+// ファイル src を dst へ複写する（保存前バックアップ用。既存の dst は置き換える）。
+//   通常は CopyFileW。遅延読み込み（Issue #300）で list が src を読書禁止で開いたまま
+//   のように CopyFileW が共有違反になる場合は、list の読み出し元ハンドルから複写する。
+FileIoResult CopyFileForBackup(const BlockList& list, const wchar_t* src, const wchar_t* dst);
 
 // 全ブロックの usedLen 合計（原 RecalcTotalLength = doc+0x84 更新）。
 // 原は 32bit だが 2GB 超対応のため FileOffset(64bit)。

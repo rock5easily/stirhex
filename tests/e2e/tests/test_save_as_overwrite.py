@@ -40,7 +40,6 @@ class TestSaveAsOverwrite:
             safe_set_focus(drv.hwnd)
             time.sleep(0.2)
             drv.type_hex_chars("10")
-            time.sleep(0.2)
             assert _is_dirty(drv)
 
             saved = drv.save_as_via_dialog(destination, remove_existing=False, overwrite="no")
@@ -65,7 +64,6 @@ class TestSaveAsOverwrite:
             safe_set_focus(drv.hwnd)
             time.sleep(0.2)
             drv.type_hex_chars("10")
-            time.sleep(0.2)
 
             saved = drv.save_as_via_dialog(destination, remove_existing=False, overwrite="yes")
             assert saved is True

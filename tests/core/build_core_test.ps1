@@ -36,6 +36,8 @@ $srcTest = Join-Path $root "core_test.cpp"
 $srcList = Join-Path $root "..\..\StirHex\src\core\BlockList.cpp"
 $srcCur  = Join-Path $root "..\..\StirHex\src\core\BlockCursor.cpp"
 $srcIO   = Join-Path $root "..\..\StirHex\src\core\BlockFileIO.cpp"
+# Lazy-load source file with a page cache (Issue #300)
+$srcFileSource = Join-Path $root "..\..\StirHex\src\core\FileSource.cpp"
 # Temp-file-then-replace streaming writer for range/dump save (Issue #155)
 $srcStream = Join-Path $root "..\..\StirHex\src\core\StreamFileWriter.cpp"
 # MFC/Win32 non-dependent settings codec (64-bit setting value format, Issue #22)
@@ -63,12 +65,14 @@ $srcChecksum = Join-Path $root "..\..\StirHex\src\core\Checksum.cpp"
 $srcHexPattern = Join-Path $root "..\..\StirHex\src\core\HexPattern.cpp"
 # Incremental find-all search (Issue #236)
 $srcFindAll = Join-Path $root "..\..\StirHex\src\core\FindAll.cpp"
+# Incremental compare of two documents (Issue #307)
+$srcDiffScan = Join-Path $root "..\..\StirHex\src\core\DiffScan.cpp"
 $srcBinaryPatch = Join-Path $root "..\..\StirHex\src\core\BinaryPatch.cpp"
 $srcInc  = Join-Path $root "..\..\StirHex\src"
 # ClipboardUtil.h (header only, Issue #47) needs the clipboard APIs from user32.lib
 
 Write-Host "== build ($Arch) =="
-& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DSTIRLING_TEST_ALLOC_HOOK /DSTIRLING_TEST_IO_HOOK /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcStream" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" "$srcUtf16Text" "$srcChecksum" "$srcHexPattern" "$srcFindAll" "$srcBinaryPatch" /link bcrypt.lib user32.lib shell32.lib ole32.lib advapi32.lib
+& cl /nologo /utf-8 /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DSTIRLING_TEST_ALLOC_HOOK /DSTIRLING_TEST_IO_HOOK /I "$srcInc" /Fe:"$exe" /Fo:"$outDir\" "$srcTest" "$srcList" "$srcCur" "$srcIO" "$srcFileSource" "$srcStream" "$srcCodec" "$srcMigrate" "$srcStore" "$srcSettingsFile" "$srcMarkFile" "$srcCp932" "$srcCharConv" "$srcStructDef" "$srcHexText" "$srcUtf8Text" "$srcUtf16Text" "$srcChecksum" "$srcHexPattern" "$srcFindAll" "$srcDiffScan" "$srcBinaryPatch" /link bcrypt.lib user32.lib shell32.lib ole32.lib advapi32.lib
 if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
 Write-Host "== run =="

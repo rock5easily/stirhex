@@ -33,7 +33,11 @@ public:
     //   出力先が既存のときは、書き始める前に置換可否（読み取り専用属性・権限・共有違反）を
     //   確認し、駄目なら kOpenFailed を返す。GB 単位を書き終えた後で権限不足に気付く事態を
     //   避けるため（Issue #170）。ディレクトリを指定した場合も kOpenFailed。
-    FileIoResult Open(const wchar_t* path);
+    // probeTarget=false は、出力先を開いて確かめる手順だけを省く（属性の確認は行う）。
+    //   遅延読み込み（Issue #300）で出力先を自分が書込禁止の共有モードで開いたまま保存する
+    //   とき、自分のハンドルのせいで確認が必ず共有違反になるため。置換は呼出側がその
+    //   ハンドルを閉じてから Commit で行う。
+    FileIoResult Open(const wchar_t* path, bool probeTarget = true);
 
     bool IsOpen() const { return handle_ != nullptr; }
 

@@ -47,7 +47,6 @@ class TestIssue49JapanesePath:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(src)
-            time.sleep(0.5)
 
             titles = drv.get_mdi_child_titles()
             assert any(JP_NAME in t for t in titles), (
@@ -71,7 +70,6 @@ class TestIssue49JapanesePath:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start()
-            time.sleep(0.5)
             drv.open_file_via_dialog(src)
 
             titles = drv.get_mdi_child_titles()
@@ -97,7 +95,6 @@ class TestIssue49JapanesePath:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(src)
-            time.sleep(0.5)
 
             titles = drv.get_mdi_child_titles()
             assert any(JP_NAME in t for t in titles), (

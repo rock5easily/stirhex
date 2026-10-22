@@ -78,6 +78,11 @@ protected:
     // 相違一覧のアプリ内最小化プロキシを、MDIクライアント領域の変化へ追従させる（Issue #123）。
     virtual void RecalcLayout(BOOL bNotify = TRUE) override;
 
+    // メニュー・アクセラレータのコマンドはここを通って各ビューへ配送される。捕捉されなかった
+    //   標準の確保失敗（std::bad_alloc / length_error）を MFC のメモリ不足表示へ変換する
+    //   （Issue #306。app/AllocFailure.h）。
+    virtual LRESULT WindowProc(UINT message, WPARAM wParam, LPARAM lParam) override;
+
     afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
     afx_msg void OnDestroy();
     afx_msg BOOL OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct);

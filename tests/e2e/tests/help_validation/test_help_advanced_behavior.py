@@ -296,7 +296,6 @@ class TestHelpAdvancedBehavior:
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(files[0])
             drv.post_command(ID_SYNC_SCROLL)
-            time.sleep(0.4)
             assert not _dialog_exists(drv, "シンクロスクロール")
 
             drv.open_file_via_dialog(files[1])

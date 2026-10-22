@@ -78,6 +78,20 @@ CARRY_EUC_DATA = bytes([
 TRUNCATED_LEAD_DATA = bytes([0x41, 0x42, 0x82, 0xA0, 0x43, 0x82])
 
 
+def _restore_sjis(drv: StirlingDriver):
+    """Leave the persisted charset at the application default (SJIS)."""
+    drv.post_command(ID_CHARSET_SJIS)
+
+
+def _range_dump(charset_cmd: int, start_addr: str, end_addr: str):
+    """Action that selects start..end in the given charset and dumps the selection."""
+    def action(drv: StirlingDriver, out_path: Path):
+        drv.post_command(charset_cmd)
+        drv.select_range_dialog(start_addr=start_addr, end_addr=end_addr, is_hex=True)
+        drv.save_dump_via_dialog(out_path)
+    return action
+
+
 class TestIssue42CharPane:
     """Issue #42: the char pane keeps rendering the edited bytes as CP932.
 
@@ -89,37 +103,46 @@ class TestIssue42CharPane:
     since their output is pixels rather than bytes.
     """
 
+    @staticmethod
+    def _assert_all_cases_match(results: dict[str, tuple[bytes, bytes]], what: str):
+        """Every case produced output, and the port matched the original in all of them.
+
+        The cases share one launch (Issue #290), so every mismatch is listed at once
+        instead of stopping at the first.
+        """
+        empty = [case_id for case_id, (orig, _port) in results.items() if not orig]
+        assert not empty, f"Original {what} output is empty for: {', '.join(empty)}"
+        differing = [case_id for case_id, (orig, port) in results.items() if orig != port]
+        assert not differing, (
+            f"Ported {what} does not match Original Stirling for: {', '.join(differing)}"
+        )
+
     @pytest.mark.golden
-    @pytest.mark.parametrize(
-        "charset_cmd",
-        [
-            pytest.param(32851, id="ascii"),
-            pytest.param(32852, id="sjis"),
-            pytest.param(32853, id="euc"),
+    def test_golden_dump_char_pane_per_charset(self, run_both_stirling_cases):
+        """Dump the whole document in each character set and compare byte for byte."""
+        charsets = {
+            "ascii": 32851,
+            "sjis": 32852,
+            "euc": 32853,
             # Unicode (32854) is intentionally not golden any more: since Issue #173 the
             #   port renders UTF-16 without going through CP932, so characters the
             #   original prints as '.' now show their real glyph. The port's own output
             #   for the very same data is pinned by
             #   test_issue_173_charset_unicode.py::test_dump_matches_char_pane_sample.
-            pytest.param(ID_CHARSET_EBCDIC, id="ebcdic"),
-            pytest.param(ID_CHARSET_EBCIDK, id="ebcidk"),
-        ],
-    )
-    def test_golden_dump_char_pane_per_charset(self, run_both_stirling, charset_cmd):
-        """Dump the whole document in each character set and compare byte for byte."""
+            "ebcdic": ID_CHARSET_EBCDIC,
+            "ebcidk": ID_CHARSET_EBCIDK,
+        }
 
-        def action(drv: StirlingDriver, out_path: Path):
-            drv.post_command(charset_cmd)
-            time.sleep(0.3)
-            drv.save_dump_via_dialog(out_path)
-            # Leave the persisted charset at the application default (SJIS).
-            drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.2)
+        def dump_in(charset_cmd):
+            def action(drv: StirlingDriver, out_path: Path):
+                drv.post_command(charset_cmd)
+                drv.save_dump_via_dialog(out_path)
+            return action
 
-        orig_out, port_out = run_both_stirling(action, CHAR_PANE_DATA)
+        cases = {case_id: dump_in(cmd) for case_id, cmd in charsets.items()}
+        results = run_both_stirling_cases(cases, CHAR_PANE_DATA, cleanup=_restore_sjis)
 
-        assert len(orig_out) > 0, "Original dump output is empty!"
-        assert orig_out == port_out, "Ported char pane dump does not match Original Stirling!"
+        self._assert_all_cases_match(results, "char pane dump")
 
     @pytest.mark.golden
     def test_golden_dump_truncated_lead_byte(self, run_both_stirling):
@@ -127,7 +150,6 @@ class TestIssue42CharPane:
 
         def action(drv: StirlingDriver, out_path: Path):
             drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.3)
             drv.save_dump_via_dialog(out_path)
 
         orig_out, port_out = run_both_stirling(action, TRUNCATED_LEAD_DATA)
@@ -136,67 +158,63 @@ class TestIssue42CharPane:
         assert orig_out == port_out, "Ported truncated lead byte dump does not match Original!"
 
     @pytest.mark.golden
-    @pytest.mark.parametrize(
-        "charset_cmd,start_addr",
-        [
-            # 0x10 is the trail byte of the pair starting at 0x0F (row aligned).
-            pytest.param(32852, "10", id="sjis-row-start-trail"),
-            # 0x04 is the trail byte of the pair at 0x03 (mid row, needs padding too).
-            pytest.param(32852, "04", id="sjis-mid-row-trail"),
-            # 0x21 is the trail byte of the EUC-JP pair at 0x20.
-            pytest.param(32853, "21", id="euc-trail"),
-            # The Unicode odd-offset case (0x31) left this golden list with Issue #173
-            #   for the same reason as above. The alignment it checked is pinned by
-            #   test_issue_173_charset_unicode.py::test_dump_range_from_odd_offset.
-        ],
-    )
-    def test_golden_dump_range_starting_mid_character(
-        self, run_both_stirling, charset_cmd, start_addr
-    ):
+    def test_golden_dump_range_starting_mid_character(self, run_both_stirling_cases):
         """Dump a range whose first byte is in the middle of a character.
 
         This is the InitialCarry path: the leading partial byte is replaced by a
         single blank cell and consumed, so the char pane stays aligned with the
         hex column. With a selection present the dump dialog defaults to it.
         """
+        cases = {
+            # 0x10 is the trail byte of the pair starting at 0x0F (row aligned).
+            "sjis-row-start-trail": _range_dump(32852, "10", "3F"),
+            # 0x04 is the trail byte of the pair at 0x03 (mid row, needs padding too).
+            "sjis-mid-row-trail": _range_dump(32852, "04", "3F"),
+            # 0x21 is the trail byte of the EUC-JP pair at 0x20.
+            "euc-trail": _range_dump(32853, "21", "3F"),
+            # The Unicode odd-offset case (0x31) left this golden list with Issue #173
+            #   for the same reason as above. The alignment it checked is pinned by
+            #   test_issue_173_charset_unicode.py::test_dump_range_from_odd_offset.
+        }
+        results = run_both_stirling_cases(cases, CHAR_PANE_DATA, cleanup=_restore_sjis)
 
-        def action(drv: StirlingDriver, out_path: Path):
-            drv.post_command(charset_cmd)
-            time.sleep(0.3)
-            drv.select_range_dialog(start_addr=start_addr, end_addr="3F", is_hex=True)
-            time.sleep(0.3)
-            drv.save_dump_via_dialog(out_path)
-            drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.2)
-
-        orig_out, port_out = run_both_stirling(action, CHAR_PANE_DATA)
-
-        assert len(orig_out) > 0, "Original dump output is empty!"
-        assert orig_out == port_out, "Ported range dump does not match Original Stirling!"
+        self._assert_all_cases_match(results, "range dump")
 
     @pytest.mark.golden
     @pytest.mark.parametrize(
-        "data,charset_cmd,start_addr",
+        "data,charset_cmd,start_addrs",
         [
-            # SJIS: byte after a lead byte, outside the valid trail range
-            pytest.param(CARRY_SJIS_DATA, 32852, "02", id="sjis-trail-below-range"),
-            pytest.param(CARRY_SJIS_DATA, 32852, "05", id="sjis-trail-above-range"),
-            pytest.param(CARRY_SJIS_DATA, 32852, "0B", id="sjis-trail-7f-excluded"),
-            # SJIS: the valid trail range ends (must shift the row)
-            pytest.param(CARRY_SJIS_DATA, 32852, "08", id="sjis-trail-lowest"),
-            pytest.param(CARRY_SJIS_DATA, 32852, "0E", id="sjis-trail-valid"),
-            # EUC-JP: main plane lead followed by a byte outside 0xA1-0xFE
-            pytest.param(CARRY_EUC_DATA, 32853, "01", id="euc-non-main-plane-trail"),
-            pytest.param(CARRY_EUC_DATA, 32853, "04", id="euc-trail-above-range"),
-            # EUC-JP: 0x8E single shift followed by a byte outside 0xA1-0xDF
-            pytest.param(CARRY_EUC_DATA, 32853, "07", id="euc-shift-bad-trail"),
-            pytest.param(CARRY_EUC_DATA, 32853, "09", id="euc-shift-then-shift"),
-            # EUC-JP: 0x8E single shift with a valid kana trail (must shift the row)
-            pytest.param(CARRY_EUC_DATA, 32853, "0A", id="euc-shift-valid-trail"),
+            pytest.param(
+                CARRY_SJIS_DATA, 32852,
+                {
+                    # byte after a lead byte, outside the valid trail range
+                    "sjis-trail-below-range": "02",
+                    "sjis-trail-above-range": "05",
+                    "sjis-trail-7f-excluded": "0B",
+                    # the valid trail range ends (must shift the row)
+                    "sjis-trail-lowest": "08",
+                    "sjis-trail-valid": "0E",
+                },
+                id="sjis",
+            ),
+            pytest.param(
+                CARRY_EUC_DATA, 32853,
+                {
+                    # main plane lead followed by a byte outside 0xA1-0xFE
+                    "euc-non-main-plane-trail": "01",
+                    "euc-trail-above-range": "04",
+                    # 0x8E single shift followed by a byte outside 0xA1-0xDF
+                    "euc-shift-bad-trail": "07",
+                    "euc-shift-then-shift": "09",
+                    # 0x8E single shift with a valid kana trail (must shift the row)
+                    "euc-shift-valid-trail": "0A",
+                },
+                id="euc",
+            ),
         ],
     )
     def test_golden_dump_range_starting_on_invalid_trail(
-        self, run_both_stirling, data, charset_cmd, start_addr
+        self, run_both_stirling_cases, data, charset_cmd, start_addrs
     ):
         """The window start only counts as "mid character" if the pair is valid.
 
@@ -205,20 +223,11 @@ class TestIssue42CharPane:
         the byte at the window start is a cell of its own and the row must not
         be shifted. Getting this wrong moves every cell of the first row.
         """
+        cases = {case_id: _range_dump(charset_cmd, start_addr, "1F")
+                 for case_id, start_addr in start_addrs.items()}
+        results = run_both_stirling_cases(cases, data, cleanup=_restore_sjis)
 
-        def action(drv: StirlingDriver, out_path: Path):
-            drv.post_command(charset_cmd)
-            time.sleep(0.3)
-            drv.select_range_dialog(start_addr=start_addr, end_addr="1F", is_hex=True)
-            time.sleep(0.3)
-            drv.save_dump_via_dialog(out_path)
-            drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.2)
-
-        orig_out, port_out = run_both_stirling(action, data)
-
-        assert len(orig_out) > 0, "Original dump output is empty!"
-        assert orig_out == port_out, "Ported range dump does not match Original Stirling!"
+        self._assert_all_cases_match(results, "range dump")
 
     @pytest.mark.golden
     @pytest.mark.parametrize(
@@ -241,7 +250,6 @@ class TestIssue42CharPane:
 
         def action(drv: StirlingDriver, out_path: Path):
             drv.post_command(charset_cmd)
-            time.sleep(0.3)
             drv.replace_all_dialog(
                 search_str="あ",
                 replace_str="漢",
@@ -251,7 +259,6 @@ class TestIssue42CharPane:
             time.sleep(0.3)
             drv.save_as_via_dialog(out_path)
             drv.post_command(ID_CHARSET_SJIS)
-            time.sleep(0.2)
 
         orig_out, port_out = run_both_stirling(action, data)
 

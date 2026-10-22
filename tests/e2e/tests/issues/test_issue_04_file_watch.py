@@ -33,7 +33,6 @@ class TestIssue04FileWatch:
         with stirling_settings(file_exclusive_mode=0):
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 # Modify file on disk externally (wait > 1s for filesystem timestamp granularity)
                 time.sleep(1.2)
@@ -81,7 +80,6 @@ class TestIssue04FileWatch:
         with stirling_settings(file_exclusive_mode=0):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 # Modify file on disk externally
                 time.sleep(1.2)
@@ -134,7 +132,6 @@ class TestIssue04FileWatch:
         with stirling_settings(file_exclusive_mode=0):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
-                time.sleep(0.5)
 
                 time.sleep(1.2)
                 test_file.write_bytes(b"EXTERNALLY_MODIFIED_PORTED_IGNORE_XYZ")
@@ -194,7 +191,6 @@ class TestIssue04FileWatch:
 
                 # Unsaved edit in the editor ...
                 drv.type_hex_chars("11")
-                time.sleep(0.3)
                 # ... and a different change on disk.
                 time.sleep(1.2)
                 test_file.write_bytes(EXTERNAL_CONTENT)
@@ -227,7 +223,6 @@ class TestIssue04FileWatch:
                 time.sleep(0.4)
 
                 drv.type_hex_chars("11")
-                time.sleep(0.3)
                 time.sleep(1.2)
                 test_file.write_bytes(EXTERNAL_CONTENT)
 
@@ -256,7 +251,6 @@ class TestIssue04FileWatch:
                 time.sleep(0.4)
 
                 drv.type_hex_chars("11")
-                time.sleep(0.3)
                 time.sleep(1.2)
                 test_file.write_bytes(EXTERNAL_CONTENT)
 
@@ -290,7 +284,6 @@ class TestIssue04FileWatch:
                 time.sleep(0.4)
 
                 drv.type_hex_chars("11")
-                time.sleep(0.3)
                 time.sleep(1.2)
                 test_file.write_bytes(EXTERNAL_CONTENT)
 

@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
 
 namespace stirling {
 namespace {
@@ -326,7 +327,7 @@ BinaryPatchResult ComputeCrc(const DiskFile& file, const BinaryPatchOptions& opt
                              std::uint32_t& out) {
     Crc32 crc;
     std::vector<unsigned char> buffer;
-    try { buffer.resize(kIoChunk); }
+    try { const stirling::StdAllocScope allocScope; buffer.resize(kIoChunk); }
     catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
     for (FileOffset offset = 0; offset < file.Size();) {
         const size_t count = static_cast<size_t>((std::min)(
@@ -537,7 +538,7 @@ bool PublishTemp(const std::wstring& temp, const wchar_t* target,
         return false;
     }
     std::vector<unsigned char> buffer;
-    try { buffer.resize(kIoChunk); } catch (const std::bad_alloc&) {
+    try { const stirling::StdAllocScope allocScope; buffer.resize(kIoChunk); } catch (const std::bad_alloc&) {
         writer.Abort();
         result = Result(BinaryPatchStatus::kOutOfMemory);
         return false;
@@ -715,7 +716,7 @@ bool EmitIpsSegment(PatchSink& sink, const DiskFile& target,
         // adds, and it lands at 0x454f45 + 0xffff.  The check stays inside the
         // loop so the rule still holds if a caller passes a longer segment.
         if (currentOffset == 0x454f46) {
-            try { adjusted.resize(currentLength + 1); }
+            try { const stirling::StdAllocScope allocScope; adjusted.resize(currentLength + 1); }
             catch (const std::bad_alloc&) {
                 failure = BinaryPatchStatus::kOutOfMemory;
                 failureError = ERROR_NOT_ENOUGH_MEMORY;
@@ -941,6 +942,7 @@ BinaryPatchResult BuildHashIndex(const DiskFile& source, const BinaryPatchOption
     }
     index.filterShift = 32 - filterBitsLog2;
     try {
+        const stirling::StdAllocScope allocScope;
         entries.reserve(maxEntries);
         index.filter.assign(static_cast<size_t>((std::uint64_t(1) << filterBitsLog2) / 64), 0);
     } catch (const std::bad_alloc&) {
@@ -952,7 +954,7 @@ BinaryPatchResult BuildHashIndex(const DiskFile& source, const BinaryPatchOption
               static_cast<FileOffset>(maxEntries)
         : 1;
     std::vector<unsigned char> buffer;
-    try { buffer.resize(kIoChunk + 3); }
+    try { const stirling::StdAllocScope allocScope; buffer.resize(kIoChunk + 3); }
     catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
     for (FileOffset chunkStart = 0; chunkStart < source.Size();) {
         const size_t count = static_cast<size_t>((std::min)(
@@ -1148,7 +1150,7 @@ public:
             ++bits;
         }
         shift_ = 32 - bits;
-        try { slots_.assign(count, Slot()); }
+        try { const stirling::StdAllocScope allocScope; slots_.assign(count, Slot()); }
         catch (const std::bad_alloc&) { return false; }
         return true;
     }
@@ -1219,6 +1221,7 @@ BinaryPatchResult GenerateIpsToStage(const DiskFile& source, const DiskFile& tar
     std::vector<unsigned char> sourceBuffer;
     std::vector<unsigned char> targetBuffer;
     try {
+        const stirling::StdAllocScope allocScope;
         sourceBuffer.resize(kIoChunk);
         targetBuffer.resize(kIoChunk);
     } catch (const std::bad_alloc&) {
@@ -1316,7 +1319,7 @@ BinaryPatchResult GenerateBpsToStage(const DiskFile& source, const DiskFile& tar
         sink.Abort(); return Result(BinaryPatchStatus::kOutOfMemory);
     }
     std::vector<unsigned char> literalBuffer;
-    try { literalBuffer.resize(kIoChunk); }
+    try { const stirling::StdAllocScope allocScope; literalBuffer.resize(kIoChunk); }
     catch (const std::bad_alloc&) { sink.Abort(); return Result(BinaryPatchStatus::kOutOfMemory); }
     FileOffset targetPos = 0;
     FileOffset sourceRelative = 0;
@@ -1594,7 +1597,7 @@ BinaryPatchResult ApplyIps(const DiskFile& source, const DiskFile& patch,
         return Result(BinaryPatchStatus::kInvalidPatch, reader.Error());
     }
     std::vector<IpsRecord> records;
-    try { records.reserve(32); } catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
+    try { const stirling::StdAllocScope allocScope; records.reserve(32); } catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
     FileOffset maxRecordEnd = 0;
     size_t recordMemory = 0;
     FileOffset expandedBytes = 0;
@@ -1622,7 +1625,7 @@ BinaryPatchResult ApplyIps(const DiskFile& source, const DiskFile& patch,
         IpsRecord record;
         record.offset = offset;
         if (length != 0) {
-            try { record.data.resize(length); }
+            try { const stirling::StdAllocScope allocScope; record.data.resize(length); }
             catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
             if (!reader.ReadRaw(record.data.data(), record.data.size())) { return Result(BinaryPatchStatus::kInvalidPatch, reader.Error()); }
             record.length = length;
@@ -1670,6 +1673,7 @@ BinaryPatchResult ApplyIps(const DiskFile& source, const DiskFile& patch,
     std::vector<std::uint32_t> orderByOffset;
     std::vector<std::uint32_t> activeRecords;
     try {
+        const stirling::StdAllocScope allocScope;
         orderByOffset.reserve(records.size());
         activeRecords.reserve(records.size());
     } catch (const std::bad_alloc&) {
@@ -1702,7 +1706,7 @@ BinaryPatchResult ApplyIps(const DiskFile& source, const DiskFile& patch,
     const FileIoResult opened = writer.Open(targetPath);
     if (!opened.Ok()) { return Result(BinaryPatchStatus::kOpenFailed, opened.systemError); }
     std::vector<unsigned char> buffer;
-    try { buffer.resize(kIoChunk); } catch (const std::bad_alloc&) {
+    try { const stirling::StdAllocScope allocScope; buffer.resize(kIoChunk); } catch (const std::bad_alloc&) {
         writer.Abort(); return Result(BinaryPatchStatus::kOutOfMemory);
     }
     CachedReader sourceReader(source);
@@ -1881,7 +1885,7 @@ BinaryPatchResult ApplyBps(const DiskFile& source, const DiskFile& patch,
         return Result(BinaryPatchStatus::kLimitExceeded);
     }
     std::vector<unsigned char> metadataBuffer;
-    try { metadataBuffer.resize(kIoChunk); }
+    try { const stirling::StdAllocScope allocScope; metadataBuffer.resize(kIoChunk); }
     catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
     while (metadataSize > 0) {
         const size_t count = static_cast<size_t>((std::min)(
@@ -1898,7 +1902,7 @@ BinaryPatchResult ApplyBps(const DiskFile& source, const DiskFile& patch,
     if (!patch.ReadAt(footerPosition, expectedFooter, sizeof(expectedFooter))) {
         return Result(BinaryPatchStatus::kReadFailed, patch.Error());
     }
-    if (GetLe32(expectedFooter) != sourceCrc) {
+    if (GetLe32(expectedFooter) != sourceCrc && !options.bpsIgnoreChecksum) {
         return Result(BinaryPatchStatus::kSourceMismatch);
     }
 
@@ -1909,7 +1913,7 @@ BinaryPatchResult ApplyBps(const DiskFile& source, const DiskFile& patch,
     TempOutput output;
     if (!output.Open(targetPath, error)) { return Result(BinaryPatchStatus::kOpenFailed, error); }
     std::vector<unsigned char> transferBuffer;
-    try { transferBuffer.resize(kIoChunk); }
+    try { const stirling::StdAllocScope allocScope; transferBuffer.resize(kIoChunk); }
     catch (const std::bad_alloc&) { output.Abort(); return Result(BinaryPatchStatus::kOutOfMemory); }
     Crc32 targetCrc;
     FileOffset targetPosition = 0;
@@ -2010,15 +2014,22 @@ BinaryPatchResult ApplyBps(const DiskFile& source, const DiskFile& patch,
         !reader.ReadRaw(footer + 8, 4)) {
         output.Abort(); return Result(BinaryPatchStatus::kInvalidPatch, reader.Error(), targetPosition);
     }
-    if (targetPosition != static_cast<FileOffset>(targetSize) ||
-        GetLe32(footer) != sourceCrc || GetLe32(footer + 4) != targetCrc.Final() ||
-        GetLe32(footer + 8) != reader.Crc()) {
+    const bool sourceMatched = GetLe32(footer) == sourceCrc;
+    const bool targetMatched = GetLe32(footer + 4) == targetCrc.Final();
+    const bool patchMatched = GetLe32(footer + 8) == reader.Crc();
+    const bool patchIntact = targetPosition == static_cast<FileOffset>(targetSize) && patchMatched;
+    const bool crcAccepted = options.bpsIgnoreChecksum || (sourceMatched && targetMatched);
+    if (!patchIntact || !crcAccepted) {
         output.Abort();
-        const BinaryPatchStatus status = GetLe32(footer) != sourceCrc
-            ? BinaryPatchStatus::kSourceMismatch
-            : (GetLe32(footer + 4) != targetCrc.Final()
-                ? BinaryPatchStatus::kTargetMismatch
-                : BinaryPatchStatus::kInvalidPatch);
+        // When CRC mismatches are ignored, a corrupt patch is reported as
+        // such: its source/target CRC fields cannot be trusted either.
+        const BinaryPatchStatus status = options.bpsIgnoreChecksum
+            ? BinaryPatchStatus::kInvalidPatch
+            : (!sourceMatched
+                ? BinaryPatchStatus::kSourceMismatch
+                : (!targetMatched
+                    ? BinaryPatchStatus::kTargetMismatch
+                    : BinaryPatchStatus::kInvalidPatch));
         return Result(status, 0, targetPosition);
     }
     if (!output.Close(error)) { output.Abort(); return Result(BinaryPatchStatus::kWriteFailed, error, targetPosition); }
@@ -2033,8 +2044,9 @@ BinaryPatchResult ApplyBps(const DiskFile& source, const DiskFile& patch,
     output.Abort();
     published.sourceSize = source.Size();
     published.targetSize = static_cast<FileOffset>(targetSize);
-    published.sourceVerified = true;
-    published.targetVerified = true;
+    published.sourceVerified = sourceMatched;
+    published.targetVerified = targetMatched;
+    published.checksumIgnored = !sourceMatched || !targetMatched;
     return published;
 }
 
@@ -2042,7 +2054,7 @@ BinaryPatchResult CompareFiles(const DiskFile& left, const DiskFile& right,
                                const BinaryPatchOptions& options) {
     if (left.Size() != right.Size()) { return Result(BinaryPatchStatus::kTargetMismatch); }
     std::vector<unsigned char> a, b;
-    try { a.resize(kIoChunk); b.resize(kIoChunk); }
+    try { const stirling::StdAllocScope allocScope; a.resize(kIoChunk); b.resize(kIoChunk); }
     catch (const std::bad_alloc&) { return Result(BinaryPatchStatus::kOutOfMemory); }
     for (FileOffset offset = 0; offset < left.Size();) {
         const size_t count = static_cast<size_t>((std::min)(
@@ -2107,8 +2119,11 @@ BinaryPatchResult GenerateBinaryPatch(const wchar_t* sourcePath,
         ::DeleteFileW(stagePatch.c_str());
         return Result(BinaryPatchStatus::kOpenFailed, error);
     }
+    // Verification of a freshly generated patch must never skip its CRCs.
+    BinaryPatchOptions verifyOptions = options;
+    verifyOptions.bpsIgnoreChecksum = false;
     BinaryPatchResult applied = ApplyBinaryPatch(sourcePath, stagePatch.c_str(),
-                                                 stageTarget.c_str(), options);
+                                                 stageTarget.c_str(), verifyOptions);
     if (!applied.Ok()) {
         ::DeleteFileW(stagePatch.c_str());
         ::DeleteFileW(stageTarget.c_str());

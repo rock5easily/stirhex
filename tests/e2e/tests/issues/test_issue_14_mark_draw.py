@@ -53,20 +53,14 @@ def _changed_run_width(before, after) -> int:
 def _mark_and_measure(drv: StirlingDriver, address: str, baseline) -> int:
     """Toggle a mark at `address`, park the caret, and report the redrawn width."""
     drv.jump_to_address(address, is_hex=True)
-    time.sleep(0.2)
     drv.mark_toggle()
-    time.sleep(0.2)
     drv.jump_to_address(CARET_PARK, is_hex=True)
-    time.sleep(0.4)
     width = _changed_run_width(baseline, drv.capture_view_image())
 
     # Undo the mark so the next measurement starts from the same picture.
     drv.jump_to_address(address, is_hex=True)
-    time.sleep(0.2)
     drv.mark_toggle()
-    time.sleep(0.2)
     drv.jump_to_address(CARET_PARK, is_hex=True)
-    time.sleep(0.4)
     return width
 
 
@@ -81,12 +75,9 @@ def _measure_mark_widths(exe_path, test_file) -> tuple[int, int]:
             time.sleep(0.3)
 
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
 
             drv.jump_to_address(CARET_PARK, is_hex=True)
-            time.sleep(0.4)
             baseline = drv.capture_view_image()
             assert baseline is not None, "the view must be capturable"
 

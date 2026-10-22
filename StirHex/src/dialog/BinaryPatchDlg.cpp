@@ -15,6 +15,7 @@
 #include <new>
 #include <system_error>
 #include <utility>
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
 
 namespace {
 
@@ -122,6 +123,7 @@ BEGIN_MESSAGE_MAP(CBinaryPatchDlg, CDialog)
     ON_EN_CHANGE(IDC_BP_SOURCE_EDIT, &CBinaryPatchDlg::OnPathChanged)
     ON_EN_CHANGE(IDC_BP_SECOND_EDIT, &CBinaryPatchDlg::OnPathChanged)
     ON_EN_CHANGE(IDC_BP_RESULT_EDIT, &CBinaryPatchDlg::OnPathChanged)
+    ON_BN_CLICKED(IDC_BP_IGNORE_CHECKSUM, &CBinaryPatchDlg::OnPathChanged)
     ON_WM_TIMER()
     ON_WM_DESTROY()
 END_MESSAGE_MAP()
@@ -204,9 +206,12 @@ void CBinaryPatchDlg::UpdateModeUi() {
     for (UINT id : formatIds) {
         if (CWnd* w = GetDlgItem(id)) { w->EnableWindow(generate ? TRUE : FALSE); }
     }
-    if (CWnd* open = GetDlgItem(IDC_BP_OPEN_RESULT)) {
-        open->ShowWindow(generate ? SW_HIDE : SW_SHOW);
-        open->EnableWindow(generate ? FALSE : TRUE);
+    const UINT applyOnlyIds[] = {IDC_BP_OPEN_RESULT, IDC_BP_IGNORE_CHECKSUM};
+    for (UINT id : applyOnlyIds) {
+        if (CWnd* w = GetDlgItem(id)) {
+            w->ShowWindow(generate ? SW_HIDE : SW_SHOW);
+            w->EnableWindow(generate ? FALSE : TRUE);
+        }
     }
     UpdateIpsAvailability();
     UpdateStartAvailability();
@@ -240,7 +245,9 @@ void CBinaryPatchDlg::UpdateIpsAvailability() {
         if (IsIpsPatch(patch)) {
             SetDlgItemText(IDC_BP_FORMAT_NOTE, ui::LoadW(IDS_BP_IPS_UNVERIFIED));
         } else if (IsBpsPatch(patch)) {
-            SetDlgItemText(IDC_BP_FORMAT_NOTE, ui::LoadW(IDS_BP_BPS_VERIFIED));
+            SetDlgItemText(IDC_BP_FORMAT_NOTE,
+                           ui::LoadW(IsDlgButtonChecked(IDC_BP_IGNORE_CHECKSUM) == BST_CHECKED
+                                         ? IDS_BP_BPS_IGNORE_NOTE : IDS_BP_BPS_VERIFIED));
         } else {
             SetDlgItemText(IDC_BP_FORMAT_NOTE, ui::LoadW(IDS_BP_AUTO));
         }
@@ -379,7 +386,7 @@ void CBinaryPatchDlg::SetRunning(bool running) {
                           IDC_BP_SECOND_EDIT, IDC_BP_SECOND_BROWSE,
                           IDC_BP_RESULT_EDIT, IDC_BP_RESULT_BROWSE,
                           IDC_BP_FORMAT_BPS, IDC_BP_FORMAT_IPS, IDC_BP_OPEN_RESULT,
-                          IDC_BP_START};
+                          IDC_BP_IGNORE_CHECKSUM, IDC_BP_START};
     for (UINT id : edits) {
         if (CWnd* w = GetDlgItem(id)) { w->EnableWindow(running ? FALSE : TRUE); }
     }
@@ -391,6 +398,7 @@ void CBinaryPatchDlg::StartWorker(const std::wstring& first,
                                   const std::wstring& second,
                                   const std::wstring& result) {
     try {
+        const stirling::StdAllocScope allocScope;
         workerState_ = std::make_shared<WorkerState>();
     } catch (const std::bad_alloc&) {
         ui::MsgBoxRes(m_hWnd, IDS_BP_STATUS_MEMORY, MB_OK | MB_ICONERROR);
@@ -402,12 +410,16 @@ void CBinaryPatchDlg::StartWorker(const std::wstring& first,
         IsDlgButtonChecked(IDC_BP_FORMAT_IPS) == BST_CHECKED
             ? stirling::BinaryPatchFormat::kIps
             : stirling::BinaryPatchFormat::kBps;
+    const bool ignoreChecksum =
+        !generate && IsDlgButtonChecked(IDC_BP_IGNORE_CHECKSUM) == BST_CHECKED;
     const std::shared_ptr<WorkerState> state = workerState_;
 
     try {
+        const stirling::StdAllocScope allocScope;
         worker_ = std::make_unique<std::thread>(
-            [state, generate, format, first, second, result]() {
+            [state, generate, format, ignoreChecksum, first, second, result]() {
                 stirling::BinaryPatchOptions options;
+                options.bpsIgnoreChecksum = ignoreChecksum;
                 options.progress = [state](stirling::FileOffset processed,
                                            stirling::FileOffset total) {
                     state->processed.store(processed, std::memory_order_relaxed);
@@ -416,6 +428,7 @@ void CBinaryPatchDlg::StartWorker(const std::wstring& first,
                 };
                 stirling::BinaryPatchResult operation;
                 try {
+                    const stirling::StdAllocScope allocScope;
                     operation = generate
                         ? stirling::GenerateBinaryPatch(first.c_str(), second.c_str(),
                                                         result.c_str(), format, options)
@@ -533,11 +546,22 @@ void CBinaryPatchDlg::FinishWorker() {
     }
 }
 
-void CBinaryPatchDlg::PresentResult(const stirling::BinaryPatchResult& /*result*/) {
-    const UINT textId = mode_ == Mode::Generate ? IDS_BP_CREATE_DONE : IDS_BP_APPLY_DONE;
+void CBinaryPatchDlg::PresentResult(const stirling::BinaryPatchResult& result) {
     CStringW message;
-    message.Format(ui::LoadW(textId), outputPath_.c_str());
-    SetDlgItemText(IDC_BP_STATUS, message);
+    if (result.checksumIgnored) {
+        const UINT whichId = !result.sourceVerified && !result.targetVerified
+            ? IDS_BP_BOTH_CRC_IGNORED
+            : (!result.sourceVerified ? IDS_BP_SOURCE_CRC_IGNORED : IDS_BP_TARGET_CRC_IGNORED);
+        message.Format(ui::LoadW(IDS_BP_APPLY_DONE_UNVERIFIED),
+                       ui::LoadW(whichId).GetString(), outputPath_.c_str());
+        SetDlgItemText(IDC_BP_STATUS, message);
+        // Warn before the result may be opened and the dialog closed.
+        if (!closing_) { ui::MsgBox(m_hWnd, message, MB_OK | MB_ICONEXCLAMATION); }
+    } else {
+        const UINT textId = mode_ == Mode::Generate ? IDS_BP_CREATE_DONE : IDS_BP_APPLY_DONE;
+        message.Format(ui::LoadW(textId), outputPath_.c_str());
+        SetDlgItemText(IDC_BP_STATUS, message);
+    }
     if (mode_ != Mode::Apply || closing_ ||
         IsDlgButtonChecked(IDC_BP_OPEN_RESULT) != BST_CHECKED) {
         return;

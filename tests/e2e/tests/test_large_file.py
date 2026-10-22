@@ -23,6 +23,7 @@ import win32gui
 from pywinauto import timings
 
 from drivers import bgrep
+from drivers.settings_context import settings_value
 from drivers.stirling_driver import (
     ID_JUMP,
     ID_REVERT_FILE,
@@ -71,6 +72,17 @@ def _build_large_file(path, size: int = LARGE_SIZE, marker_pos: int = MARKER_POS
             written += n
         fp.seek(marker_pos)
         fp.write(MARKER)
+
+
+@pytest.fixture(autouse=True)
+def _whole_file_loading():
+    """このモジュールは全体読み込み（512MB の確認ダイアログを含む）での 2GB 超を検証する。
+
+    既定では 512MB 以上のファイルを遅延読み込み（Issue #300）で開くため、確認ダイアログが
+    出ない。ここでは遅延読み込みを無効にして、従来の全体読み込みの経路を検証し続ける。
+    """
+    with settings_value(r"Software\StirHex\StirHex\Env", "LazyLoad", 0):
+        yield
 
 
 @pytest.fixture(scope="module")
@@ -328,7 +340,8 @@ class TestLargeFile:
             drv.type_hex_chars(f"{EDIT_BYTE:02X}")   # 上書きモードで 1 バイト書き換え
             time.sleep(0.5)
 
-            drv.save_as_via_dialog(out)
+            # 2GB 超の書き出しは十数秒かかる（Issue #329）。
+            drv.save_as_via_dialog(out, save_timeout=120.0)
             assert _close_and_wait(drv), "終了しなかった"
 
         assert out.exists(), "保存されていない"

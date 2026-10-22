@@ -32,43 +32,34 @@ class TestIssue06StructBar:
 
             # 1. Show Struct Bar
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             assert drv.is_struct_bar_visible(), "Struct bar should be visible"
 
             # 2. Select LOGFONT (size = 60 / 0x3C bytes)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000000"
 
             # 3. Test Navigation buttons
             # '>' (+1 byte) -> 0x01
             drv.struct_nav_next_byte()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "00000001"
 
             # '>>' (+0x3C struct size) -> 0x01 + 0x3C = 0x3D
             drv.struct_nav_next_rec()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "0000003D"
 
             # '<' (-1 byte) -> 0x3C
             drv.struct_nav_prev_byte()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "0000003C"
 
             # '<<' (-0x3C struct size) -> 0x00
             drv.struct_nav_prev_rec()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "00000000"
 
             # 4. Set mark at offset 0x20 and jump via '移動' dialog
             drv.jump_to_address("20", is_hex=True)
-            time.sleep(0.2)
             drv.mark_toggle()
-            time.sleep(0.2)
 
             drv.struct_goto_dialog(mode="mark", mark_index=0)
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000020", "Struct address should jump to mark location 0x20"
 
     @pytest.mark.ported
@@ -84,39 +75,30 @@ class TestIssue06StructBar:
 
             # 1. Show Struct Bar
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             assert drv.is_struct_bar_visible(), "Struct bar should be visible"
 
             # 2. Select LOGFONT (size = 60 / 0x3C bytes)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000000"
 
             # 3. Test Navigation buttons
             drv.struct_nav_next_byte()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "00000001"
 
             drv.struct_nav_next_rec()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "0000003D"
 
             drv.struct_nav_prev_byte()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "0000003C"
 
             drv.struct_nav_prev_rec()
-            time.sleep(0.2)
             assert drv.get_struct_address() == "00000000"
 
             # 4. Set mark at offset 0x20 and jump via '移動' dialog
             drv.jump_to_address("20", is_hex=True)
-            time.sleep(0.2)
             drv.mark_toggle()
-            time.sleep(0.2)
 
             drv.struct_goto_dialog(mode="mark", mark_index=0)
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000020", "Struct address should jump to mark location 0x20"
 
     @pytest.mark.original
@@ -131,15 +113,11 @@ class TestIssue06StructBar:
             time.sleep(0.3)
 
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
 
             # Move caret to 0x40 and execute 'キャレット位置を構造体編集' (32865)
             drv.jump_to_address("40", is_hex=True)
-            time.sleep(0.2)
             drv.set_struct_address_to_caret()
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000040", "Struct address should sync to caret position 0x40"
 
     @pytest.mark.ported
@@ -154,15 +132,11 @@ class TestIssue06StructBar:
             time.sleep(0.3)
 
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
 
             # Move caret to 0x40 and execute 'キャレット位置を構造体編集' (32865)
             drv.jump_to_address("40", is_hex=True)
-            time.sleep(0.2)
             drv.set_struct_address_to_caret()
-            time.sleep(0.3)
             assert drv.get_struct_address() == "00000040", "Struct address should sync to caret position 0x40"
 
     @pytest.mark.original
@@ -177,9 +151,7 @@ class TestIssue06StructBar:
             time.sleep(0.3)
 
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
 
             # Switch all radix to Hex (A -> H)
             drv.struct_set_radix_all("hex")
@@ -201,9 +173,7 @@ class TestIssue06StructBar:
             time.sleep(0.3)
 
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.3)
             drv.select_struct_type("LOGFONT")
-            time.sleep(0.3)
 
             # 1. Default rows: LONG is signed decimal
             rows_default = drv.get_struct_list_texts()
@@ -221,13 +191,11 @@ class TestIssue06StructBar:
 
             # 3. Step address (+1 byte) preserves individual radix
             drv.struct_nav_next_byte()
-            time.sleep(0.2)
             rows_stepped = drv.get_struct_list_texts()
             assert rows_stepped[1][2] == "0x08070605", f"lfWidth should step to 0x08070605, got '{rows_stepped[1][2]}'"
 
             # Return to 0
             drv.struct_nav_prev_byte()
-            time.sleep(0.2)
 
             # 4. Switch all radix to Hex
             drv.struct_set_radix_all("hex")
@@ -254,11 +222,8 @@ class TestIssue06StructBar:
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
                 drv.jump_to_address("30", is_hex=True)
-                time.sleep(0.2)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 assert drv.get_struct_address() == "00000030", "Struct base address should follow caret when auto_set is True"
 
         # 2. When auto_set_struct_addr = False, struct address does not follow caret movement
@@ -266,14 +231,11 @@ class TestIssue06StructBar:
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 initial_addr = drv.get_struct_address()
                 
                 # Move caret to 0x30
                 drv.jump_to_address("30", is_hex=True)
-                time.sleep(0.3)
                 assert drv.get_struct_address() == initial_addr, "Struct base address should not follow caret when auto_set is False"
 
     @pytest.mark.ported
@@ -287,11 +249,8 @@ class TestIssue06StructBar:
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
                 drv.jump_to_address("30", is_hex=True)
-                time.sleep(0.2)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 assert drv.get_struct_address() == "00000030", "Struct base address should follow caret when auto_set is True"
 
         # 2. When auto_set_struct_addr = False
@@ -299,13 +258,10 @@ class TestIssue06StructBar:
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 initial_addr = drv.get_struct_address()
                 
                 drv.jump_to_address("30", is_hex=True)
-                time.sleep(0.3)
                 assert drv.get_struct_address() == initial_addr, "Struct base address should not follow caret when auto_set is False"
 
     @pytest.mark.original
@@ -318,9 +274,7 @@ class TestIssue06StructBar:
             with StirlingDriver(original_exe_path) as drv:
                 drv.start(test_file)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 assert drv.is_struct_bar_visible()
 
     @pytest.mark.ported
@@ -333,9 +287,7 @@ class TestIssue06StructBar:
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(test_file)
                 drv.toggle_struct_bar(show=True)
-                time.sleep(0.3)
                 drv.select_struct_type("LOGFONT")
-                time.sleep(0.3)
                 widths = drv.get_struct_column_widths()
                 assert len(widths) == 3, f"Expected 3 columns, got {widths}"
                 assert all(w > 0 for w in widths), f"Column widths should be positive: {widths}"

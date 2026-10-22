@@ -47,7 +47,6 @@ def test_original_does_not_restore_output_pane(original_exe_path, tmp_path):
     with settings_value(ORIG_SETTINGS, "ShowOutput", 1):
         with StirlingDriver(original_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.find_output_bar() is not None, "アウトプットバーが見つからない"
             assert not drv.is_output_pane_visible(), (
                 "原版は ShowOutput=1 でも起動時にアウトプットペインを表示しないはず"
@@ -64,7 +63,6 @@ def test_ported_restores_output_pane(ported_exe_path, tmp_path):
         # 1回目: 非表示で開始 → トグルで表示 → 終了時に 1 が保存される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.find_output_bar() is not None, "アウトプットバーが見つからない"
             assert not drv.is_output_pane_visible(), "既定は非表示のはず"
             drv.toggle_output_pane()
@@ -74,7 +72,6 @@ def test_ported_restores_output_pane(ported_exe_path, tmp_path):
         # 2回目: 表示状態で復元される → トグルで非表示 → 終了時に 0 が保存される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert drv.is_output_pane_visible(), "前回終了時の表示状態が復元されるはず"
             drv.toggle_output_pane()
             assert not drv.is_output_pane_visible(), "トグルで非表示になるはず"
@@ -83,7 +80,6 @@ def test_ported_restores_output_pane(ported_exe_path, tmp_path):
         # 3回目: 非表示で復元される。
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             assert not drv.is_output_pane_visible(), "非表示状態が復元されるはず"
 
 
@@ -101,13 +97,11 @@ def test_ported_env_settings_keeps_output_pane_state(ported_exe_path, tmp_path):
     with settings_value(PORT_ENV, "ShowOutput", 0):
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.3)
             # ペインを表示してから環境設定を開き、そのままOKで閉じる。
             drv.toggle_output_pane()
             assert drv.is_output_pane_visible(), "トグルで表示になるはず"
             sheet = drv.open_env_settings_dialog()
             drv.close_settings_sheet(sheet, accept=True)
-            time.sleep(0.5)
             assert drv.is_output_pane_visible(), "環境設定のOKで表示状態が変わらないはず"
             # OK の時点で設定一式が保存される。表示中の値が書かれていること。
             _wait_for_show_output(1)

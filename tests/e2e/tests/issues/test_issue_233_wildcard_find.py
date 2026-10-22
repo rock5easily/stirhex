@@ -91,7 +91,9 @@ def _dismiss_message(drv, owner):
 
     win32gui.EnumChildWindows(box, _collect, None)
     assert buttons, "message box has no button"
-    win32gui.PostMessage(buttons[0], win32con.BM_CLICK, 0, 0)
+    # BM_CLICK is dropped while the box is not yet active; the command the button would
+    # send reaches the box either way (Issue #296).
+    win32gui.PostMessage(box, win32con.WM_COMMAND, win32gui.GetDlgCtrlID(buttons[0]), buttons[0])
     deadline = time.time() + 5.0
     while win32gui.IsWindow(box) and time.time() < deadline:
         time.sleep(0.1)
@@ -173,7 +175,6 @@ class TestIssue233WildcardFind:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             dlg = _open_find_dialog(drv, is_hex=True)
             _find_next(dlg, "41??43")
@@ -189,7 +190,6 @@ class TestIssue233WildcardFind:
             # 繰り返し検索（前検索）は直前のワイルドカード条件で位置 0 へ戻る。
             #   ワイルドカードが失われて完全一致 41 00 43 を探すと見つからない。
             drv.post_command(ID_FIND_PREV)
-            time.sleep(0.8)
             assert _no_message_box(drv, 0), "repeat search reported not found"
             assert _caret_address(drv) == 0, "repeat search should keep the wildcard condition"
             assert _clipboard_hex(drv) == "411043"
@@ -197,24 +197,33 @@ class TestIssue233WildcardFind:
             assert test_file.read_bytes() == data, "search must not modify the file"
 
     @pytest.mark.ported
-    @pytest.mark.parametrize("text", ["4?", "?4 41", "41 ? 43", "41 ??? 43", "?? ??", "41 4243"])
-    def test_invalid_wildcard_input_is_rejected(self, ported_exe_path, tmp_path, text):
-        """ニブル単位の `?`、`?` の個数違い、すべてワイルドカードの入力はエラーになる。"""
+    def test_invalid_wildcard_input_is_rejected(self, ported_exe_path, tmp_path):
+        """ニブル単位の `?`、`?` の個数違い、すべてワイルドカードの入力はエラーになる。
+
+        エラー後も検索ダイアログは開いたままなので、全入力を 1 回の起動で順に試し、
+        不合格の入力をまとめて報告する（Issue #290）。
+        """
         test_file = tmp_path / "wildcard_invalid.dat"
         test_file.write_bytes(bytes([0x41, 0x42, 0x43, 0x44]))
+        failures = []
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             dlg = _open_find_dialog(drv, is_hex=True)
-            _find_next(dlg, text)
-            message = _dismiss_message(drv, dlg)
-            assert INVALID_DATA_MESSAGE in message, f"unexpected message for {text!r}: {message!r}"
-            assert win32gui.IsWindow(dlg), "find dialog should stay open after the error"
-            assert _control_text(win32gui.GetDlgItem(dlg, IDC_FIND_COMBO)) == text, \
-                "rejected input must be left as typed"
+            for text in ["4?", "?4 41", "41 ? 43", "41 ??? 43", "?? ??", "41 4243"]:
+                _find_next(dlg, text)
+                message = _dismiss_message(drv, dlg)
+                if INVALID_DATA_MESSAGE not in message:
+                    failures.append(f"{text!r}: unexpected message {message!r}")
+                assert win32gui.IsWindow(dlg), \
+                    f"find dialog should stay open after the error for {text!r}"
+                typed = _control_text(win32gui.GetDlgItem(dlg, IDC_FIND_COMBO))
+                if typed != text:
+                    failures.append(f"{text!r}: rejected input must be left as typed, got {typed!r}")
             _close_dialog(drv, dlg)
+
+        assert not failures, "\n".join(failures)
 
     @pytest.mark.ported
     def test_text_search_treats_question_mark_literally(self, ported_exe_path, tmp_path):
@@ -224,7 +233,6 @@ class TestIssue233WildcardFind:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             dlg = _open_find_dialog(drv, is_hex=False)
             _find_next(dlg, "a?c")
@@ -242,7 +250,6 @@ class TestIssue233WildcardFind:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
             drv.replace_all_dialog("41 ?? 43", "FF", search_is_hex=True, replace_is_hex=True)
             drv.save_as_via_dialog(out_file)
 
@@ -258,7 +265,6 @@ class TestIssue233WildcardFind:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             _wait_no_dialog(drv)
             drv.post_command(CMD_EDIT_REPLACE)

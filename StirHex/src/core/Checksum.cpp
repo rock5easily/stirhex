@@ -78,19 +78,21 @@ ChecksumState Checksum::Step(size_t byteBudget) {
     if (state_ != ChecksumState::Running) return state_;
     while (byteBudget && processed_ < length_) {
         if (!node_) return Fail(ChecksumState::ReadError);
-        if (node_->usedLen < 0 || node_->usedLen > node_->capacity ||
-            offset_ < 0 || offset_ > node_->usedLen)
+        if (node_->usedLen < 0 || offset_ < 0 || offset_ > node_->usedLen ||
+            (node_->data && node_->usedLen > node_->capacity))
             return Fail(ChecksumState::ReadError);
-        const int available = node_->usedLen - offset_;
-        if (!available) {
+        if (node_->usedLen == offset_) {
             node_ = list_->GetNext(node_);
             offset_ = 0;
             continue;
         }
-        if (!node_->data) return Fail(ChecksumState::ReadError);
+        // ファイル参照ノード（Issue #300）はキャッシュページ単位の窓で読む。
+        NodeSpan span;
+        if (!list_->NodeWindow(node_, offset_, &span)) return Fail(ChecksumState::ReadError);
+        const int available = span.end - offset_;
         const size_t count = (std::min)(byteBudget, static_cast<size_t>(
             (std::min)(length_ - processed_, static_cast<FileOffset>(available))));
-        const auto* data = node_->data + offset_;
+        const auto* data = span.ptr + (offset_ - span.begin);
         if (algorithm_ == ChecksumAlgorithm::Crc32) {
             for (size_t i = 0; i < count; ++i)
                 crc_ = (crc_ >> 8) ^ kCrcTable[(crc_ ^ data[i]) & 0xFF];

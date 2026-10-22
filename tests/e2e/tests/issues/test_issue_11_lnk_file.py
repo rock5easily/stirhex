@@ -1,4 +1,3 @@
-import time
 import subprocess
 import pytest
 from pathlib import Path
@@ -47,7 +46,6 @@ class TestIssue11LnkFile:
         # Open via command line argument
         with StirlingDriver(original_exe_path) as drv:
             drv.start(lnk_file)
-            time.sleep(0.5)
             drv.save_as_via_dialog(out_file)
 
         assert out_file.exists()
@@ -72,9 +70,7 @@ class TestIssue11LnkFile:
         with stirling_settings(open_lnk_direct=False):
             with StirlingDriver(original_exe_path) as drv:
                 drv.start()
-                time.sleep(0.5)
                 drv.open_file_via_dialog(lnk_file)
-                time.sleep(0.5)
                 drv.save_as_via_dialog(out_file)
 
         assert out_file.exists()
@@ -94,7 +90,6 @@ class TestIssue11LnkFile:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(lnk_file)
-            time.sleep(0.5)
             drv.save_as_via_dialog(out_file)
 
         assert out_file.exists()
@@ -117,9 +112,7 @@ class TestIssue11LnkFile:
         with stirling_settings(open_lnk_direct=False):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start()
-                time.sleep(0.5)
                 drv.open_file_via_dialog(lnk_file)
-                time.sleep(0.5)
                 drv.save_as_via_dialog(out_file)
 
         assert out_file.exists()

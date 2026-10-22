@@ -81,7 +81,6 @@ def _edit_first_byte(drv: StirlingDriver) -> None:
     safe_set_focus(drv.hwnd)
     time.sleep(0.2)
     drv.type_hex_chars("10")
-    time.sleep(0.2)
 
 
 class TestSaveFailurePaths:
@@ -111,9 +110,7 @@ class TestSaveFailurePaths:
                 # saving them (backup now possible) writes them back.
                 (tmp_path / "backup_declined.dat.bak").rmdir()
                 drv.undo()
-                time.sleep(0.2)
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.5)
 
         assert target.read_bytes() == ORIGINAL
         assert (tmp_path / "backup_declined.dat.bak").read_bytes() == ORIGINAL
@@ -154,7 +151,6 @@ class TestSaveFailurePaths:
 
                 drv.post_command(CMD_FILE_SAVE)
                 drv.answer_message_box(IDYES)
-                time.sleep(0.5)
 
                 assert target.read_bytes() == EDITED, "continuing must write the edited data"
                 assert not _is_dirty(drv), "a completed save clears the modified mark"
@@ -186,7 +182,6 @@ class TestSaveFailurePaths:
                 assert _is_dirty(drv), "the document is still modified after a failed save"
 
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.5)
                 assert not _is_dirty(drv), "the retry succeeds once the file is free"
 
         assert target.read_bytes() == EDITED
@@ -203,7 +198,6 @@ class TestSaveFailurePaths:
 
                 _edit_first_byte(drv)
                 drv.post_command(CMD_FILE_SAVE)
-                time.sleep(0.6)
 
                 assert not _is_dirty(drv), "the save completed"
                 assert not _can_open(target, win32con.GENERIC_READ), "the lock is re-acquired"

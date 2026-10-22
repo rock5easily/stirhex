@@ -1,4 +1,3 @@
-import time
 import winreg
 
 import pytest
@@ -64,11 +63,9 @@ def _run_once(exe, test_file, jump_to: int | None = None):
     """
     with StirlingDriver(exe) as drv:
         drv.start(test_file)
-        time.sleep(0.5)
         if jump_to is not None:
             drv.focus_view()
             drv.jump_to_address(f"{jump_to:X}", is_hex=True)
-            time.sleep(0.3)
         assert _close_and_wait(drv), "Stirling did not exit cleanly; settings were not saved"
 
 

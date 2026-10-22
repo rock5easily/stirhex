@@ -60,6 +60,11 @@ FindAllState FindAll::Step(FileOffset positionBudget) {
             hits_.push_back(hit);
             budget -= hit - next_ + 1;
             next_ = hit + 1;   // 重なった一致も数えるため、1バイト先から続ける
+        } else if (cursor.ReadFailed()) {
+            // 読めない位置があった（遅延読み込みの読取エラー等。Issue #312）。
+            //   以降の一致を見落とすため、未発見として先へ進めずに打ち切る。
+            state_ = FindAllState::ReadError;
+            return state_;
         } else {
             budget -= startEnd - next_;
             next_ = startEnd;

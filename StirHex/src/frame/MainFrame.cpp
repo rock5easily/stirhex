@@ -14,6 +14,7 @@
 #include "view/StirlingView.h"
 #include "app/StirlingApp.h"
 #include "app/ShellUtil.h"   // ui::DragQueryPath（MAX_PATH 非依存のドロップパス取得）
+#include "app/AllocFailure.h"   // 確保失敗の例外型の統一（Issue #306）
 #include "resource.h"
 
 #include <afxpriv.h>   // CDockBar（ドッキング先の判定。Issue #121）
@@ -247,6 +248,11 @@ BOOL CMainFrame::OnCopyData(CWnd* pWnd, COPYDATASTRUCT* pCopyDataStruct) {
 void CMainFrame::RecalcLayout(BOOL bNotify) {
     CMDIFrameWnd::RecalcLayout(bNotify);
     CDiffListDlg::RepositionMinimizedProxies();
+}
+
+LRESULT CMainFrame::WindowProc(UINT message, WPARAM wParam, LPARAM lParam) {
+    return ui::TranslateAllocFailure(
+        [&] { return CMDIFrameWnd::WindowProc(message, wParam, lParam); });
 }
 
 void CMainFrame::OnSize(UINT nType, int cx, int cy) {

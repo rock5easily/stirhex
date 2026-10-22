@@ -1,4 +1,3 @@
-import time
 import pytest
 from pathlib import Path
 from drivers.stirling_driver import StirlingDriver
@@ -31,27 +30,19 @@ class TestIssue10DynamicMark:
 
                 # 1. Jump to offset 8 (value 0x08) and set mark
                 drv.jump_to_address("8", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_toggle()
-                time.sleep(0.2)
 
                 # 2. Jump to offset 0, switch to Insert mode, and insert 4 bytes (0xAA, 0xBB, 0xCC, 0xDD)
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.press_insert()
-                time.sleep(0.2)
                 drv.type_hex_chars("AABBCCDD")
-                time.sleep(0.2)
 
                 # 3. Move back to top and jump to next mark
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_next()
-                time.sleep(0.2)
 
                 # 4. Delete the byte at mark position (should be the original 0x08 at shifted offset 12)
                 drv.press_delete()
-                time.sleep(0.2)
 
                 drv.save_as_via_dialog(out_file)
 
@@ -78,27 +69,19 @@ class TestIssue10DynamicMark:
 
                 # 1. Jump to offset 8 and set mark
                 drv.jump_to_address("8", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_toggle()
-                time.sleep(0.2)
 
                 # 2. Jump to offset 0, insert 4 bytes
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.press_insert()
-                time.sleep(0.2)
                 drv.type_hex_chars("AABBCCDD")
-                time.sleep(0.2)
 
                 # 3. Move back to top and jump to next mark
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_next()
-                time.sleep(0.2)
 
                 # 4. Delete the byte at mark position (should delete byte at fixed offset 8, which is 0x04 after shift)
                 drv.press_delete()
-                time.sleep(0.2)
 
                 drv.save_as_via_dialog(out_file)
 
@@ -123,27 +106,19 @@ class TestIssue10DynamicMark:
 
                 # 1. Jump to offset 8 and set mark
                 drv.jump_to_address("8", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_toggle()
-                time.sleep(0.2)
 
                 # 2. Jump to offset 0, insert 4 bytes
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.press_insert()
-                time.sleep(0.2)
                 drv.type_hex_chars("AABBCCDD")
-                time.sleep(0.2)
 
                 # 3. Jump to next mark
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_next()
-                time.sleep(0.2)
 
                 # 4. Delete at mark position
                 drv.press_delete()
-                time.sleep(0.2)
 
                 drv.save_as_via_dialog(out_file)
 
@@ -166,24 +141,16 @@ class TestIssue10DynamicMark:
                 drv.focus_view()
 
                 drv.jump_to_address("8", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_toggle()
-                time.sleep(0.2)
 
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.press_insert()
-                time.sleep(0.2)
                 drv.type_hex_chars("AABBCCDD")
-                time.sleep(0.2)
 
                 drv.jump_to_address("0", is_hex=True)
-                time.sleep(0.2)
                 drv.mark_next()
-                time.sleep(0.2)
 
                 drv.press_delete()
-                time.sleep(0.2)
 
                 drv.save_as_via_dialog(out_file)
 

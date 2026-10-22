@@ -75,7 +75,6 @@ class TestIssue124Utf8RangeLookahead:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.5)
 
             # 正常系: 範囲がシーケンス全体を含むときは従来どおり文字が出る。
             whole = _dump_range(drv, dump_file, len(SAMPLE) - 1)

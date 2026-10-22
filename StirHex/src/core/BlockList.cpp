@@ -1,6 +1,9 @@
 // BlockList / BlockNode 実装。原 Stirling 1.31 の循環双方向リスト操作を忠実に移植。
 #include "BlockList.h"
 
+#include "FileSource.h"
+
+#include <cstring>
 #include <new>
 
 namespace stirling {
@@ -67,6 +70,73 @@ void BlockList::Clear() {
     sentinel_.prev = &sentinel_;
     sentinel_.next = &sentinel_;
     count_ = 0;
+    source_.reset();
+    Touch();
+}
+
+void BlockList::TakeFrom(BlockList& other) {
+    if (&other == this) { return; }
+    Clear();
+    if (other.count_ > 0) {
+        BlockNode* head = other.sentinel_.next;
+        BlockNode* tail = other.sentinel_.prev;
+        sentinel_.next = head;
+        sentinel_.prev = tail;
+        head->prev = &sentinel_;
+        tail->next = &sentinel_;
+        count_ = other.count_;
+        other.sentinel_.next = &other.sentinel_;
+        other.sentinel_.prev = &other.sentinel_;
+        other.count_ = 0;
+    }
+    source_ = std::move(other.source_);
+    Touch();
+    other.Touch();
+}
+
+BlockNode* BlockList::AppendFileRef(FileOffset srcOffset, int len) {
+    if (srcOffset < 0 || len <= 0 || len > kMaxFileRefLen) { return nullptr; }
+    BlockNode* node = AllocBlockNode(nullptr, 0, len);
+    if (node == nullptr) { return nullptr; }
+    node->srcOffset = srcOffset;
+    AppendNode(node);
+    return node;
+}
+
+bool BlockList::NodeWindow(const BlockNode* n, int off, NodeSpan* out) const {
+    if (n == nullptr || off < 0 || off >= n->usedLen) { return false; }
+    if (n->data != nullptr) {
+        out->ptr = n->data;
+        out->begin = 0;
+        out->end = n->usedLen;
+        return true;
+    }
+    if (!IsFileRef(n) || source_ == nullptr) { return false; }
+    FileOffset base = 0;
+    int len = 0;
+    const unsigned char* page = source_->Page(n->srcOffset + off, &base, &len);
+    if (page == nullptr) { return false; }
+    // ページをノード内オフセットへ写し、ノードの範囲で切り詰める。
+    //   参照ノードの先頭・末尾はページ境界と揃っているとは限らない。
+    const FileOffset pageBegin = base - n->srcOffset;   // ノード内オフセット（負もありうる）
+    const FileOffset pageEnd = pageBegin + len;
+    const FileOffset begin = (pageBegin > 0) ? pageBegin : 0;
+    const FileOffset end = (pageEnd < n->usedLen) ? pageEnd : n->usedLen;
+    out->ptr = page + (begin - pageBegin);
+    out->begin = static_cast<int>(begin);
+    out->end = static_cast<int>(end);
+    return true;
+}
+
+bool BlockList::ReadNode(const BlockNode* n, int off, int len, void* dst) const {
+    if (n == nullptr || off < 0 || len < 0 || len > n->usedLen - off) { return false; }
+    if (len == 0) { return true; }
+    if (n->data != nullptr) {
+        std::memmove(dst, n->data + off, static_cast<size_t>(len));
+        return true;
+    }
+    if (!IsFileRef(n) || source_ == nullptr) { return false; }
+    return source_->Read(n->srcOffset + off, dst, static_cast<size_t>(len));
 }
 
 BlockNode* BlockList::GetHead() const {
@@ -109,16 +179,19 @@ static BlockNode* AllocNodeWithLegacyDataRule(unsigned char* data, int capacity,
 void BlockList::LinkNodeAfter(BlockNode* at, BlockNode* node) {
     LinkAfter(at, node);
     ++count_;
+    Touch();
 }
 
 void BlockList::LinkNodeBefore(BlockNode* at, BlockNode* node) {
     LinkAfter(at->prev, node);  // at の前 = at->prev の後
     ++count_;
+    Touch();
 }
 
 void BlockList::AppendNode(BlockNode* node) {
     LinkAfter(sentinel_.prev, node);  // 末尾（センチネル直前）へ
     ++count_;
+    Touch();
 }
 
 BlockNode* BlockList::AppendBlock(unsigned char* data, int capacity, int usedLen) {
@@ -151,14 +224,17 @@ unsigned char* BlockList::RemoveNode(BlockNode* n) {
     unsigned char* data = n->data;  // データは呼出側へ返し、ノード本体のみ破棄（原挙動）。
     delete n;
     --count_;
+    Touch();
     return data;
 }
 
 FileOffset BlockList::GetTotalLength() const {
+    if (totalCache_ >= 0) { return totalCache_; }
     FileOffset total = 0;
     for (const BlockNode* n = sentinel_.next; n != &sentinel_; n = n->next) {
         total += n->usedLen;
     }
+    totalCache_ = total;
     return total;
 }
 

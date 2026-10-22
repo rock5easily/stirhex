@@ -229,6 +229,7 @@ BEGIN_MESSAGE_MAP(CFilePage, CPropertyPage)
     ON_BN_CLICKED(IDC_FILE_BACKUP_FOLDER_CHK, &CFilePage::OnBackupFolderChk)
     ON_BN_CLICKED(IDC_FILE_DEFFOLDER_CHK, &CFilePage::OnDefFolderChk)
     ON_BN_CLICKED(IDC_FILE_LARGE_WARN, &CFilePage::OnLargeFileWarnChk)
+    ON_BN_CLICKED(IDC_FILE_LAZY_LOAD, &CFilePage::OnLazyLoadChk)
     ON_BN_CLICKED(IDC_FILE_BACKUP_FOLDER_BTN, &CFilePage::OnBackupFolderBtn)
     ON_BN_CLICKED(IDC_FILE_DEFFOLDER_BTN, &CFilePage::OnDefFolderBtn)
     ON_BN_CLICKED(IDC_FILE_INI_OPEN, &CFilePage::OnOpenSettingsFolder)
@@ -248,6 +249,8 @@ void CFilePage::ChargeFromSettings() {
     m_defaultFolder       = m_pS->defaultFolder;
     m_largeFileWarn       = m_pS->largeFileWarn ? TRUE : FALSE;
     m_largeFileWarnMB     = m_pS->largeFileWarnMB;
+    m_lazyLoad            = m_pS->lazyLoad ? TRUE : FALSE;
+    m_lazyLoadMB          = m_pS->lazyLoadMB;
 }
 
 void CFilePage::HarvestToSettings() {
@@ -262,6 +265,8 @@ void CFilePage::HarvestToSettings() {
     m_pS->defaultFolder        = m_defaultFolder;
     m_pS->largeFileWarn        = (m_largeFileWarn != FALSE);
     m_pS->largeFileWarnMB      = m_largeFileWarnMB;
+    m_pS->lazyLoad             = (m_lazyLoad != FALSE);
+    m_pS->lazyLoadMB           = m_lazyLoadMB;
 }
 
 void CFilePage::DoDataExchange(CDataExchange* pDX) {
@@ -280,6 +285,9 @@ void CFilePage::DoDataExchange(CDataExchange* pDX) {
     // 上限 1TB。MB×1024×1024 が FileOffset(64bit) に収まる範囲で、下限は 1MB 未満だと
     //   常に確認が出て意味をなさないため。
     DDV_MinMaxInt(pDX, m_largeFileWarnMB, 1, 1024 * 1024);
+    DDX_Check(pDX, IDC_FILE_LAZY_LOAD, m_lazyLoad);
+    DDX_Text(pDX, IDC_FILE_LAZY_MB, m_lazyLoadMB);
+    DDV_MinMaxInt(pDX, m_lazyLoadMB, 1, 1024 * 1024);   // 範囲は確認のしきい値と同じ
 }
 
 BOOL CFilePage::OnInitDialog() {
@@ -297,6 +305,12 @@ BOOL CFilePage::OnInitDialog() {
         spin->SetRange32(1, 1024 * 1024);
         spin->SetBuddy(GetDlgItem(IDC_FILE_LARGE_MB));
         spin->SetPos(m_largeFileWarnMB);
+    }
+    // 遅延読み込みのしきい値スピン（1167 のバディ。Issue #300）: 範囲は上と同じ。
+    if (CSpinButtonCtrl* spin = (CSpinButtonCtrl*)GetDlgItem(IDC_FILE_LAZY_MB_SPIN)) {
+        spin->SetRange32(1, 1024 * 1024);
+        spin->SetBuddy(GetDlgItem(IDC_FILE_LAZY_MB));
+        spin->SetPos(m_lazyLoadMB);
     }
     UpdateEnableState();
     ShowSettingsFileLocation();
@@ -353,6 +367,7 @@ void CFilePage::UpdateEnableState() {
     const BOOL backupFolder = backup && (IsDlgButtonChecked(IDC_FILE_BACKUP_FOLDER_CHK) != 0);
     const BOOL defFolder = (IsDlgButtonChecked(IDC_FILE_DEFFOLDER_CHK) != 0);
     const BOOL largeWarn = (IsDlgButtonChecked(IDC_FILE_LARGE_WARN) != 0);
+    const BOOL lazyLoad = (IsDlgButtonChecked(IDC_FILE_LAZY_LOAD) != 0);
 
     auto enable = [this](UINT id, BOOL on) {
         if (CWnd* w = GetDlgItem(id)) { w->EnableWindow(on); }
@@ -368,12 +383,16 @@ void CFilePage::UpdateEnableState() {
     enable(IDC_FILE_LARGE_MB, largeWarn);
     enable(IDC_FILE_LARGE_MB_SPIN, largeWarn);
     enable(IDC_FILE_LARGE_MB_UNIT, largeWarn);
+    enable(IDC_FILE_LAZY_MB, lazyLoad);
+    enable(IDC_FILE_LAZY_MB_SPIN, lazyLoad);
+    enable(IDC_FILE_LAZY_MB_UNIT, lazyLoad);
 }
 
 void CFilePage::OnBackupCreate()    { UpdateEnableState(); }
 void CFilePage::OnBackupFolderChk() { UpdateEnableState(); }
 void CFilePage::OnDefFolderChk()    { UpdateEnableState(); }
 void CFilePage::OnLargeFileWarnChk() { UpdateEnableState(); }
+void CFilePage::OnLazyLoadChk()      { UpdateEnableState(); }
 
 // 「...」でフォルダ選択ダイアログを開き、選択結果を edit に反映する。
 void CFilePage::BrowseFolder(UINT editId) {

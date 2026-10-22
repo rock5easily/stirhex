@@ -16,6 +16,17 @@ struct UndoTrimPlan {
     unsigned long long remainingBytes = 0;   // 破棄後の保持合計
 };
 
+// 1 件のレコードが履歴として占めるメモリの見積もり（Issue #312）。
+//   レコード本体（recordSize）と、退避データのヒープ領域（payloadCapacity。確保していれば
+//   ヒープの管理領域の概算としてポインタ 2 個分を加える）の和。データ長だけを数えると、
+//   データを持たないレコード（挿入 1 バイトの逆レコード等）が 0 バイト扱いになり、
+//   上限の外で増え続ける。
+inline unsigned long long UndoRecordBytes(std::size_t recordSize, std::size_t payloadCapacity) {
+    const unsigned long long heap =
+        (payloadCapacity > 0) ? payloadCapacity + 2 * sizeof(void*) : 0;
+    return static_cast<unsigned long long>(recordSize) + heap;
+}
+
 // 保持合計が limit を超えている間、Undo スタック先頭 → Redo スタック先頭の順に破棄する
 // 計画を立てる。limit==0 は無制限（何も破棄しない）。
 //   各スタックの最後の 1 件は上限を超えていても残す。直近の取り消し／やり直しは

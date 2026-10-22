@@ -165,6 +165,9 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClCompile Include="src\core\BlockFileIO.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="src\core\FileSource.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="src\core\StreamFileWriter.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -187,6 +190,10 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="src\dialog\FindResultDlg.cpp" />
+    <ClCompile Include="src\core\DiffScan.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="src\dialog\CompareProgressDlg.cpp" />
     <ClCompile Include="src\core\Utf8Text.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -215,6 +222,7 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\app\AppSettings.h" />
     <ClInclude Include="src\app\ShellUtil.h" />
     <ClInclude Include="src\app\ClipboardUtil.h" />
+    <ClInclude Include="src\app\AllocFailure.h" />
     <ClInclude Include="src\app\SettingsCodec.h" />
     <ClInclude Include="src\app\SettingsMigration.h" />
     <ClInclude Include="src\app\SettingsStore.h" />
@@ -250,10 +258,12 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\util\ScopedGdi.h" />
     <ClInclude Include="src\util\PathParts.h" />
     <ClInclude Include="src\core\CoreTypes.h" />
+    <ClInclude Include="src\core\AllocFailureScope.h" />
     <ClInclude Include="src\core\BlockList.h" />
     <ClInclude Include="src\core\BlockCursor.h" />
     <ClInclude Include="src\core\BgrepNotify.h" />
     <ClInclude Include="src\core\BlockFileIO.h" />
+    <ClInclude Include="src\core\FileSource.h" />
     <ClInclude Include="src\core\StreamFileWriter.h" />
     <ClInclude Include="src\core\Win32FileHooks.h" />
     <ClInclude Include="src\core\StructDef.h" />
@@ -263,6 +273,8 @@ copy /Y "$(ProjectDir)help\*.html" "$(OutDir)help\" &gt;nul</Command>
     <ClInclude Include="src\core\HexPattern.h" />
     <ClInclude Include="src\core\FindAll.h" />
     <ClInclude Include="src\dialog\FindResultDlg.h" />
+    <ClInclude Include="src\core\DiffScan.h" />
+    <ClInclude Include="src\dialog\CompareProgressDlg.h" />
     <ClInclude Include="src\core\Utf8Text.h" />
     <ClInclude Include="src\core\Utf16Text.h" />
     <ClInclude Include="src\core\UndoBudget.h" />

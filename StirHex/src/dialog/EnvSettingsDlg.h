@@ -92,6 +92,8 @@ protected:
     CString  m_defaultFolder;
     BOOL     m_largeFileWarn = TRUE;    // 大きいファイルを開く前に確認する
     int      m_largeFileWarnMB = 512;   // そのしきい値（MB）
+    BOOL     m_lazyLoad = TRUE;         // 大きいファイルは必要な部分だけ読み込む（Issue #300）
+    int      m_lazyLoadMB = 512;        // そのしきい値（MB）
 
     virtual void DoDataExchange(CDataExchange* pDX);
     virtual BOOL OnInitDialog();
@@ -107,6 +109,7 @@ protected:
     afx_msg void OnBackupFolderChk();
     afx_msg void OnDefFolderChk();
     afx_msg void OnLargeFileWarnChk();
+    afx_msg void OnLazyLoadChk();
     afx_msg void OnBackupFolderBtn();
     afx_msg void OnDefFolderBtn();
     afx_msg void OnOpenSettingsFolder();

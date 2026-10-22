@@ -109,6 +109,7 @@
 #define IDD_CHECKSUM            260     // Checksum dialog (Issue #226)
 #define IDD_FIND_RESULT         261     // Find-all result list dialog, modeless (Issue #236)
 #define IDD_BINARY_PATCH        262     // Binary patch create/apply dialog (Issue #259)
+#define IDD_COMPARE_PROGRESS    263     // Data compare progress dialog, modal (Issue #307)
 
 // ---------------------------------------------------------------------------
 // Stirling-specific command IDs (0x8000 range). Standard MFC commands
@@ -241,6 +242,10 @@
 #define IDC_BP_FORMAT_LABEL      1517
 #define IDC_BP_OPEN_RESULT       1518
 #define IDC_BP_FORMAT_NOTE       1519
+#define IDC_BP_IGNORE_CHECKSUM   1520   // BPS: ignore source/target CRC mismatch (Issue #302)
+
+// --- 比較の進捗ダイアログ（IDD_COMPARE_PROGRESS 263, Issue #307） ---
+#define IDC_COMPARE_PROGRESS     1530   // 進捗バー
 
 // ---------------------------------------------------------------------------
 // Checksum dialog controls (Issue #226).
@@ -527,6 +532,10 @@
 #define IDC_FILE_LARGE_MB           1157    // しきい値（edit。MB 単位）
 #define IDC_FILE_LARGE_MB_SPIN      1158    // スピン（1157 のバディ）
 #define IDC_FILE_LARGE_MB_UNIT      1159    // 「MB 以上」（static）
+#define IDC_FILE_LAZY_LOAD          1166    // 必要な部分だけ読み込む（check。Issue #300）
+#define IDC_FILE_LAZY_MB            1167    // そのしきい値（edit。MB 単位）
+#define IDC_FILE_LAZY_MB_SPIN       1168    // スピン（1167 のバディ）
+#define IDC_FILE_LAZY_MB_UNIT       1169    // 「MB 以上」（static）
 
 // --- 環境設定「ウィンドウ」ページ（IDD_SETTINGS_WINDOW 182。原 DDX FUN_0046668d） ---
 #define IDC_WIN_PLACE_NONE      1016    // メインウィンドウ: 指定しない（radio group 先頭）
@@ -812,6 +821,20 @@
 #define IDS_BP_FILTER_IPS           1307
 #define IDS_BP_OVERWRITE            1308
 #define IDS_BP_OUTPUT_CONFLICT_PATCH 1309
+#define IDS_ERR_SAVE_PARTIAL_NOTE 1310  // "上書き保存の途中で失敗したため..."（Issue #300）
+#define IDS_ERR_SAVE_REOPEN     1311    // "保存しましたが、保存したファイルを開き直せませんでした..."
+#define IDS_ERR_SOURCE_LOST_NOTE 1312  // "このウィンドウの内容は正しく表示できません..."（Issue #300）
+#define IDS_WARN_SAVEAS_SOURCE_KEPT 1313  // "保存しましたが、保存したファイルを開き直せませんでした...保存前のファイルは使用中"
+#define IDS_BP_APPLY_DONE_UNVERIFIED 1314 // "結果ファイルを作成しましたが、%sのCRCが一致しません。"（Issue #302）
+#define IDS_BP_SOURCE_CRC_IGNORED   1315  // "元ファイル"（1314 の %s）
+#define IDS_BP_TARGET_CRC_IGNORED   1316  // "結果ファイル"（1314 の %s）
+#define IDS_BP_BPS_IGNORE_NOTE      1317  // "BPS の元ファイル・結果のCRC不一致を無視して適用します。"
+#define IDS_BP_BOTH_CRC_IGNORED     1318  // "元ファイルと結果ファイル"（1314 の %s）
+// 結果件数の上限と比較の中止（Issue #307）
+#define IDS_BGREP_TRUNCATED         1319  // "%d件を超えたため、検索を打ち切りました"
+#define IDS_COMPARE_TRUNCATED       1320  // "相違箇所が%d件を超えたため、比較を打ち切りました..."
+#define IDS_COMPARE_DATA_CHANGED    1321  // "比較中にデータが変更されたため、比較を中止しました"
+#define IDS_COMPARE_READ_FAILED     1322  // "データを読み取れなかったため、比較を中止しました"
 
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 

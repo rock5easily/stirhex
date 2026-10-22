@@ -1,6 +1,7 @@
 // CStirlingApp 実装。MDI ドキュメントテンプレートを登録して起動する。
 #include "pch.h"
 #include "app/UiStrings.h"   // ui::MsgBox（表題はアプリ名で統一）
+#include "app/AllocFailure.h"   // 確保失敗の例外型の統一（Issue #306）
 #include <afxadv.h>   // CRecentFileList（ファイル履歴 MRU）の完全定義
 #include <afxole.h>   // AfxOleInit（MRUのシェル項目生成に必要）
 #include <shobjidl.h> // SetCurrentProcessExplicitAppUserModelID
@@ -392,6 +393,11 @@ BOOL CStirlingApp::WriteProfileBinary(LPCTSTR lpszSection, LPCTSTR lpszEntry,
 
 BOOL CStirlingApp::InitInstance() {
     CWinApp::InitInstance();
+
+    // 確保失敗を、bad_alloc を捕捉する区間（stirling::StdAllocScope）の中だけ std::bad_alloc に
+    //   する。区間外は MFC 既定と同じ CMemoryException*（Issue #306。app/AllocFailure.h）。
+    //   静的 MFC ではプロセス全体の設定で、区間はスレッドごとに判定する。
+    AfxSetNewHandler(&ui::ThrowAllocFailure);
 
     if (FAILED(::SetCurrentProcessExplicitAppUserModelID(L"StirHexProject.StirHex"))) {
         AfxMessageBox(ui::LoadW(IDS_ERR_APP_ID), MB_OK | MB_ICONERROR);

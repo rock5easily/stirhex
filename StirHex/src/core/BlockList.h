@@ -9,10 +9,14 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <utility>
 
 #include "CoreTypes.h"
 
 namespace stirling {
+
+class FileSource;
 
 // 1ブロックの確保容量（原 exe と同じ 16KB）。
 constexpr int kBlockCapacity = 0x4000;
@@ -25,6 +29,23 @@ struct BlockNode {
     unsigned char*  data = nullptr;   // ブロックデータ（ヒープ, capacity バイト確保）（原 +0x0c）
     int             capacity = 0;     // 確保容量（通常 kBlockCapacity）（原 +0x10）
     int             usedLen = 0;      // 有効バイト数（原 +0x14）
+    // 遅延読み込み（Issue #300。移植独自）: 元ファイル上の位置。-1 は元ファイルと無関係。
+    //   data == nullptr かつ 0 以上なら「ファイル参照ノード」で、元ファイルの
+    //   [srcOffset, srcOffset + usedLen) をそのまま表す（capacity は 0）。
+    //   data を持つノードでは、元ファイルから読み込んで作ったブロック（実体化ブロック）の
+    //   読み込み元を表す。上書き保存（BlockFileIO）が書き戻し先の判定に使う。
+    FileOffset      srcOffset = -1;
+};
+
+// ファイル参照ノード 1 個の最大長（1GB）。usedLen を int のまま扱えるようにする。
+constexpr int kMaxFileRefLen = 0x40000000;
+
+// ノードの連続した読み取り窓（BlockList::NodeWindow）。
+//   ノード内オフセット [begin, end) のバイトが ptr[0 .. end-begin) にある。
+struct NodeSpan {
+    const unsigned char* ptr = nullptr;
+    int begin = 0;
+    int end = 0;
 };
 
 // ---- 確保ヘルパ（Issue #153） ----
@@ -60,6 +81,35 @@ public:
 
     // 全ノードとブロックデータを解放し、空リストに戻す（原 BlockList_Clear 0x0040db02）。
     void Clear();
+    // 自分を空にしてから other のノード列と読み出し元を引き取る（other は空になる）。
+    //   保存後に元ファイルを読み込み直す際、読み込みに成功したときだけ差し替えるために使う
+    //   （Issue #300）。
+    void TakeFrom(BlockList& other);
+
+    // ---- 遅延読み込み（Issue #300。移植独自） ----
+    // ファイル参照ノードか（data を持たず元ファイルの区間を表す）。
+    static bool IsFileRef(const BlockNode* n) {
+        return n != nullptr && n->data == nullptr && n->srcOffset >= 0;
+    }
+    // 参照ノードの読み出し元を設定する（Clear で外れる）。
+    void AttachSource(std::shared_ptr<FileSource> source) { source_ = std::move(source); }
+    FileSource* Source() const { return source_.get(); }
+    bool HasSource() const { return source_ != nullptr; }
+    // 元ファイルの [srcOffset, srcOffset+len) を表す参照ノードを末尾へ追加する
+    //   （len は 1..kMaxFileRefLen。確保失敗で nullptr）。
+    BlockNode* AppendFileRef(FileOffset srcOffset, int len);
+    // ノード n のオフセット off を含む連続領域を返す（off は 0..usedLen-1）。
+    //   データを持つノードはブロック全体、参照ノードは元ファイルのキャッシュページの範囲。
+    //   読み取りに失敗したら false。参照ノードの窓は次に FileSource を使うまで有効。
+    bool NodeWindow(const BlockNode* n, int off, NodeSpan* out) const;
+    // ノード n の [off, off+len) を dst へ複写する。失敗で false。
+    bool ReadNode(const BlockNode* n, int off, int len, void* dst) const;
+
+    // 構造の世代番号。ノードの連結・除去・長さ変更のたびに進む（NodeWindow の結果を
+    //   保持する側が、ノードの解放・再利用を検知するために使う）。
+    unsigned long long Version() const { return version_; }
+    // ノードの usedLen を直接変えた側（BlockCursor）が呼ぶ。総長のキャッシュも捨てる。
+    void Touch() { ++version_; totalCache_ = -1; }
 
     // 空リストか（原 FUN_0041da00 = count==0）。
     bool IsEmpty() const { return count_ == 0; }
@@ -96,6 +146,7 @@ public:
 
     // 全ノードの usedLen 合計（原 BlockList_GetTotalLength 0x0041d288）。
     // 原は 32bit 合計だが、2GB 超のファイルを扱えるよう FileOffset(64bit) で返す。
+    // 移植では結果をキャッシュし、構造が変わったとき（Touch）だけ数え直す。
     FileOffset GetTotalLength() const;
 
     // センチネル（テスト・カーソル境界判定用の内部公開）。
@@ -104,6 +155,9 @@ public:
 private:
     BlockNode sentinel_;  // prev=tail, next=head。空状態は prev=next=self。
     int       count_ = 0;
+    std::shared_ptr<FileSource> source_;   // 参照ノードの読み出し元（Issue #300）
+    unsigned long long version_ = 1;
+    mutable FileOffset totalCache_ = -1;   // -1 = 未計算
 };
 
 }  // namespace stirling

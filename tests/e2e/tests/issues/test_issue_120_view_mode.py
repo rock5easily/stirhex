@@ -202,12 +202,10 @@ class TestIssue120ViewMode:
                         % (drv.get_all_statusbar_text(),)
                     )
                     drv.post_command(ID_TOGGLE_READONLY)
-                    time.sleep(0.4)
                     assert "編禁" in drv.get_all_statusbar_text(), (
                         "閲覧モードの文書で編集禁止を解除できてしまう"
                     )
                     drv.type_hex_chars("41")
-                    time.sleep(0.3)
 
         # 閲覧モードの文書は編集できないため、ファイルの内容は変わらない。
         assert target.read_bytes() == SAMPLE
@@ -267,7 +265,6 @@ class TestIssue120ViewMode:
         with settings_value(PORT_ENV, "ExclusiveControl", EXCLUSIVE_READWRITE):
             with StirlingDriver(ported_exe_path) as drv:
                 drv.start(target)
-                time.sleep(0.5)
                 assert drv.get_mdi_child_titles(), "開けていない（前提が崩れている）"
 
                 with pytest.raises(Exception):
@@ -292,7 +289,6 @@ class TestIssue120ViewMode:
             with settings_value(PORT_ENV, "ExclusiveControl", EXCLUSIVE_NONE):
                 with StirlingDriver(ported_exe_path) as drv:
                     drv.start(target)
-                    time.sleep(0.6)
                     assert _no_dialog(drv), "読み取り専用属性で確認メッセージが出ている"
                     assert drv.get_mdi_child_titles(), "読み取り専用ファイルを開けていない"
                     assert "編禁" in drv.get_all_statusbar_text(), (
@@ -301,7 +297,6 @@ class TestIssue120ViewMode:
                     )
                     safe_set_focus(drv.hwnd)
                     drv.post_command(ID_TOGGLE_READONLY)
-                    time.sleep(0.4)
                     assert "編禁" in drv.get_all_statusbar_text(), (
                         "読み取り専用ファイルで編集禁止を解除できてしまう"
                     )

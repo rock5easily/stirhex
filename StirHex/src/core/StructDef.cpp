@@ -5,6 +5,7 @@
 #include "util/ScopedHandle.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
@@ -71,11 +72,24 @@ private:
     size_t m_i;
 };
 
-// 配列要素数の上限。要素数は FieldSize / EmitRow で int の乗算とノード生成に使われるため、
+// 配列要素数の上限。要素数は EmitNodes / EmitRow で int の乗算とノード生成に使われるため、
 //   INT_MAX まで許すと符号付き整数オーバーフローと事実上のハングを招く。
 //   1 メンバーあたり 65536 要素あれば構造体編集の実用範囲を十分に覆う（原の struct.def も
 //   最大 260 要素）。2 次元配列は要素数の積にも同じ上限を課す。
 const long kMaxArrayCount = 65536;
+
+// 構造体 1 個あたりの総バイトサイズとノード総数の上限（Issue #311）。
+//   要素数の上限はメンバー単位のため、構造体の入れ子配列では積が int を桁あふれし、
+//   数十億ノードの生成も試みる。構造体編集バーは表示のたびに総サイズぶんを読み込み、
+//   全ノードを生成するので、実用範囲を十分に覆う値で打ち切る。
+//   double 配列ならサイズ、byte 配列ならノード数の上限に先に達する。
+const long long kMaxStructSize = 4LL * 1024 * 1024;
+const long long kMaxStructNodes = 1LL << 20;
+
+// 構造体の入れ子の段数の上限（Issue #322）。直列の入れ子はサイズ・ノード数が小さいまま
+//   深くでき、EmitNodes / EmitElement・StructNode の破棄・CStructBar::Flatten の再帰が
+//   スタックを使い切りうる。実用の入れ子は数段のため、十分な余裕を持たせて打ち切る。
+const int kMaxStructDepth = 64;
 
 // 配列要素数のパース。10進の正整数のみを受け付け、末尾の余分な文字・範囲外・0 以下は
 //   すべて失敗として扱う（atoi は変換失敗と 0 を区別できず、オーバーフローが未定義動作）。
@@ -191,7 +205,7 @@ bool StructDefSet::ParseText(const std::string& text, std::wstring* err) {
                         m_defs.push_back(def);
                         return false;
                     }
-                    // 2 次元配列は要素数の積にも上限を課す（FieldSize は c1*c2 を int で掛ける）。
+                    // 2 次元配列は要素数の積にも上限を課す（EmitNodes は c1*c2 を int で掛ける）。
                     if (dim == 1 && static_cast<long long>(fld.arrayCount) * cnt > kMaxArrayCount) {
                         if (err) {
                             *err = L"配列の要素数が大きすぎます: " + WideFromCp932(fld.name.c_str());
@@ -221,6 +235,39 @@ bool StructDefSet::ParseText(const std::string& text, std::wstring* err) {
                         return false;
                     }
                 }
+                // 入れ子の段数の上限超えも、このフィールドを加えずに中断する。
+                const int newDepth = (fld.kind == FieldKind::Struct)
+                    ? (std::max)(def.depth, m_defs[fld.structIndex].depth + 1) : def.depth;
+                if (newDepth > kMaxStructDepth) {
+                    if (err) {
+                        *err = L"構造体の入れ子が上限（" + std::to_wstring(kMaxStructDepth) +
+                               L" 段）を超えます: " + WideFromCp932(def.name.c_str()) + L"." +
+                               WideFromCp932(fld.name.c_str());
+                    }
+                    m_defs.push_back(def);
+                    return false;
+                }
+                // 総サイズ・ノード総数を 64bit で積算し、上限超えはこのフィールドを
+                //   加えずに中断する（登録済みの定義は int で桁あふれしないことを保証する）。
+                const Extent ext = MeasureField(fld);
+                const long long newSize = def.size + ext.size;
+                const long long newNodes = def.nodeCount + ext.nodes;
+                if (newSize > kMaxStructSize || newNodes > kMaxStructNodes) {
+                    if (err) {
+                        const std::wstring where =
+                            WideFromCp932(def.name.c_str()) + L"." + WideFromCp932(fld.name.c_str());
+                        *err = (newSize > kMaxStructSize)
+                            ? L"構造体のサイズが上限（" + std::to_wstring(kMaxStructSize) +
+                                  L" バイト）を超えます: " + where
+                            : L"構造体の要素数が上限（" + std::to_wstring(kMaxStructNodes) +
+                                  L" 個）を超えます: " + where;
+                    }
+                    m_defs.push_back(def);
+                    return false;
+                }
+                def.size = static_cast<int>(newSize);
+                def.nodeCount = static_cast<int>(newNodes);
+                def.depth = newDepth;
                 def.fields.push_back(fld);
             }
             m_defs.push_back(def);
@@ -252,17 +299,27 @@ int StructDefSet::ElemSize(const StructField& f) const {
     }
 }
 
-int StructDefSet::FieldSize(const StructField& f) const {
-    const int c1 = (f.arrayCount  > 0 ? f.arrayCount  : 1);
-    const int c2 = (f.arrayCount2 > 0 ? f.arrayCount2 : 1);
-    return ElemSize(f) * c1 * c2;
+// ノード数は EmitNodes の分岐と一致させる: サイズ 0 は 1 個、非配列は要素 1 個、
+//   1 次元はコンテナ＋c1 要素、2 次元はコンテナ＋c1 行（行コンテナ＋c2 要素）。
+//   ネスト構造体の要素は自身＋その構造体のノード総数。
+StructDefSet::Extent StructDefSet::MeasureField(const StructField& f) const {
+    const long long c1 = (f.arrayCount  > 0 ? f.arrayCount  : 1);
+    const long long c2 = (f.arrayCount2 > 0 ? f.arrayCount2 : 1);
+    const long long esize = ElemSize(f);
+    const long long size = esize * c1 * c2;
+    if (f.kind == FieldKind::Unknown || esize == 0) return { size, 1 };
+    const long long elemNodes = 1 + ((f.kind == FieldKind::Struct &&
+                                      f.structIndex >= 0 &&
+                                      f.structIndex < static_cast<int>(m_defs.size()))
+                                         ? m_defs[f.structIndex].nodeCount : 0);
+    if (c1 <= 1 && c2 <= 1) return { size, elemNodes };
+    if (c2 <= 1)            return { size, 1 + c1 * elemNodes };
+    return { size, 1 + c1 * (1 + c2 * elemNodes) };
 }
 
 int StructDefSet::SizeOfStruct(int defIndex) const {
     if (defIndex < 0 || defIndex >= static_cast<int>(m_defs.size())) return 0;
-    int total = 0;
-    for (const auto& f : m_defs[defIndex].fields) total += FieldSize(f);
-    return total;
+    return m_defs[defIndex].size;
 }
 
 namespace {
@@ -392,7 +449,7 @@ void StructDefSet::EmitElement(const StructField& f, const std::vector<unsigned 
     const int useRadix = (radixOverride >= 0) ? radixOverride : f.radix;
     StructNode n;
     n.type = type; n.name = name; n.hasChildren = false;
-    const bool inRange = (off + esize <= dataLen);
+    const bool inRange = (off >= 0 && off + esize <= dataLen);
     n.value = inRange ? FormatScalarValueW(f.kind, esize, &data[off], big, useRadix) : L"----";
     n.editable = inRange; n.offset = off; n.size = esize; n.kind = f.kind; n.radix = useRadix;
     out.push_back(std::move(n));
@@ -407,7 +464,7 @@ void StructDefSet::EmitRow(const StructField& f, const std::vector<unsigned char
     const int esize = ElemSize(f);
     if ((f.kind == FieldKind::Char || f.kind == FieldKind::Byte)) {
         // charset 別に文字列化（原 FUN_0045fecb。先頭 256 バイト上限は内部で処理）。
-        container.value = (off + count <= dataLen)
+        container.value = (off >= 0 && off + count <= dataLen)
             ? FormatStructCharArrayW(charset, &data[off], count) : L"----";
     }
     for (int i = 0; i < count; ++i) {

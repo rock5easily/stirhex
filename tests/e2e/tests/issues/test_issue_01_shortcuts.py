@@ -32,19 +32,15 @@ class TestIssue01Shortcuts:
 
             # 2. Delete key (Delete '0' at offset 0) -> "123456789ABCDEF"
             drv.press_delete()
-            time.sleep(0.2)
 
             # 3. Switch to Insert mode
             drv.press_insert()
-            time.sleep(0.2)
 
             # 4. Move right 4 bytes
             drv.press_arrow_right(4)
-            time.sleep(0.2)
 
             # 5. Backspace key in Insert mode (Delete '4' before cursor) -> "12356789ABCDEF"
             drv.press_backspace()
-            time.sleep(0.2)
 
             drv.save_as_via_dialog(out_file)
 
@@ -69,7 +65,6 @@ class TestIssue01Shortcuts:
 
             # Type 'AA' over top byte
             drv.type_hex_chars("AA")
-            time.sleep(0.2)
 
             # Undo via Ctrl+Z
             keyboard.send_keys("^z")
@@ -102,15 +97,12 @@ class TestIssue01Shortcuts:
 
             # Toggle to text pane via Tab
             drv.press_tab()
-            time.sleep(0.2)
 
             # Toggle to insert mode via Insert
             drv.press_insert()
-            time.sleep(0.2)
 
             # Type text 'X' in text pane
             drv.type_text_chars("X")
-            time.sleep(0.2)
 
             drv.save_as_via_dialog(out_file)
 
@@ -133,16 +125,12 @@ class TestIssue01Shortcuts:
             time.sleep(0.2)
 
             drv.press_delete()
-            time.sleep(0.2)
 
             drv.press_insert()
-            time.sleep(0.2)
 
             drv.press_arrow_right(4)
-            time.sleep(0.2)
 
             drv.press_backspace()
-            time.sleep(0.2)
 
             drv.save_as_via_dialog(out_file)
 
@@ -165,7 +153,6 @@ class TestIssue01Shortcuts:
             time.sleep(0.2)
 
             drv.type_hex_chars("BB")
-            time.sleep(0.2)
 
             keyboard.send_keys("^z")
             time.sleep(0.2)
@@ -195,13 +182,10 @@ class TestIssue01Shortcuts:
             time.sleep(0.2)
 
             drv.press_tab()
-            time.sleep(0.2)
 
             drv.press_insert()
-            time.sleep(0.2)
 
             drv.type_text_chars("X")
-            time.sleep(0.2)
 
             drv.save_as_via_dialog(out_file)
 

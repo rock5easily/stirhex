@@ -37,6 +37,19 @@ def _charset_status(drv: StirlingDriver) -> str:
     return drv.struct_status_texts().get("charset", "")
 
 
+def _wait_charset_status(drv: StirlingDriver, expected: str, timeout: float = 3.0) -> str:
+    """表示が expected になるまで待ち、最後に読んだ表示を返す。
+
+    ステータス欄はタイマーで更新されるため、UI スレッドのアイドル待ちでは足りない（Issue #296）。
+    """
+    deadline = time.time() + timeout
+    while True:
+        status = _charset_status(drv)
+        if status == expected or time.time() >= deadline:
+            return status
+        time.sleep(0.05)
+
+
 @pytest.mark.ported
 class TestIssue125StructBarCharsetName:
 
@@ -49,14 +62,11 @@ class TestIssue125StructBarCharsetName:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.5)
 
             for cmd, expected in CHARSETS:
                 drv.post_command(cmd)
-                time.sleep(0.4)
-                assert _charset_status(drv) == expected, (
-                    "charset %d showed %r" % (cmd, _charset_status(drv))
-                )
+                status = _wait_charset_status(drv, expected)
+                assert status == expected, "charset %d showed %r" % (cmd, status)
 
     def test_utf8_name_survives_timer_updates(self, ported_exe_path, tmp_path):
         """タイマーによる定期更新後も UTF-8 の表示が消えないこと。"""
@@ -68,11 +78,9 @@ class TestIssue125StructBarCharsetName:
             safe_set_focus(drv.hwnd)
             time.sleep(0.3)
             drv.post_command(ID_CHARSET_UTF8)
-            time.sleep(0.3)
             drv.toggle_struct_bar(show=True)
-            time.sleep(0.5)
 
-            assert _charset_status(drv) == "UTF-8"
+            assert _wait_charset_status(drv, "UTF-8") == "UTF-8"
             # 構造体バーのステータスはタイマーで再描画される。数周期ぶん待つ。
             time.sleep(2.0)
             assert _charset_status(drv) == "UTF-8"

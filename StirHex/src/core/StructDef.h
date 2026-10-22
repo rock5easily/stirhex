@@ -46,6 +46,13 @@ struct StructField {
 struct StructDef {
     std::string name;
     std::vector<StructField> fields;
+    // パース時に 64bit で検証・積算した総バイトサイズ（ネスト・配列含む。原 def+0x04）と、
+    //   BuildTree が生成するノード総数。どちらも上限内であることを ParseText が保証する。
+    int size = 0;
+    int nodeCount = 0;
+    // 入れ子の段数（構造体メンバーが無ければ 1、あればその段数の最大値 + 1）。
+    //   BuildTree 等の再帰の深さを抑えるため、ParseText が上限内であることを保証する。
+    int depth = 1;
 };
 
 // 解釈済みのツリーノード（原 DDS2 ツリーグリッドの 1 ノード）。
@@ -100,7 +107,7 @@ public:
     bool Empty() const { return m_defs.empty(); }
     int  FindByName(const std::string& n) const;
 
-    // 構造体 defIndex の総バイトサイズ（ネスト・配列含む）。範囲外は 0。
+    // 構造体 defIndex の総バイトサイズ（ネスト・配列含む。パース時に算出済み）。範囲外は 0。
     int  SizeOfStruct(int defIndex) const;
 
     // 構造体 defIndex を data（先頭=キャレット位置）で解釈し、ツリーを構築する。
@@ -115,8 +122,10 @@ public:
 private:
     // 単一フィールドの 1 要素サイズ（配列を除く）。
     int  ElemSize(const StructField& f) const;
-    // フィールドの総サイズ（要素サイズ×要素数）。
-    int  FieldSize(const StructField& f) const;
+    // フィールドの総サイズ（要素サイズ×要素数）と、EmitNodes が生成するノード数。
+    //   桁あふれ検査のため 64bit で求める（Issue #311）。
+    struct Extent { long long size; long long nodes; };
+    Extent MeasureField(const StructField& f) const;
     // 再帰でノードを生成（baseOff は data 内オフセット、out は親の children）。
     void EmitNodes(int defIndex, const std::vector<unsigned char>& data, int baseOff,
                    bool big, int charset, int radixOverride, std::vector<StructNode>& out) const;

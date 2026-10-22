@@ -49,4 +49,11 @@ inline HexTextParseResult ParseHexText(const std::wstring& text,
     return ParseHexText(text.c_str(), text.size(), out);
 }
 
+// バイト列を 16進テキストへ整形する（16進ペインのコピー用。原 FUN_0045c53f の書式）。
+//   書式: 各バイト大文字 2 桁、半角空白区切り（"41 42 0A"）。末尾に区切りは付けない。
+//   1 バイトあたり 3 文字になるため、選択範囲が大きいと文字列長が int を超える。
+//   長さを size_t のまま事前に計算して一度だけ確保し、1 バイトずつ書き込む（Issue #306）。
+//   文字列が表せない長さ、または確保に失敗した場合は false を返し、out は空になる。
+bool FormatHexText(const unsigned char* data, size_t size, std::wstring& out);
+
 }  // namespace stirling

@@ -9,10 +9,13 @@
 // 64bit→32bit の変換は「16KB 未満であることが確定した箇所」でのみ明示的に行う。
 #include "BlockCursor.h"
 
+#include "FileSource.h"   // 参照ノードの実体化で元ファイルを読む（Issue #300）
+
 #include <algorithm>
 #include <cstring>
 #include <new>      // std::bad_alloc（事前確保の失敗を戻り値へ落とす。Issue #153）
 #include <vector>   // 挿入トランザクションの未連結ノード保持（Issue #153）
+#include "core/AllocFailureScope.h"   // 確保失敗を std::bad_alloc で受ける区間（Issue #306）
 
 namespace stirling {
 
@@ -199,12 +202,13 @@ bool BlockCursor::Seek(FileOffset pos, int origin, FileOffset* outAbs) {
 // 注: count>=0 は呼出側の契約（詳細は BlockCursor.h の Read 宣言コメント）。
 //   原 BlockCursor_Read(0x0041b7fb) 同様、負値のガードは意図的に置いていない。
 //   全呼出側が非負を確定させてから呼ぶため、負値が渡る経路は存在しない。
+// 遅延読み込み(Issue #300): ノードの複写は BlockList::ReadNode を介す（参照ノードは
+//   元ファイルから読む）。読み取りに失敗したら、そこまでに読めたバイト数を返す。
 FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
     unsigned char* dst = static_cast<unsigned char*>(dstv);
     if (curNode_ == nullptr) {
         return 0;
     }
-    unsigned char* data = curNode_->data;
     int used = curNode_->usedLen;
     if (curOffset_ < 0 || used <= curOffset_) {
         return 0;
@@ -213,16 +217,19 @@ FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
     if (used - curOffset_ < count) {
         // 現ブロックの残り全部を読み、後続ブロックへ跨ぐ。
         const int first = used - curOffset_;
+        if (!list_->ReadNode(curNode_, curOffset_, first, dst)) {
+            return 0;
+        }
         readTotal = first;
-        std::memmove(dst, data + curOffset_, static_cast<size_t>(first));
         count -= first;
         dst += first;
         for (BlockNode* n = list_->GetNext(curNode_); n != nullptr; n = list_->GetNext(n)) {
-            unsigned char* d2 = n->data;
             int u2 = n->usedLen;
             // count < u2 のときのみ count 側を採るため int に収まる。
             int chunk = (count < u2) ? static_cast<int>(count) : u2;
-            std::memmove(dst, d2, static_cast<size_t>(chunk));
+            if (!list_->ReadNode(n, 0, chunk, dst)) {
+                return readTotal;
+            }
             count -= chunk;
             readTotal += chunk;
             dst += chunk;
@@ -231,15 +238,18 @@ FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
             }
         }
     } else {
-        // count <= used - curOffset_ <= capacity のため int に収まる。
+        // count <= used - curOffset_ のため int に収まる。
         const int n = static_cast<int>(count);
-        std::memmove(dst, data + curOffset_, static_cast<size_t>(n));
+        if (!list_->ReadNode(curNode_, curOffset_, n, dst)) {
+            return 0;
+        }
         readTotal = n;
     }
     return readTotal;
 }
 
 bool BlockCursor::Insert(FileOffset pos, const void* srcv, FileOffset count) {
+    if (!PrepareInsertAt(pos)) return false;   // 参照ノードの実体化（Issue #300）
     if (!Seek(pos, kBegin, nullptr)) return false;
     if (curNode_ == nullptr) return false;
     unsigned char* data = curNode_->data;
@@ -248,6 +258,7 @@ bool BlockCursor::Insert(FileOffset pos, const void* srcv, FileOffset count) {
     if (curOffset_ < 0 || used < curOffset_) return false;  // curOffset==used(EOF追記)は許容
     const bool ok = InsertWorker(used, capacity, data, count,
                                  static_cast<const unsigned char*>(srcv));
+    list_->Touch();   // ノードの長さが変わった（総長キャッシュを捨てる。Issue #300）
     // 挿入はブロック分割でカーソルを動かすため、絶対位置キャッシュを無効化する
     //   （次の GetByteAt は先頭から解決し直す。Issue #182）。
     curAbsValid_ = false;
@@ -288,6 +299,7 @@ bool BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data
 
     std::vector<BlockNode*> pending;   // 未連結のノード（確保のみ済み）
     try {
+        const stirling::StdAllocScope allocScope;
         pending.reserve(needed);
     } catch (const std::bad_alloc&) {
         return false;   // リストは無変更
@@ -340,6 +352,7 @@ bool BlockCursor::InsertWorker(int curUsedLen, int capacity, unsigned char* data
 }
 
 bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
+    if (!PrepareInsertAt(pos)) return false;   // 参照ノードの実体化（Issue #300）
     if (!Seek(pos, kBegin, nullptr)) return false;
     if (curNode_ == nullptr) return false;
     unsigned char* data = curNode_->data;
@@ -408,11 +421,13 @@ bool BlockCursor::InsertByte(FileOffset pos, unsigned char b) {
         curNode_->usedLen = used + 1;
         curOffset_ = curOffset_ + 1;
     }
+    list_->Touch();         // ノードの長さが変わった（Issue #300）
     curAbsValid_ = false;   // カーソルが動いた（Issue #182）
     return true;
 }
 
 bool BlockCursor::DeleteByte(FileOffset pos, unsigned char* outByte) {
+    if (!MaterializeRange(pos, 1)) return false;   // 参照ノードの実体化（Issue #300）
     if (!Seek(pos, kBegin, nullptr)) return false;
     if (curNode_ == nullptr) return false;
     unsigned char* data = curNode_->data;
@@ -450,6 +465,7 @@ bool BlockCursor::DeleteByte(FileOffset pos, unsigned char* outByte) {
         data[used - 1] = 0;
         curNode_->usedLen = used - 1;
     }
+    list_->Touch();   // ノードの長さが変わった（Issue #300）
     // ノード除去でカーソルが別ノードへ移る場合があるうえ、削除で以降の絶対位置が
     //   ずれるため、絶対位置キャッシュを無効化する（Issue #182）。
     curAbsValid_ = false;
@@ -466,6 +482,18 @@ FileOffset BlockCursor::DeleteRange(FileOffset pos, FileOffset count) {
     }
     if (curNode_ == nullptr || curOffset_ < 0) {
         return 0;
+    }
+
+    // 遅延読み込み(Issue #300): 参照ノードは読み込まずに区間を縮める・除去する。
+    //   範囲が 1 個の参照ノードの内側に収まるときだけ、ノードを前後 2 つに分ける必要がある。
+    //   その確保は削除を始める前に済ませ、失敗したらリストを変えずに 0 を返す。
+    BlockNode* spare = nullptr;
+    if (BlockList::IsFileRef(curNode_) && curOffset_ > 0 &&
+        count < static_cast<FileOffset>(curNode_->usedLen - curOffset_)) {
+        spare = AllocBlockNode(nullptr, 0, 0);
+        if (spare == nullptr) {
+            return 0;
+        }
     }
 
     FileOffset deleted = 0;
@@ -486,6 +514,21 @@ FileOffset BlockCursor::DeleteRange(FileOffset pos, FileOffset count) {
                 // ノード全体が消える: ノードごと除去（唯一のノードなら空にして残す）。
                 unsigned char* old = list_->RemoveNode(node);
                 delete[] old;
+            } else if (BlockList::IsFileRef(node)) {
+                // 参照ノード: 元ファイル上の区間を縮める（読み込まない）。
+                if (off == 0) {
+                    node->srcOffset += del;   // 先頭側を削る（唯一のノードの全削除は長さ 0）
+                    node->usedLen = used - del;
+                } else if (off + del == used) {
+                    node->usedLen = off;      // 末尾側を削る
+                } else {
+                    // 内側を削る: 後ろ側を事前確保したノードへ移す。
+                    spare->srcOffset = node->srcOffset + off + del;
+                    spare->usedLen = used - off - del;
+                    node->usedLen = off;
+                    list_->LinkNodeAfter(node, spare);
+                    spare = nullptr;
+                }
             } else {
                 unsigned char* data = node->data;
                 const int tail = used - off - del;   // 削除範囲より後ろに残るバイト数
@@ -501,6 +544,8 @@ FileOffset BlockCursor::DeleteRange(FileOffset pos, FileOffset count) {
         node = next;
         off = 0;
     }
+    FreeBlockNode(spare);   // 使わなかった事前確保（通常は使い切っている）
+    list_->Touch();         // ノードの長さが変わった（Issue #300）
 
     // カーソルを削除位置へ再解決する（全削除で末尾を越える場合は新しい総長へ寄せる）。
     const FileOffset total = list_->GetTotalLength();
@@ -549,13 +594,14 @@ bool BlockCursor::GetByteAt(FileOffset pos, unsigned char* out) {
     // Seek は追記位置として EOF (curOffset_ == usedLen) を許容するが、読取りは実データ内のみ。
     // 検索の内側ループから呼ばれるため、総長の線形走査ではなくノード内境界で判定する。
     if (curOffset_ < 0 || curOffset_ >= curNode_->usedLen) return false;
-    *out = curNode_->data[curOffset_];
+    if (!ByteAtCursor(out)) return false;   // 参照ノードは元ファイルから（Issue #300）
     curAbs_ = pos;
     return true;
 }
 
 bool BlockCursor::SetByteAt(FileOffset pos, unsigned char b) {
     // pos の属するノード/オフセットへ解決して直接代入（上書き編集）。
+    if (!MaterializeRange(pos, 1)) return false;   // 参照ノードの実体化（Issue #300）
     if (!Seek(pos, kBegin, nullptr)) return false;
     if (curNode_ == nullptr) return false;
     if (curOffset_ < 0 || curOffset_ >= curNode_->usedLen) return false;  // 実データ位置のみ
@@ -569,6 +615,9 @@ bool BlockCursor::SetByteAt(FileOffset pos, unsigned char b) {
 //   ブロックを 1 度だけ辿り、各ブロックの有効範囲へ memmove する。長さは変わらない。
 FileOffset BlockCursor::Write(FileOffset pos, const void* srcv, FileOffset count) {
     if (count <= 0) {
+        return 0;
+    }
+    if (!MaterializeRange(pos, count)) {   // 参照ノードの実体化（全か無か。Issue #300）
         return 0;
     }
     if (!Seek(pos, kBegin, nullptr)) {
@@ -610,6 +659,9 @@ FileOffset BlockCursor::FillRange(FileOffset pos, FileOffset count, unsigned cha
     if (count <= 0) {
         return 0;
     }
+    if (!MaterializeRange(pos, count)) {   // 参照ノードの実体化（全か無か。Issue #300）
+        return 0;
+    }
     if (!Seek(pos, kBegin, nullptr)) {
         return 0;
     }
@@ -638,9 +690,197 @@ FileOffset BlockCursor::FillRange(FileOffset pos, FileOffset count, unsigned cha
     return filled;
 }
 
+// ---- 遅延読み込み（Issue #300） ----
+
+bool BlockCursor::ByteAtCursor(unsigned char* out) {
+    const BlockNode* n = curNode_;
+    if (n->data != nullptr) {
+        *out = n->data[curOffset_];
+        return true;
+    }
+    // 参照ノード: 直近の窓が使えるならそこから読む（検索の内側ループで毎回ページを
+    //   引き直さないため）。ノードの付け替え・ページの追い出しがあれば窓を取り直す。
+    FileSource* src = list_->Source();
+    if (src == nullptr) {
+        return false;
+    }
+    if (spanNode_ != n || spanVersion_ != list_->Version() || spanEpoch_ != src->Epoch() ||
+        curOffset_ < span_.begin || curOffset_ >= span_.end) {
+        spanNode_ = nullptr;
+        if (!list_->NodeWindow(n, curOffset_, &span_)) {
+            return false;
+        }
+        spanNode_ = n;
+        spanVersion_ = list_->Version();
+        spanEpoch_ = src->Epoch();   // NodeWindow がページを追い出した後の世代
+    }
+    *out = span_.ptr[curOffset_ - span_.begin];
+    return true;
+}
+
+bool BlockCursor::PrepareInsertAt(FileOffset pos) {
+    if (!list_->HasSource()) {
+        return true;   // 参照ノードを持たないリスト（全体読み込み）は従来どおり
+    }
+    const FileOffset total = list_->GetTotalLength();
+    if (pos < 0 || pos > total) {
+        return true;   // 範囲外は呼出側の Seek が従来どおり弾く
+    }
+    if (total == 0) {
+        // 全削除で長さ 0 になった参照ノード（唯一のノード）には、挿入先のブロックを持たせる。
+        BlockNode* head = list_->GetHead();
+        if (head != nullptr && head->data == nullptr) {
+            unsigned char* buf = AllocBlockData();
+            if (buf == nullptr) {
+                return false;
+            }
+            head->data = buf;
+            head->capacity = kBlockCapacity;
+            head->usedLen = 0;
+            head->srcOffset = -1;
+            list_->Touch();
+        }
+        return true;
+    }
+    // 挿入位置のバイト（末尾への追記なら直前のバイト）を含むノードが実体を持てばよい。
+    return MaterializeRange((pos < total) ? pos : pos - 1, 1);
+}
+
+bool BlockCursor::MaterializeRange(FileOffset pos, FileOffset count) {
+    if (!list_->HasSource() || count <= 0 || pos < 0) {
+        return true;
+    }
+    // 1 個の参照ノードについて、実体化するノード内区間 [a, b) と、そのための確保物。
+    //   区間はノード先頭から 16KB 単位に揃える（細切れのブロックを作らないため）。
+    struct Piece {
+        BlockNode* node = nullptr;
+        int a = 0;
+        int b = 0;
+        unsigned char* firstData = nullptr;   // a==0 のとき node 自身に持たせるブロック
+        std::vector<BlockNode*> blocks;       // node の後ろへ連結する実体化ブロック
+        BlockNode* tail = nullptr;            // [b, usedLen) を表す参照ノード
+    };
+    std::vector<Piece> pieces;
+    const auto freeAll = [&pieces]() {
+        for (Piece& p : pieces) {
+            delete[] p.firstData;
+            p.firstData = nullptr;
+            for (BlockNode* n : p.blocks) { FreeBlockNode(n); }
+            p.blocks.clear();
+            FreeBlockNode(p.tail);
+            p.tail = nullptr;
+        }
+    };
+    FileSource* src = list_->Source();
+    try {
+        const stirling::StdAllocScope allocScope;
+        const FileOffset end = pos + count;
+        FileOffset abs = 0;
+        for (BlockNode* n = list_->GetHead(); n != nullptr && abs < end;
+             abs += n->usedLen, n = list_->GetNext(n)) {
+            const int used = n->usedLen;
+            if (abs + used <= pos || !BlockList::IsFileRef(n) || used <= 0) {
+                continue;
+            }
+            // いずれもノード内（0..used）に収まるため int に収まる。
+            const int lo = static_cast<int>((pos > abs) ? pos - abs : 0);
+            const int hi = static_cast<int>((end - abs < used) ? end - abs : used);
+            Piece piece;
+            piece.node = n;
+            piece.a = lo - (lo % kBlockCapacity);
+            const long long up = (static_cast<long long>(hi) + kBlockCapacity - 1) /
+                                 kBlockCapacity * kBlockCapacity;
+            piece.b = (up < used) ? static_cast<int>(up) : used;
+            pieces.push_back(std::move(piece));
+        }
+        // 確保と読み込み（ここまではリストを変更しない）。
+        for (Piece& p : pieces) {
+            const FileOffset base = p.node->srcOffset;
+            // 連結待ちのブロックを積む前に領域を確保する（push_back の例外で、確保済みの
+            //   ブロックが freeAll の対象から漏れないようにする）。
+            p.blocks.reserve(static_cast<size_t>((p.b - p.a + kBlockCapacity - 1) / kBlockCapacity));
+            for (int at = p.a; at < p.b; at += kBlockCapacity) {
+                const int len = (p.b - at < kBlockCapacity) ? (p.b - at) : kBlockCapacity;
+                unsigned char* buf = AllocBlockData();
+                if (buf == nullptr) {
+                    freeAll();
+                    return false;
+                }
+                if (src == nullptr || !src->Read(base + at, buf, static_cast<size_t>(len))) {
+                    delete[] buf;
+                    freeAll();
+                    return false;
+                }
+                if (at == 0) {
+                    p.firstData = buf;   // ノード自身を最初のブロックにする（a==0）
+                    continue;
+                }
+                BlockNode* blk = AllocBlockNode(buf, kBlockCapacity, len);
+                if (blk == nullptr) {
+                    delete[] buf;
+                    freeAll();
+                    return false;
+                }
+                blk->srcOffset = base + at;
+                p.blocks.push_back(blk);
+            }
+            if (p.b < p.node->usedLen) {
+                p.tail = AllocBlockNode(nullptr, 0, p.node->usedLen - p.b);
+                if (p.tail == nullptr) {
+                    freeAll();
+                    return false;
+                }
+                p.tail->srcOffset = base + p.b;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        freeAll();
+        return false;
+    }
+
+    // 連結（ここから先は失敗しない）。
+    for (Piece& p : pieces) {
+        BlockNode* node = p.node;
+        if (p.firstData != nullptr) {
+            const int len = (p.b < kBlockCapacity) ? p.b : kBlockCapacity;
+            node->data = p.firstData;   // srcOffset は読み込み元としてそのまま残る
+            node->capacity = kBlockCapacity;
+            node->usedLen = len;
+        } else {
+            node->usedLen = p.a;        // 前側は参照のまま残す
+        }
+        BlockNode* at = node;
+        for (BlockNode* blk : p.blocks) {
+            list_->LinkNodeAfter(at, blk);
+            at = blk;
+        }
+        if (p.tail != nullptr) {
+            list_->LinkNodeAfter(at, p.tail);
+        }
+        p.firstData = nullptr;
+        p.blocks.clear();
+        p.tail = nullptr;
+    }
+    if (!pieces.empty()) {
+        list_->Touch();
+        curAbsValid_ = false;   // ノードが付け替わった（呼出側は Seek し直す）
+    }
+    return true;
+}
+
+// 検索用の 1 バイト読み取り。実データ内の位置で読めないのは、遅延読み込みの読取エラーか
+//   ページキャッシュの確保失敗であり、「見つからない」とは区別して記録する（Issue #312）。
+//   実データ外（呼出側が渡した終端が総長を超える等）は従来どおり単なる走査の終わり。
+bool BlockCursor::SearchByteAt(FileOffset pos, FileOffset total, unsigned char* out) {
+    if (GetByteAt(pos, out)) return true;
+    if (pos >= 0 && pos < total) readFailed_ = true;
+    return false;
+}
+
 bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, FileOffset* outPos,
                                 int direction, FileOffset start, FileOffset end,
                                 const unsigned char* wildcard) {
+    readFailed_ = false;
     if (patternLen <= 0) {
         return false;  // 無効入力（原は patternLen>=1 前提）
     }
@@ -685,7 +925,7 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
             for (;;) {
                 --j;
                 if (!isWild(j)) {
-                    if (!GetByteAt(pos, &b)) return false;
+                    if (!SearchByteAt(pos, total, &b)) return false;
                     if (b != pattern[j]) break;
                 }
                 if (j == 0) { *outPos = pos; return true; }
@@ -722,7 +962,7 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
                 int k = 0;
                 for (;;) {
                     if (!isWild(k)) {
-                        if (!GetByteAt(pos, &b)) return false;
+                        if (!SearchByteAt(pos, total, &b)) return false;
                         if (b != pattern[k]) break;
                     }
                     if (k == last) { *outPos = windowStart; return true; }
@@ -733,7 +973,7 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
                 //   pattern[0] と一致済みなので、読み直さずに決まる。ただし先頭がワイルドカード
                 //   のときは値が決まらないため読み直す。
                 unsigned char head = (k == 0) ? b : pattern[0];
-                if (isWild(0) && !GetByteAt(windowStart, &head)) return false;
+                if (isWild(0) && !SearchByteAt(windowStart, total, &head)) return false;
                 // skip[] の値域は 1..patternLen なので、ウィンドウは必ず左へ前進する
                 //   （原実装にあった「進まない場合の打ち切り」は不要になった）。
                 const FileOffset shift = static_cast<FileOffset>(skip[head]);
@@ -747,9 +987,11 @@ bool BlockCursor::SearchPattern(const unsigned char* pattern, int patternLen, Fi
 
 bool BlockCursor::SearchMismatch(unsigned char value, FileOffset* outPos,
                                  int direction, FileOffset start, FileOffset end) {
+    readFailed_ = false;
+    const FileOffset total = list_->GetTotalLength();
     // 前方かつ終端未指定(0)は全長（原 param_3==0 && param_5==0 → 全長）。
     if (direction == kForward && end == 0) {
-        end = list_->GetTotalLength();
+        end = total;
     }
     // 開始位置へシーク（GetByteAt の増分アクセスを始動。原は out へ this+0xc）。
     Seek(start, kBegin, &curAbs_);
@@ -757,13 +999,13 @@ bool BlockCursor::SearchMismatch(unsigned char value, FileOffset* outPos,
     if (direction == kForward) {
         for (FileOffset pos = start; pos < end; ++pos) {
             unsigned char b = 0;
-            if (!GetByteAt(pos, &b)) return false;
+            if (!SearchByteAt(pos, total, &b)) return false;
             if (b != value) { *outPos = pos; return true; }
         }
     } else if (start != 0) {   // 原 else if (param_4 != 0): start==0 の後方は非走査
         for (FileOffset pos = start; end <= pos; --pos) {
             unsigned char b = 0;
-            if (!GetByteAt(pos, &b)) return false;
+            if (!SearchByteAt(pos, total, &b)) return false;
             if (b != value) { *outPos = pos; return true; }
         }
     }

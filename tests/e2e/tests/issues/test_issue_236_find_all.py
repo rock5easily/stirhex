@@ -193,7 +193,6 @@ class TestIssue236FindAll:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             result = _find_all(drv, "41??43")
             _wait_status(result, r"4 件見つかりました")
@@ -229,7 +228,6 @@ class TestIssue236FindAll:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             result = _find_all(drv, "AA AA")
             _wait_status(result, r"7 件見つかりました")   # 0..4 と 7,8
@@ -268,7 +266,6 @@ class TestIssue236FindAll:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             result = _find_all(drv, "11 22")
             _wait_status(result, r"3 件見つかりました")
@@ -307,7 +304,6 @@ class TestIssue236FindAll:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             result = _find_all(drv, "00")
             _wait_status(result, r"10000 件を超えたため、検索を打ち切りました")
@@ -360,7 +356,6 @@ class TestIssue236FindAll:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
 
             result = _find_all(drv, "zz", is_hex=False)
             _wait_status(result, r"見つかりませんでした")

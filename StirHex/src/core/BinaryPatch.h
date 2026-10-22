@@ -37,6 +37,9 @@ struct BinaryPatchResult {
     FileOffset targetSize = 0;
     bool sourceVerified = false;
     bool targetVerified = false;
+    // BPS apply with bpsIgnoreChecksum: the result was published although
+    // the source and/or target CRC did not match (Issue #302).
+    bool checksumIgnored = false;
     // A non-empty path means a safe publish failed after the temporary file
     // was fully written.  The caller owns cleanup/notification of this file.
     std::wstring keptTempPath;
@@ -82,6 +85,11 @@ using BinaryPatchProgress = std::function<bool(FileOffset processed, FileOffset 
 struct BinaryPatchOptions {
     BinaryPatchLimits limits;
     BinaryPatchProgress progress;
+    // BPS apply only: publish the result even when the source or target CRC
+    // does not match (Issue #302).  The patch CRC, sizes and instruction
+    // ranges are still validated.  sourceVerified/targetVerified report
+    // whether each CRC actually matched.  Patch generation ignores this.
+    bool bpsIgnoreChecksum = false;
 };
 
 // Create an IPS (same-size, basic records only) or BPS patch from two stable

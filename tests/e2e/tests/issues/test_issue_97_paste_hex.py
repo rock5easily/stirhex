@@ -58,13 +58,11 @@ class TestIssue97PasteHexText:
         with StirlingDriver(exe_path) as drv:
             drv.start(test_file)
             drv.focus_view()
-            time.sleep(0.3)
             if action is not None:
                 action(drv)
             # 解析に失敗するとモーダルのメッセージボックスが出るため、
             # プロセス跨ぎの SendMessage ではなく PostMessage 経由で実行する。
             drv.paste_hex()
-            time.sleep(0.5)
             drv.save_as_via_dialog(out_file)
 
         assert out_file.exists(), "save did not produce a file"
@@ -98,7 +96,6 @@ class TestIssue97PasteHexText:
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
             drv.focus_view()
-            time.sleep(0.3)
             # メッセージボックスはモーダルのため PostMessage 経由のコマンドで実行する。
             drv.paste_hex()
 

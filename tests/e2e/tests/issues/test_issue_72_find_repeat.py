@@ -47,7 +47,6 @@ class TestIssue72FindRepeat:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
             assert _dialog_titles(drv) == [], "起動直後にダイアログが出ている"
 
             view = drv.get_view_hwnd()
@@ -80,7 +79,6 @@ class TestIssue72FindRepeat:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
             view = drv.get_view_hwnd()
             assert view, "ビューのウィンドウが見つからない"
 
@@ -114,7 +112,6 @@ class TestIssue72FindRepeat:
 
         with StirlingDriver(ported_exe_path) as drv:
             drv.start(test_file)
-            time.sleep(0.5)
             menu = win32gui.GetMenu(drv.hwnd)
             assert menu, "メニューが取得できない"
             # WM_INITMENUPOPUP を経ないと更新ハンドラが走らないため、[検索・移動] を明示的に更新する。

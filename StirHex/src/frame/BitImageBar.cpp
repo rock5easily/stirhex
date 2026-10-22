@@ -99,8 +99,17 @@ void CBitImageWnd::BuildFromDoc(CStirlingDoc* pDoc) {
         if (GetSafeHwnd() != nullptr) { UpdateScrollInfo(); Invalidate(); }
         return;
     }
-    const int len = (total > 0x7fffffff) ? 0x7fffffff : static_cast<int>(total);
-    const int rows = (len + kImageWidth - 1) / kImageWidth;   // ceil(len/128)
+    // 画像は対象バイト列をすべて読み込んで作る。遅延読み込み（Issue #300）中の文書は
+    //   ファイル全体を読み込まないことが前提なので、先頭 kLazyImageMaxBytes までに限る。
+    //   それ以外も、行数の切り上げ（len + 127）が int を越えないよう、INT_MAX 以下で
+    //   kImageWidth の倍数に丸めた長さまでとする。以前は 0x7fffffff を上限にしていたため
+    //   約 2GB 以上の文書で rows が負になり、巨大な memset で異常終了した（Issue #306）。
+    static const long long kMaxImageBytes =
+        (static_cast<long long>(INT_MAX) / kImageWidth) * kImageWidth;
+    const long long cap = pDoc->IsLazyLoaded() ? kLazyImageMaxBytes : kMaxImageBytes;
+    const int len = static_cast<int>((total > cap) ? cap : total);
+    const int rows = static_cast<int>(
+        (static_cast<long long>(len) + kImageWidth - 1) / kImageWidth);   // ceil(len/128)
 
     // 8bpp・256色・トップダウン（biHeight 負）DIB。ストライド=128（4の倍数=無パディング）。
     struct { BITMAPINFOHEADER h; RGBQUAD colors[256]; } bmi = {0};

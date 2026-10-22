@@ -5,6 +5,7 @@
 
 #include "core/BlockList.h"
 #include "core/CoreTypes.h"
+#include "core/UndoBudget.h"
 #include "app/StirlingSettings.h"
 #include "util/ScopedHandle.h"
 
@@ -33,8 +34,11 @@ public:
     // docFullPath 変更時に現在のパスからタイトルを再決定する（環境設定 OK 後の全文書再適用）。
     void RefreshDocTitle();
 
-    // 編集前に戻す（原 FUN_0043621f）: 保存済みファイルを再読込し編集内容を破棄。パス無しは false。
-    bool RevertToSaved();
+    // 編集前に戻す（原 FUN_0043621f）: 保存済みファイルを再読込し編集内容を破棄する。
+    //   再読込に失敗すると内容は既に破棄されているため、原と同じく文書を閉じる（Issue #306）。
+    //   kClosed のとき文書とそのビューは破棄済みなので、呼出側は以後どちらにも触れないこと。
+    enum class RevertResult { kReloaded, kNoPath, kClosed };
+    RevertResult RevertToSaved();
 
     // --- 外部プロセスによるファイル変更の検知（原 doc+0x330 の最終更新日時保持） ---
     //   読込/保存のたびにディスク上の更新日時を控え、ビューのアクティブ化時に突き合わせる。
@@ -53,6 +57,8 @@ public:
     // View からのアクセス
     stirling::BlockList& Blocks() { return m_blocks; }
     stirling::FileOffset GetTotalLength() const { return m_blocks.GetTotalLength(); }
+    // 全体を読み込まず、必要な部分だけ元ファイルから読んでいるか（遅延読み込み。Issue #300）。
+    bool IsLazyLoaded() const { return m_blocks.HasSource(); }
 
     // --- 編集モード（原 doc+0x73c: 挿入/上書き。コマンド0x8026・Insertキーで切替） ---
     bool IsOverwriteMode() const { return m_overwriteMode; }
@@ -110,6 +116,11 @@ public:
     //   戻り値が count 未満なら「そこまでしか読めなかった」＝呼出側は失敗として扱える。
     stirling::FileOffset ReadInto(stirling::FileOffset pos, stirling::FileOffset count,
                                   void* dst);
+    // 失敗理由の判定（Issue #306）。遅延読み込みの元ファイルの読み取り失敗の通算回数を
+    //   操作の前に控え、失敗したら ShowAccessFailure へ渡す。回数が増えていれば読み取りの
+    //   失敗、増えていなければメモリ不足として表示する（遅延読み込みでなければ常に 0）。
+    unsigned long long SourceReadFailures() const;
+    void ShowAccessFailure(unsigned long long readFailuresBefore) const;
     // in-place 書換（Undo記録なし）。16進の下位ニブル確定で使用し、1バイト＝1レコードの
     // Undo粒度を原に合わせる（上位ニブルの1レコードに下位ニブルを畳み込む）。
     bool SetByteNoUndo(stirling::FileOffset pos, unsigned char b);
@@ -169,9 +180,9 @@ protected:
     bool ApplyRecord(const EditRecord& r, EditRecord& outInv);
 
     // --- Undo 履歴の容量管理（Issue #30） ---
-    // 1 レコードが退避データとして保持するバイト数。
+    // 1 レコードが履歴として占めるバイト数（レコード本体＋退避データ。Issue #312）。
     static unsigned long long RecordBytes(const EditRecord& r) {
-        return static_cast<unsigned long long>(r.bytes.size());
+        return stirling::UndoRecordBytes(sizeof(EditRecord), r.bytes.capacity());
     }
     // 環境設定（undoMemoryLimit / undoMemoryLimitMB）のバイト換算。0 = 無制限。
     static unsigned long long UndoMemoryLimitBytes();

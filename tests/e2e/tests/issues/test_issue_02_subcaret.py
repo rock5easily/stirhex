@@ -11,8 +11,6 @@ the outermost changed column on the side opposite the caret is used, so the blin
 active caret cannot be mistaken for the sub-caret (Issue #204).
 """
 
-import time
-
 import pytest
 
 from drivers.settings_context import stirling_settings
@@ -46,15 +44,12 @@ def _capture_positions(exe_path, test_file, sub_caret: bool, focus_text_pane: bo
         with StirlingDriver(exe_path) as drv:
             drv.start(test_file)
             drv.focus_view()
-            time.sleep(0.3)
             if focus_text_pane:
                 drv.press_tab()
-                time.sleep(0.3)
 
             captures = []
             for address in ("0", "1"):
                 drv.jump_to_address(address, is_hex=True)
-                time.sleep(0.4)
                 captured = drv.capture_view_image()
                 assert captured is not None, "the view must be capturable"
                 captures.append(captured)
@@ -96,19 +91,12 @@ class TestIssue02SubCaret:
     - Text pane active -> sub-caret rendered in the hex pane
 
     Prerequisite setting: 環境設定 - 編集動作1 - サブキャレットを表示する.
+
+    The tracking tests also cover "the setting changes what is drawn": they fail unless
+    turning the sub-caret on draws something at both addresses (Issue #288).
     """
 
     # --- 1. Hex pane active (sub-caret in the text pane) ---
-
-    @pytest.mark.original
-    def test_original_subcaret_hex_active_toggle(self, original_exe_path, tmp_path):
-        """The setting must change what is drawn in the text pane."""
-        test_file = tmp_path / "subcaret_hex_orig.dat"
-        test_file.write_bytes(DATA)
-
-        on_zero, _ = _capture_positions(original_exe_path, test_file, True, False)
-        off_zero, _ = _capture_positions(original_exe_path, test_file, False, False)
-        assert _changed_columns(on_zero, off_zero), "no sub-caret was drawn when enabled"
 
     @pytest.mark.original
     def test_original_subcaret_hex_active_tracking(self, original_exe_path, tmp_path):
@@ -117,16 +105,6 @@ class TestIssue02SubCaret:
         test_file.write_bytes(DATA)
 
         _assert_followed_the_caret(*_subcaret_columns(original_exe_path, test_file, False))
-
-    @pytest.mark.ported
-    def test_ported_subcaret_hex_active_toggle(self, ported_exe_path, tmp_path):
-        """The setting must change what is drawn in the text pane."""
-        test_file = tmp_path / "subcaret_hex_port.dat"
-        test_file.write_bytes(DATA)
-
-        on_zero, _ = _capture_positions(ported_exe_path, test_file, True, False)
-        off_zero, _ = _capture_positions(ported_exe_path, test_file, False, False)
-        assert _changed_columns(on_zero, off_zero), "no sub-caret was drawn when enabled"
 
     @pytest.mark.ported
     def test_ported_subcaret_hex_active_tracking(self, ported_exe_path, tmp_path):
@@ -139,32 +117,12 @@ class TestIssue02SubCaret:
     # --- 2. Text pane active (sub-caret in the hex pane) ---
 
     @pytest.mark.original
-    def test_original_subcaret_text_active_toggle(self, original_exe_path, tmp_path):
-        """The setting must change what is drawn in the hex pane."""
-        test_file = tmp_path / "subcaret_txt_orig.dat"
-        test_file.write_bytes(DATA)
-
-        on_zero, _ = _capture_positions(original_exe_path, test_file, True, True)
-        off_zero, _ = _capture_positions(original_exe_path, test_file, False, True)
-        assert _changed_columns(on_zero, off_zero), "no sub-caret was drawn when enabled"
-
-    @pytest.mark.original
     def test_original_subcaret_text_active_tracking(self, original_exe_path, tmp_path):
         """The sub-caret in the hex pane follows the caret in the text pane."""
         test_file = tmp_path / "subcaret_txt_track_orig.dat"
         test_file.write_bytes(DATA)
 
         _assert_followed_the_caret(*_subcaret_columns(original_exe_path, test_file, True))
-
-    @pytest.mark.ported
-    def test_ported_subcaret_text_active_toggle(self, ported_exe_path, tmp_path):
-        """The setting must change what is drawn in the hex pane."""
-        test_file = tmp_path / "subcaret_txt_port.dat"
-        test_file.write_bytes(DATA)
-
-        on_zero, _ = _capture_positions(ported_exe_path, test_file, True, True)
-        off_zero, _ = _capture_positions(ported_exe_path, test_file, False, True)
-        assert _changed_columns(on_zero, off_zero), "no sub-caret was drawn when enabled"
 
     @pytest.mark.ported
     def test_ported_subcaret_text_active_tracking(self, ported_exe_path, tmp_path):
