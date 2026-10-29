@@ -835,6 +835,7 @@
 #define IDS_COMPARE_TRUNCATED       1320  // "相違箇所が%d件を超えたため、比較を打ち切りました..."
 #define IDS_COMPARE_DATA_CHANGED    1321  // "比較中にデータが変更されたため、比較を中止しました"
 #define IDS_COMPARE_READ_FAILED     1322  // "データを読み取れなかったため、比較を中止しました"
+#define IDS_BGREP_READ_FAILED       1323  // " : 読み取りに失敗したため、このファイルの検索を打ち切りました"
 
 #define IDS_SBAR_ITEM_BASE      1143    // ステータスバー項目名20件（カタログ順に連番）
 

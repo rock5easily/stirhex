@@ -32,4 +32,10 @@ struct BgrepHitNotify {
     FileOffset     pos = 0;          // ファイル先頭からのヒット位置
 };
 
+// 読み取りに失敗し、そのファイルの検索を打ち切った通知（WM_BGREP_READFAIL の LPARAM。
+//   Issue #324）。打ち切る前に見つかったヒットは通知済み。
+struct BgrepReadFailNotify {
+    const wchar_t* path = nullptr;   // フルパス（送信側が保持する文字列を指す）
+};
+
 }  // namespace stirling

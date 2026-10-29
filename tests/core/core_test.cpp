@@ -10218,6 +10218,12 @@ static void TestLazyReopenIdentity() {
               "read straddling the end fails");
         CHECK(src->Read(static_cast<FileOffset>(data.size()) - 4, b, 4) &&
               std::memcmp(b, data.data() + data.size() - 4, 4) == 0, "read the last bytes");
+        // 部分読み取り（Issue #326）は末尾までの分を返す。
+        CHECK(src->ReadPartial(static_cast<FileOffset>(data.size()) - 2, b, 4) == 2 &&
+              std::memcmp(b, data.data() + data.size() - 2, 2) == 0,
+              "partial read straddling the end returns the bytes before the end");
+        CHECK(src->ReadPartial(static_cast<FileOffset>(data.size()) + 10, b, 1) == 0,
+              "partial read beyond the end returns nothing");
         list.Clear();
         std::error_code ec;
         fs::remove(in, ec);
@@ -10402,6 +10408,74 @@ static void TestLazyFailures() {
         }
         std::error_code sec;
         fs::remove(sin, sec);
+    }
+    // 6) ページ境界をまたぐ読み取りで後半のページだけ失敗したら、読めたページまでを返す
+    //   （Issue #326）。先頭ページはキャッシュ済みにし、次のページの読みで失敗させる。
+    const int kPage = stirling::FileSource::kPageSize;
+    {
+        // 6a) 1 つの参照ノードの内側。
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        CHECK(list.Count() == 1, "a single reference node");
+        BlockCursor c(&list);
+        unsigned char b = 0;
+        CHECK(c.GetByteAt(kPage - 100, &b), "read the first page");
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls;   // 次の読みを失敗させる
+        io_fault::g_plan.readError = ERROR_CRC;
+        const unsigned long long readFailures = list.Source()->ReadFailures();
+        std::vector<unsigned char> buf(200, 0xCC);
+        CHECK(c.Seek(kPage - 100, BlockCursor::kBegin, nullptr), "seek");
+        CHECK(c.Read(200, buf.data()) == 100, "read returns the bytes of the readable page");
+        CHECK(std::memcmp(buf.data(), data.data() + kPage - 100, 100) == 0,
+              "the readable part has the file content");
+        CHECK(list.Source()->ReadFailures() > readFailures, "the failure is still counted");
+    }
+    {
+        // 6b) データノード（挿入で実体化）から参照ノードへまたぐ読み取り。
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        BlockCursor c(&list);
+        CHECK(c.InsertByte(100, 0x5A), "insert materializes the first block");
+        CHECK(list.Count() > 1, "data and reference nodes");
+        std::vector<unsigned char> ref = data;
+        ref.insert(ref.begin() + 100, 0x5A);
+        unsigned char b = 0;
+        CHECK(c.GetByteAt(30000, &b), "read the first page of the reference node");
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls;
+        io_fault::g_plan.readError = ERROR_CRC;
+        // 文書位置 d (>100) は元ファイルの d-1。元ファイルの先頭ページ（kPage バイト）まで読める。
+        const FileOffset from = 16000;
+        const FileOffset expect = (kPage + 1) - from;
+        std::vector<unsigned char> buf(60000, 0xCC);
+        CHECK(c.Seek(from, BlockCursor::kBegin, nullptr), "seek");
+        CHECK(c.Read(static_cast<FileOffset>(buf.size()), buf.data()) == expect,
+              "read across nodes returns the bytes up to the unreadable page");
+        CHECK(std::memcmp(buf.data(), ref.data() + from, static_cast<size_t>(expect)) == 0,
+              "the readable part across nodes has the document content");
+    }
+    {
+        // 6c) ページ以上の長さ（キャッシュを通さない直接読み取り）は、成功した ReadFile の分まで。
+        BlockList list;
+        CHECK(stirling::LoadFileLazy(list, in.wstring().c_str()).Ok(), "load");
+        stirling::FileSource* src = list.Source();
+        io_fault::ScopedHooks hooks;
+        io_fault::g_plan.readCap = 4096;
+        io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls + 3;   // 4 回目で失敗
+        io_fault::g_plan.readError = ERROR_CRC;
+        std::vector<unsigned char> buf(100000, 0xCC);
+        CHECK(buf.size() >= static_cast<size_t>(kPage), "long enough to bypass the cache");
+        CHECK(src->ReadPartial(0, buf.data(), buf.size()) == 3 * 4096,
+              "direct read returns the bytes of the successful ReadFile calls");
+        CHECK(std::memcmp(buf.data(), data.data(), 3 * 4096) == 0,
+              "the readable part of a direct read has the file content");
+        io_fault::g_plan.readFailAtCall = io_fault::g_plan.readCalls + 3;
+        CHECK(!src->Read(0, buf.data(), buf.size()), "Read still fails as a whole");
+        io_fault::g_plan.readFailAtCall = -1;
+        CHECK(src->ReadPartial(0, buf.data(), buf.size()) == buf.size() &&
+              std::memcmp(buf.data(), data.data(), buf.size()) == 0,
+              "direct read succeeds once the file can be read");
     }
 #endif
     std::error_code ec;

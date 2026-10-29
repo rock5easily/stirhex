@@ -2447,10 +2447,12 @@ void CStirlingView::DrawCharColumn(CDC* pDC, stirling::FileOffset firstRow, int 
     if (start >= total) return;
     int winLen = rows * bpr;
     if (start + winLen > total) { winLen = static_cast<int>(total - start); }
-    // ワイド描画（UTF-8 / Unicode）は行末で文字が途切れると次行のセル数が変わるため、
-    //   窓の末尾を数バイトだけ余分に読む（余分は復号のためだけで、セルとしては描かない）。
+    // 窓の末尾で文字が途切れないよう、数バイトだけ余分に読む（余分は窓内の文字を描くため
+    //   だけで、窓外の行は描かない）。ワイド描画（UTF-8 / Unicode）は次行のセル数が変わるのを
+    //   防ぐため、SJIS / EUC は最終行の最終列から窓外へまたがる 2 バイト文字を後半バイトまで
+    //   描くため（原 FUN_00441b66 / FUN_00441e45 もバイト列を読み進めて描く。Issue #337）。
     int readLen = winLen;
-    if (IsWideCharset(cs)) {
+    {
         const int ahead = WideReadAhead(cs);
         if (start + readLen + ahead <= total) { readLen += ahead; }
         else if (start + readLen < total) { readLen = static_cast<int>(total - start); }
@@ -4051,9 +4053,16 @@ void CStirlingView::OnSaveDump() {
 
 // ===========================================================================
 // 印刷（原 CStirlingView 印刷仮想関数 0x4427e5/442840/442b29/442af3 の移植）
-//   整形ダンプ（可変幅アドレス＋1行バイト数に応じた16進欄・文字欄）をプリンタDCへ割付ける。
+//   整形ダンプ（可変幅アドレス＋16進欄・文字欄）をプリンタDCへ割付ける。
 //   フォント=ＭＳ明朝(h100 SHIFTJIS)。色=モノクロ、比較差分のみ反転（原 FUN_0045d161）。
 // ===========================================================================
+
+namespace {
+// 印刷の1行バイト数。原は表示設定（1行バイト数）に関わらず 16 固定（ヘッダは 77 桁の
+//   定数文字列、行アドレスは +0x10 刻み）。総行数（PrintTotalRows）とページ割付（OnPrint）は
+//   必ずこの値で揃える（Issue #313: 割付だけ表示幅を使い、ページ不足/空白ページが出ていた）。
+constexpr int kPrintBytesPerRow = 16;
+}  // namespace
 
 // 印刷対象の先頭/末尾アドレス（両端含む）。印刷範囲指定時は範囲、既定は全体。
 stirling::FileOffset CStirlingView::PrintFirstAddr() const {
@@ -4064,6 +4073,8 @@ stirling::FileOffset CStirlingView::PrintLastAddr() const {
 }
 
 // 印刷対象の総行数（原 OnBeginPrinting/FUN_00442f27 の 16 境界整列した行数）。
+//   算術は原のまま（>>4 を含む）なので、kPrintBytesPerRow が 16 であることを前提とする。
+static_assert(kPrintBytesPerRow == 16, "PrintTotalRows assumes 16 bytes per printed row");
 stirling::FileOffset CStirlingView::PrintTotalRows() const {
     const stirling::FileOffset start = PrintFirstAddr();
     const stirling::FileOffset end   = PrintLastAddr();
@@ -4237,7 +4248,7 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
     const CRect page = pInfo->m_rectDraw;   // フレームワークが設定したページ矩形（論理単位）
     const PrintLayout L = ComputePrintLayout(pDC, page);
     const int charW = L.charW, rowH = L.rowH;
-    const int bpr = m_bytesPerRow;
+    const int bpr = kPrintBytesPerRow;      // 表示の1行バイト数ではなく原と同じ 16 固定（Issue #313）
     const int radix = m_addrRadix;          // 0=10進 / 非0=16進
     const int cs = pDoc->GetCharset();
     const bool beBig = pDoc->IsByteOrderBig();
@@ -4330,12 +4341,14 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
     }
     if (byteCount < 0) { byteCount = 0; }
 
-    // ワイド描画（UTF-8 / Unicode）はページ境界で文字が途切れるとセル数が変わるため、
-    //   末尾を数バイト余分に読む。先読みは指定範囲の論理終端 end までに限る。範囲外の
-    //   バイトまで読むと BuildCharCellsWide がそれを消費して文字欄だけ範囲外の文字を
-    //   描いてしまう（Issue #124）。
+    // ページ境界で文字が途切れないよう、末尾を数バイト余分に読む。ワイド描画（UTF-8 /
+    //   Unicode）はセル数が変わるのを防ぐため、SJIS / EUC はページ最終行の最終列から
+    //   次ページへまたがる 2 バイト文字を後半バイトまで描くため（Issue #335。原 0x442f27 は
+    //   読み出し長に開始位置を足す算術のため、先頭 0 から始まる 1 ページ目以外は次ページ先頭
+    //   まで読んで 17 バイト描く。移植版は全ページで描く）。先読みは指定範囲の論理終端 end までに限る。
+    //   範囲外のバイトまで読むと文字欄だけ範囲外の文字を描いてしまう（Issue #124）。
     long long readCount = byteCount;
-    if (IsWideCharset(cs)) {
+    {
         const long long ahead = WideReadAhead(cs);
         const long long avail = static_cast<long long>(Total()) - dataStart;
         const long long inRange = static_cast<long long>(end) + 1 - dataStart;
@@ -4434,8 +4447,10 @@ void CStirlingView::OnPrint(CDC* pDC, CPrintInfo* pInfo) {
         chars += BuildCharCells(buf, gi, bpr - lead, cs, carry, beBig, ebc, eof);
         if (static_cast<int>(chars.size()) < bpr) {
             chars.append(static_cast<size_t>(bpr) - chars.size(), ' ');
-        } else if (static_cast<int>(chars.size()) > bpr) {
-            chars.resize(static_cast<size_t>(bpr));
+        } else if (static_cast<int>(chars.size()) > bpr + 1) {
+            // 行末をまたぐ 2 バイト文字は bpr+1 桁目まで描く（原 FUN_00443a24 は 17 バイトで
+            //   ExtTextOut する）。bpr で切ると後半バイトが落ち、先頭バイトだけが描かれる（Issue #335）。
+            chars.resize(static_cast<size_t>(bpr) + 1);
         }
         pDC->SetTextColor(RGB(0, 0, 0));
         pDC->SetBkColor(RGB(255, 255, 255));

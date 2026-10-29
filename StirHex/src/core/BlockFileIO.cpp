@@ -264,7 +264,7 @@ FileIoResult WriteListTo(StreamFileWriter& writer, const BlockList& list) {
         }
         for (int off = 0; off < n->usedLen; off += kSaveChunk) {
             const int len = (n->usedLen - off < kSaveChunk) ? (n->usedLen - off) : kSaveChunk;
-            if (!list.ReadNode(n, off, len, buf.data())) {
+            if (list.ReadNode(n, off, len, buf.data()) != len) {
                 return MakeResult(FileIoStatus::kReadFailed, list.Source()->LastError(),
                                   writer.Written());
             }

@@ -107,15 +107,18 @@ bool FileSource::Reopen(bool writable) {
     return true;
 }
 
-bool FileSource::ReadDirect(FileOffset pos, void* dst, size_t len) {
-    if (!ReadDirectOnce(pos, dst, len)) {
+bool FileSource::ReadDirect(FileOffset pos, void* dst, size_t len, size_t* outDone) {
+    if (!ReadDirectOnce(pos, dst, len, outDone)) {
         ++readFailures_;   // 読み取りの失敗（確保の失敗は数えない）。ReadFailures() 参照
         return false;
     }
     return true;
 }
 
-bool FileSource::ReadDirectOnce(FileOffset pos, void* dst, size_t len) {
+bool FileSource::ReadDirectOnce(FileOffset pos, void* dst, size_t len, size_t* outDone) {
+    size_t ignored = 0;
+    size_t& done = (outDone != nullptr) ? *outDone : ignored;
+    done = 0;
     if (handle_ == nullptr) {
         lastError_ = ERROR_INVALID_HANDLE;
         return false;
@@ -145,6 +148,7 @@ bool FileSource::ReadDirectOnce(FileOffset pos, void* dst, size_t len) {
         }
         p += got;
         left -= got;
+        done += got;
     }
     return true;
 }
@@ -200,25 +204,31 @@ const unsigned char* FileSource::Page(FileOffset pos, FileOffset* outBase, int* 
 }
 
 bool FileSource::Read(FileOffset pos, void* dst, size_t len) {
-    if (len == 0) { return true; }
+    return ReadPartial(pos, dst, len) == len;
+}
+
+size_t FileSource::ReadPartial(FileOffset pos, void* dst, size_t len) {
+    if (len == 0) { return 0; }
     if (len >= static_cast<size_t>(kPageSize)) {
-        return ReadDirect(pos, dst, len);
+        size_t done = 0;
+        ReadDirect(pos, dst, len, &done);   // 失敗しても done までは読めている
+        return done;
     }
     unsigned char* p = static_cast<unsigned char*>(dst);
-    while (len > 0) {
+    size_t done = 0;
+    while (done < len) {
         FileOffset base = 0;
         int pageLen = 0;
         const unsigned char* page = Page(pos, &base, &pageLen);
-        if (page == nullptr) { return false; }
+        if (page == nullptr) { break; }   // 読めたページまでを返す
         const int off = static_cast<int>(pos - base);
         const size_t avail = static_cast<size_t>(pageLen - off);
-        const size_t n = (len < avail) ? len : avail;
-        std::memcpy(p, page + off, n);
-        p += n;
+        const size_t n = (len - done < avail) ? (len - done) : avail;
+        std::memcpy(p + done, page + off, n);
         pos += static_cast<FileOffset>(n);
-        len -= n;
+        done += n;
     }
-    return true;
+    return done;
 }
 
 bool FileSource::Write(FileOffset pos, const void* src, size_t len) {

@@ -21,6 +21,8 @@ class CStirlingOutputBar;
 #define WM_BGREP_SCAN (WM_APP + 0x20)   // wParam=未使用, lParam=(stirling::BgrepScanNotify*)
 #define WM_BGREP_HIT  (WM_APP + 0x21)   // wParam=未使用, lParam=(stirling::BgrepHitNotify*)
 #define WM_BGREP_DONE (WM_APP + 0x22)   // 走査完了（またはキャンセル）
+// 読取失敗でファイルの検索を打ち切った（移植版で追加。Issue #324）
+#define WM_BGREP_READFAIL (WM_APP + 0x23)   // wParam=未使用, lParam=(stirling::BgrepReadFailNotify*)
 
 // ワーカへ渡す走査ジョブ（ダイアログが所有し、ワーカ生存中は保持）。
 struct BgrepJob {
@@ -48,6 +50,7 @@ protected:
     afx_msg LRESULT OnScan(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnHit(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnDone(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnReadFail(WPARAM wParam, LPARAM lParam);
 
     BgrepJob            m_job;
     CStirlingOutputBar* m_outbar;

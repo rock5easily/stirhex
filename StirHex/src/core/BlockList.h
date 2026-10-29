@@ -102,8 +102,10 @@ public:
     //   データを持つノードはブロック全体、参照ノードは元ファイルのキャッシュページの範囲。
     //   読み取りに失敗したら false。参照ノードの窓は次に FileSource を使うまで有効。
     bool NodeWindow(const BlockNode* n, int off, NodeSpan* out) const;
-    // ノード n の [off, off+len) を dst へ複写する。失敗で false。
-    bool ReadNode(const BlockNode* n, int off, int len, void* dst) const;
+    // ノード n の [off, off+len) を dst へ複写し、先頭続きに複写できたバイト数（0..len）を
+    //   返す。参照ノードの読み取りが途中で失敗したら、読めたページまでの分（Issue #326）。
+    //   引数が範囲外なら 0。全部読めたかは戻り値 == len で判定する。
+    int ReadNode(const BlockNode* n, int off, int len, void* dst) const;
 
     // 構造の世代番号。ノードの連結・除去・長さ変更のたびに進む（NodeWindow の結果を
     //   保持する側が、ノードの解放・再利用を検知するために使う）。

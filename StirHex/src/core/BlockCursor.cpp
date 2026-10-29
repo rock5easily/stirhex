@@ -203,7 +203,8 @@ bool BlockCursor::Seek(FileOffset pos, int origin, FileOffset* outAbs) {
 //   原 BlockCursor_Read(0x0041b7fb) 同様、負値のガードは意図的に置いていない。
 //   全呼出側が非負を確定させてから呼ぶため、負値が渡る経路は存在しない。
 // 遅延読み込み(Issue #300): ノードの複写は BlockList::ReadNode を介す（参照ノードは
-//   元ファイルから読む）。読み取りに失敗したら、そこまでに読めたバイト数を返す。
+//   元ファイルから読む）。読み取りに失敗したら、そこまでに読めたバイト数を返す
+//   （ノードの途中で失敗しても、読めたページまでを含める。Issue #326）。
 FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
     unsigned char* dst = static_cast<unsigned char*>(dstv);
     if (curNode_ == nullptr) {
@@ -217,8 +218,9 @@ FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
     if (used - curOffset_ < count) {
         // 現ブロックの残り全部を読み、後続ブロックへ跨ぐ。
         const int first = used - curOffset_;
-        if (!list_->ReadNode(curNode_, curOffset_, first, dst)) {
-            return 0;
+        const int gotFirst = list_->ReadNode(curNode_, curOffset_, first, dst);
+        if (gotFirst != first) {
+            return gotFirst;
         }
         readTotal = first;
         count -= first;
@@ -227,8 +229,9 @@ FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
             int u2 = n->usedLen;
             // count < u2 のときのみ count 側を採るため int に収まる。
             int chunk = (count < u2) ? static_cast<int>(count) : u2;
-            if (!list_->ReadNode(n, 0, chunk, dst)) {
-                return readTotal;
+            const int got = list_->ReadNode(n, 0, chunk, dst);
+            if (got != chunk) {
+                return readTotal + got;
             }
             count -= chunk;
             readTotal += chunk;
@@ -240,10 +243,7 @@ FileOffset BlockCursor::Read(FileOffset count, void* dstv) {
     } else {
         // count <= used - curOffset_ のため int に収まる。
         const int n = static_cast<int>(count);
-        if (!list_->ReadNode(curNode_, curOffset_, n, dst)) {
-            return 0;
-        }
-        readTotal = n;
+        readTotal = list_->ReadNode(curNode_, curOffset_, n, dst);
     }
     return readTotal;
 }

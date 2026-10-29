@@ -14,6 +14,7 @@ BEGIN_MESSAGE_MAP(CBgrepStatusDlg, CDialog)
     ON_MESSAGE(WM_BGREP_SCAN, &CBgrepStatusDlg::OnScan)
     ON_MESSAGE(WM_BGREP_HIT, &CBgrepStatusDlg::OnHit)
     ON_MESSAGE(WM_BGREP_DONE, &CBgrepStatusDlg::OnDone)
+    ON_MESSAGE(WM_BGREP_READFAIL, &CBgrepStatusDlg::OnReadFail)
 END_MESSAGE_MAP()
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,15 @@ void SearchOneFile(BgrepJob* job, const CStringW& full) {
         stirling::FileOffset hit = 0;
         if (!cur.SearchPattern(job->pattern.data(), plen, &hit,
                                stirling::BlockCursor::kForward, pos, end)) {
+            // 読めずに打ち切った場合は「見つからない」と区別して知らせ、このファイルの
+            //   残りは検索しない（検索中に他プロセスが切り詰めた・範囲をロックした等。
+            //   Issue #324）。それまでのヒットは通知済み。
+            if (cur.ReadFailed()) {
+                stirling::BgrepReadFailNotify failed;
+                failed.path = full.GetString();
+                ::SendMessageW(job->notify, WM_BGREP_READFAIL, 0, (LPARAM)&failed);
+                return;
+            }
             if (end == total) { break; }  // 末尾まで検索し終えた
             pos = end - (plen - 1);       // 次の区間（= pos + kWindow）
             continue;
@@ -208,6 +218,18 @@ LRESULT CBgrepStatusDlg::OnHit(WPARAM /*wParam*/, LPARAM lParam) {
     SetDlgItemInt(IDC_BGREP_STAT_COUNT, m_hitCount);
     if (m_outbar != nullptr) {
         m_outbar->AddResult(CStringW(n->path), n->pos);   // 位置は 64bit のまま
+    }
+    return 0;
+}
+
+// 読取失敗通知（移植版で追加。Issue #324）。アクセス拒否と同じ形の行を追記する。
+//   lParam は送信側スタック上の BgrepReadFailNotify。
+LRESULT CBgrepStatusDlg::OnReadFail(WPARAM /*wParam*/, LPARAM lParam) {
+    const stirling::BgrepReadFailNotify* n = (const stirling::BgrepReadFailNotify*)lParam;
+    // 上限で打ち切った後の通知は捨てる（OnHit と同じ。打ち切りの行が最後になるように）。
+    if (n == nullptr || m_truncated) { return 0; }
+    if (m_outbar != nullptr) {
+        m_outbar->AddMessage(CStringW(n->path) + ui::LoadW(IDS_BGREP_READ_FAILED));
     }
     return 0;
 }

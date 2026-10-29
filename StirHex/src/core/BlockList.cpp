@@ -128,15 +128,16 @@ bool BlockList::NodeWindow(const BlockNode* n, int off, NodeSpan* out) const {
     return true;
 }
 
-bool BlockList::ReadNode(const BlockNode* n, int off, int len, void* dst) const {
-    if (n == nullptr || off < 0 || len < 0 || len > n->usedLen - off) { return false; }
-    if (len == 0) { return true; }
+int BlockList::ReadNode(const BlockNode* n, int off, int len, void* dst) const {
+    if (n == nullptr || off < 0 || len < 0 || len > n->usedLen - off) { return 0; }
+    if (len == 0) { return 0; }
     if (n->data != nullptr) {
         std::memmove(dst, n->data + off, static_cast<size_t>(len));
-        return true;
+        return len;
     }
-    if (!IsFileRef(n) || source_ == nullptr) { return false; }
-    return source_->Read(n->srcOffset + off, dst, static_cast<size_t>(len));
+    if (!IsFileRef(n) || source_ == nullptr) { return 0; }
+    // 戻り値は len 以下のため int に収まる。
+    return static_cast<int>(source_->ReadPartial(n->srcOffset + off, dst, static_cast<size_t>(len)));
 }
 
 BlockNode* BlockList::GetHead() const {

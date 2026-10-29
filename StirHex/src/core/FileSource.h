@@ -56,6 +56,10 @@ public:
     // pos から len バイトを dst へ読む。全バイト読めたときだけ true（範囲外も false）。
     //   ページ以上の長さはキャッシュを通さない。
     bool Read(FileOffset pos, void* dst, size_t len);
+    // Read と同じ読み方で、pos から先頭続きに読めたバイト数（0..len）を返す（Issue #326）。
+    //   途中で失敗したら、ページ単位（ページ以上の長さは成功した ReadFile 単位）で
+    //   そこまでに読めた分を返す。範囲外は読めた分まで（ページ以上の長さは 0）。
+    size_t ReadPartial(FileOffset pos, void* dst, size_t len);
 
     // 上書き保存（Issue #300）用。pos へ len バイト書く。Writable() のときだけ成功しうる。
     //   キャッシュは呼出側が InvalidateCache() で捨てること（書き終えるまで読み出さない前提）。
@@ -87,8 +91,10 @@ private:
         int len = 0;
         unsigned long long lastUse = 0;
     };
-    bool ReadDirect(FileOffset pos, void* dst, size_t len);
-    bool ReadDirectOnce(FileOffset pos, void* dst, size_t len);   // ReadDirect の本体（失敗を数えない）
+    // *outDone（省略可）には、失敗時も含めて dst の先頭へ読めたバイト数を格納する。
+    bool ReadDirect(FileOffset pos, void* dst, size_t len, size_t* outDone = nullptr);
+    // ReadDirect の本体（失敗を数えない）
+    bool ReadDirectOnce(FileOffset pos, void* dst, size_t len, size_t* outDone);
 
     // 開いたファイルの同一性の控え（Reopen で照合する）。
     struct Identity {
