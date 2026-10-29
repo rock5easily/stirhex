@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "runId": "20261029T152346Z-dd873b7608f0-e2e-x64-83862582",
+  "runAt": "2026-10-29T15:23:46.0000000+00:00",
+  "publishedAt": "2026-10-29T15:34:51.6793366+00:00",
+  "commit": "dd873b7608f06c7a916b7bd8bc0637724bb1a6f7",
+  "platform": "x64",
+  "testKind": "e2e",
+  "htmlSha256": "3b7a15d69d9190efeefcaf633d99f52b72eafef685cf1fbcb073e39d888383b4",
+  "xmlSha256": "c8c32403a772bb51fc5d4968e04054cd5ba007faf9df8e28d5d235aebf9d9602"
+}
